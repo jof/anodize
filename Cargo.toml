@@ -39,6 +39,8 @@ anyhow         = "1"
 # Logging
 tracing        = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+# PIN prompt (CLI only)
+rpassword      = "7"
 
 [workspace.package]
 version = "0.1.0"
