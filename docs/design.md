@@ -54,12 +54,16 @@ PKCS#11's `C_Initialize` is process-global and `cryptoki`'s `Session` contains a
 
 - `Pkcs11Hsm` is owned exclusively by a dedicated thread.
 - `HsmActor` wraps it with `SyncSender<HsmRequest>` rendezvous channels.
-- `HsmActor` is `Send + Sync` and can be shared freely across threads.
+- `HsmActor` is `Send + Sync + Clone`. Cloning gives a second handle to the same session — all requests are serialised on the actor thread, so sharing is safe.
 
 ```
 caller thread ──SyncSender<HsmRequest>──► hsm-actor thread (owns Pkcs11Hsm)
               ◄──SyncSender<Result<T>>───
 ```
+
+### Multiple Pkcs11Hsm instances
+
+`C_Initialize` returns `CKR_CRYPTOKI_ALREADY_INITIALIZED` when called a second time in the same process. `Pkcs11Hsm::new` treats this as success — the library is already running and the new context can issue C-level calls normally. This allows unit tests and binaries that create more than one `Pkcs11Hsm` (e.g., opening two different tokens) to work without special handling.
 
 ### Two binaries
 
@@ -111,17 +115,24 @@ pub trait Hsm: Send {
 
 Implementations:
 - `Pkcs11Hsm` — production + dev. One backend covers SoftHSM2 and YubiHSM 2.
-- `HsmActor` — `Send + Sync` wrapper via actor thread (see above).
+- `HsmActor` — `Send + Sync + Clone` wrapper via actor thread (see above).
+
+`KeyHandle` stores both `priv_handle` and `pub_handle: Option<ObjectHandle>`. Storing the public key handle directly from `generate_key_pair` avoids a label-based object search that fails on some SoftHSM2 builds.
 
 ### X.509 signing bridge
 
 The x509-cert builder requires a signer that implements `signature::Keypair` + `spki::DynSignatureAlgorithmIdentifier`. We bridge the `Hsm` trait to these via `P384HsmSigner<H: Hsm>`:
 
 - Stores a `p384::ecdsa::VerifyingKey` (parsed from `hsm.public_key_der()` at construction time).
-- `try_sign(msg)` calls `hsm.sign(key, EcdsaSha384, msg)` → parses the 96-byte P1363 result → converts to DER-encoded `ecdsa::der::Signature<NistP384>`.
-- P1363 → DER: `ecdsa::Signature::from_slice(bytes)?.to_der()`
+- `try_sign(msg)` pre-hashes `msg` with SHA-384 in Rust, then calls `hsm.sign(key, EcdsaSha384, digest)` using raw `CKM_ECDSA`. The returned 96-byte P1363 result is converted to DER via `p384::ecdsa::Signature::try_from(bytes)?.to_der()`.
 
-The HSM signs hash-then-sign via `CKM_ECDSA_SHA384`; the raw message bytes are passed to `sign()`.
+Pre-hashing in Rust rather than using `CKM_ECDSA_SHA384` is necessary because SoftHSM2 2.6.x (the Ubuntu package version) returns `CKR_MECHANISM_INVALID` for the combined hash-sign mechanism. `CKM_ECDSA` with a pre-computed digest works on both SoftHSM2 and YubiHSM 2.
+
+### CRL construction
+
+`x509-cert 0.2` has no `CrlBuilder`. `issue_crl` manually constructs `TbsCertList`, DER-encodes it, signs the raw bytes with `P384HsmSigner`, and assembles the final `CertificateList` structure. This is the same pattern the x509-cert builder uses internally for certificates.
+
+`public_key_der` has a fallback path for `CKA_PUBLIC_KEY_INFO` returning empty (SoftHSM2 2.6.x on some builds): it reads `CKA_EC_PARAMS` and `CKA_EC_POINT` and assembles a DER SPKI manually.
 
 ---
 
@@ -147,8 +158,8 @@ The HSM signs hash-then-sign via `CKM_ECDSA_SHA384`; the raw message bytes are p
 ## Algorithm decisions
 
 - **Default algorithm**: ECDSA P-384. Safer enterprise pick than Ed25519 for relying-party compatibility. YubiHSM 2 supports it. SoftHSM2 supports it.
-- **Root validity**: 20 years. Hardcoded constant — not a config value. Pick once.
-- **Signature format**: P1363 from HSM (`r ‖ s`, 96 bytes for P-384), converted to DER-encoded `ECDSA-Sig-Value` for embedding in X.509.
+- **Root validity**: configurable (`validity_days: u32` argument to `build_root_cert`). Ceremony tooling defaults to 7305 days (20 years).
+- **Signature format**: pre-hash with SHA-384 in Rust; sign digest with raw `CKM_ECDSA`; result is 96-byte P1363 (`r ‖ s`), converted to DER-encoded `ECDSA-Sig-Value` for embedding in X.509.
 - **Token identification**: by label, not slot index. YubiHSM slot indices are unstable across USB reconnects.
 
 ---
@@ -222,16 +233,15 @@ The operator interaction surface is entirely the numbered ratatui TUI menu.
 - `softhsm2.conf.template` fixture
 - Integration tests: generate P-384 keypair, sign, verify signature with `p384` crate
 
-### Phase 2 — CA core (in progress)
-- `anodize-config`: parse `profile.toml`, `PinSource` variants
-- `anodize-ca`: `build_root_cert`, `sign_csr`, `issue_crl`
-- `P384HsmSigner` bridging `Hsm` to x509-cert builder
-- End-to-end verified with `openssl verify` / `step certificate verify`
+### Phase 2 — CA core (done)
+- `anodize-config`: `Profile` / `CaConfig` / `HsmConfig` structs; `PinSource` with custom `Deserialize` for `"prompt"` / `"env:VAR"` / `"file:/path"`; runtime `tracing::warn` for non-`prompt` sources
+- `anodize-ca`: `P384HsmSigner<H: Hsm>` bridging `Hsm` to x509-cert builder; `build_root_cert`, `sign_intermediate_csr` (CSR sig verified before field parsing, extension allowlist enforced, all others rejected), `issue_crl`
+- SoftHSM2 integration tests: `build_root_cert_roundtrip`, `sign_csr_happy_path`, `csr_with_extra_extension_rejected`, `issue_crl_encodes_revoked_serials`
 
-### Phase 3 — Audit log
-- `anodize-audit`: `Record` struct, JSONL append, `verify-log` walker
-- Genesis `prev_hash` = SHA-256(root_cert_DER)
-- Corruption test: single-byte flip causes failure at correct record
+### Phase 3 — Audit log (done)
+- `anodize-audit`: `Record` struct, JSONL append, `AuditLog::create/open/append`, `verify_log` free function
+- `genesis_hash(root_cert_der)` = SHA-256(root cert DER) — ties genesis to the specific ceremony
+- Corruption test: single-byte flip detected at correct record index
 
 ### Phase 4 — CLI + ceremony TUI
 - `anodize-cli`: wire all crates, clap subcommands, confirmation prompts
@@ -256,7 +266,7 @@ The operator interaction surface is entirely the numbered ratatui TUI menu.
 ## Open questions (tracked)
 
 1. **Key backup**: YubiHSM wrapped-export to a second YubiHSM. M-of-N custodians for the wrap key? How many devices? Policy question, but shapes the `init` ceremony runbook.
-2. **CRL hosting**: Anodize generates the CRL; something else hosts it. The URL must be committed at intermediate-signing time in the CDP extension — needs an answer before Phase 2 ships.
+2. ~~**CRL hosting**~~: Resolved — `cdp_url` is an optional field in `[ca]` config and passed explicitly to `sign_intermediate_csr`. The operator supplies the URL at signing time; Anodize embeds it in the CDP extension.
 3. **Entropy on the ISO**: `jitterentropy` + hardware TRNG. Confirm the target hardware has a TRNG the kernel will use.
 
 ---
