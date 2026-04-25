@@ -72,8 +72,9 @@ struct App {
     cert_der: Option<Vec<u8>>,
     fingerprint: Option<String>,
 
-    // Masked PIN buffer
+    // Masked PIN buffer — display length is randomised noise, not pin_buf.len()
     pin_buf: String,
+    pin_display_len: usize,
 }
 
 impl App {
@@ -89,6 +90,7 @@ impl App {
             cert_der: None,
             fingerprint: None,
             pin_buf: String::new(),
+            pin_display_len: 0,
         }
     }
 
@@ -105,13 +107,20 @@ impl App {
             AppState::EnterPin => match code {
                 KeyCode::Char(c) => {
                     self.pin_buf.push(c);
+                    self.pin_display_len = noise_display_len();
                 }
                 KeyCode::Backspace => {
                     self.pin_buf.pop();
+                    self.pin_display_len = if self.pin_buf.is_empty() {
+                        0
+                    } else {
+                        noise_display_len()
+                    };
                 }
                 KeyCode::Enter => self.do_login(),
                 KeyCode::Esc => {
                     self.pin_buf.clear();
+                    self.pin_display_len = 0;
                     self.state = AppState::Welcome;
                     self.status.clear();
                 }
@@ -342,6 +351,17 @@ impl App {
     }
 }
 
+/// Returns a random display length in [8, 20] using subsecond nanos as noise.
+/// No correlation to actual PIN length — prevents shoulder-surf length disclosure.
+fn noise_display_len() -> usize {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as usize;
+    8 + (nanos % 13)
+}
+
 fn sha256_fingerprint(der: &[u8]) -> String {
     let hash = Sha256::digest(der);
     hash.iter()
@@ -410,7 +430,7 @@ fn build_body(app: &App) -> Text<'static> {
         ],
 
         AppState::EnterPin => {
-            let stars = "*".repeat(app.pin_buf.len());
+            let stars = "*".repeat(app.pin_display_len);
             vec![
                 String::new(),
                 format!("  PIN: {stars}"),
