@@ -71,6 +71,26 @@ Two implementations:
 - **CSR policy**: verify the CSR signature before parsing any fields. Only copy a fixed extension allowlist (BasicConstraints, KeyUsage, SKID, AKID, CDP). Reject all others.
 - **PIN source warning**: `pin_source = env:` or `file:` must emit a runtime warning; `prompt` is the only safe ceremony value.
 
+## Development workflow
+
+### Tests as you go
+
+Each new function or module gets a test in the same commit that introduces it — not deferred to later. Follow the pattern already established in `anodize-hsm`:
+
+- **Unit tests** (`#[cfg(test)]` mod at the bottom of the source file) for pure logic: parsing, validation, error paths, hash-chain arithmetic.
+- **Integration tests** (`crates/<name>/tests/`) for anything that crosses a crate boundary or talks to SoftHSM2. Mirror the softhsm fixture pattern from `crates/anodize-hsm/tests/softhsm_basic.rs` — `init_test_token(label)` + env-var skip guard.
+- Negative tests matter here: malformed CSRs, corrupted audit log bytes, wrong PIN, path-len overflow. Add them alongside the happy-path test.
+
+### Commit cadence
+
+Commit when a coherent unit of functionality works and its tests pass — not at the end of a session. Natural boundaries:
+
+- A new public function + its tests = one commit
+- A complete module (e.g., all of `anodize-config`) = one commit
+- A security invariant enforcement (e.g., CSR signature check before field parsing) = its own commit, clearly named
+
+Run `make test && make lint` before each commit. Don't batch unrelated changes.
+
 ### `deny.toml`
 
 License allow-list is strict. `RUSTSEC-2024-0436` (`paste` crate, transitive via `cryptoki`) is explicitly ignored as unmaintained-but-safe. Any new advisory ignores need a comment explaining why.
