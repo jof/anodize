@@ -1,0 +1,4 @@
+directories.tokendir = $TOKEN_DIR
+objectstore.backend = file
+log.level = ERROR
+slots.removable = false

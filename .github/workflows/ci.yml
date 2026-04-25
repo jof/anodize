@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: Build and test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rustup (no-op on real GitHub runners)
+        run: |
+          if ! command -v rustup &>/dev/null; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+            echo "${HOME}/.cargo/bin" >> "$GITHUB_PATH"
+          fi
+
+      - name: Pin Rust toolchain from rust-toolchain.toml
+        run: rustup show
+
+      - name: Install cargo-deny
+        run: |
+          tag=$(curl -sL "https://api.github.com/repos/EmbarkStudios/cargo-deny/releases/latest" \
+                | grep '"tag_name"' | cut -d'"' -f4)
+          tmp=$(mktemp -d)
+          curl -sL --fail \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${tag}/cargo-deny-${tag}-x86_64-unknown-linux-musl.tar.gz" \
+            | tar xz -C "$tmp"
+          mv "$tmp"/cargo-deny-*/cargo-deny /usr/local/bin/cargo-deny
+          rm -rf "$tmp"
+
+      - name: Install SoftHSM2
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y softhsm2
+          echo "SOFTHSM2_MODULE=/usr/lib/softhsm/libsofthsm2.so" >> "$GITHUB_ENV"
+
+      - name: Prepare SoftHSM config
+        run: |
+          TOKEN_DIR="$(pwd)/target/test-softhsm/tokens"
+          CONF="$(pwd)/target/test-softhsm/softhsm2.conf"
+          mkdir -p "$TOKEN_DIR"
+          sed "s|\$TOKEN_DIR|$TOKEN_DIR|g" \
+            tests/softhsm-fixtures/softhsm2.conf.template > "$CONF"
+          echo "SOFTHSM2_CONF=$CONF" >> "$GITHUB_ENV"
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: cargo test
+        # --test-threads=1: PKCS#11 C_Initialize may only be called once per
+        # process; parallel threads in the same test binary will SIGSEGV.
+        run: cargo test --all -- --test-threads=1
+
+      - name: cargo deny
+        run: cargo deny check

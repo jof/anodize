@@ -1,0 +1,16 @@
+[package]
+name = "anodize-hsm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+cryptoki.workspace = true
+secrecy.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+p384.workspace = true
+secrecy.workspace = true

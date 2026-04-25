@@ -1,0 +1,19 @@
+[package]
+name = "anodize-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "anodize"
+path = "src/main.rs"
+
+[dependencies]
+anodize-hsm    = { path = "../anodize-hsm" }
+anodize-ca     = { path = "../anodize-ca" }
+anodize-audit  = { path = "../anodize-audit" }
+anodize-config = { path = "../anodize-config" }
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

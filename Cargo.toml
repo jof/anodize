@@ -1,0 +1,44 @@
+[workspace]
+members = [
+    "crates/anodize-hsm",
+    "crates/anodize-ca",
+    "crates/anodize-audit",
+    "crates/anodize-config",
+    "crates/anodize-tui",
+    "crates/anodize-cli",
+]
+resolver = "2"
+
+[workspace.dependencies]
+# HSM / crypto
+cryptoki       = "0.7"
+# X.509
+x509-cert      = "0.2"
+der            = "0.7"
+spki           = "0.7"
+# CLI (dev binary only)
+clap           = { version = "4", features = ["derive"] }
+# TUI (ceremony binary)
+ratatui        = "0.29"
+crossterm      = "0.28"
+# Config
+serde          = { version = "1", features = ["derive"] }
+toml           = "0.8"
+# Secrets / crypto primitives
+secrecy        = "0.8"
+sha2           = "0.10"
+# ECDSA verification (tests + anodize-ca)
+p384           = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+# Time (date arithmetic for validity periods)
+time           = { version = "0.3", features = ["formatting", "macros"] }
+# Error handling
+thiserror      = "2"
+anyhow         = "1"
+# Logging
+tracing        = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
