@@ -75,7 +75,9 @@ in
 
   # ── Boot ──────────────────────────────────────────────────────────────────
 
-  boot.kernelParams = [ "quiet" ];
+  # nomodeset: disables KMS/DRM so QEMU's SDL display can capture the
+  # framebuffer.  On real hardware remove this — the GPU driver is preferable.
+  boot.kernelParams = [ "nomodeset" ];
 
   # ── Packages ──────────────────────────────────────────────────────────────
 
@@ -158,7 +160,7 @@ in
       ExecStart        = "${ceremonyLaunch}";
       Restart          = "on-failure";
       RestartSec       = "3s";
-      # Attach to tty1 so the TUI renders on the physical console.
+      # Attach to tty1 so the TUI renders on the physical console / QEMU SDL.
       StandardInput    = "tty";
       StandardOutput   = "tty";
       StandardError    = "tty";
@@ -168,7 +170,7 @@ in
     };
   };
 
-  # Suppress getty on tty1 — the systemd service above owns that console.
+  # Suppress getty on tty1 — the ceremony service owns the primary console.
   systemd.services."getty@tty1".enable = false;
 
   # ── Disable unnecessary services ──────────────────────────────────────────
@@ -177,5 +179,5 @@ in
 
   # ── Misc ──────────────────────────────────────────────────────────────────
 
-  system.stateVersion = "24.11";
+  system.stateVersion = "25.11";
 }
