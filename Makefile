@@ -1,8 +1,22 @@
-.PHONY: ci test fmt lint deny
+.PHONY: ci nix-check nix-iso test fmt lint deny
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
 	act push --job check
+
+# Run the Nix build job locally via act + Docker (same philosophy as 'make ci')
+nix-check:
+	act push --job nix
+
+# Build the bootable ceremony ISO via Docker.
+# Requires --privileged for squashfs/bootloader tooling.
+# This is a release-only step; it takes 10-30 minutes on first run.
+nix-iso:
+	docker run --rm --privileged \
+		-v "$(CURDIR):/src" \
+		-w /src \
+		nixos/nix \
+		nix --extra-experimental-features 'nix-command flakes' build .#iso
 
 # Inner-loop shortcuts (no Docker overhead)
 fmt:

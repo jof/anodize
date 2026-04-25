@@ -188,9 +188,16 @@ Reproducibility means that any party with the same source revision can independe
 
 ### How
 
-The ISO is built with **Nix** (`nix/flake.nix`). The Nix store is content-addressed: every package is identified by a cryptographic hash of its inputs (source + build recipe + all transitive dependencies). Two machines building the same flake lock file produce byte-identical outputs.
+The ISO is built with **Nix** (`flake.nix` at the workspace root). The Nix store is content-addressed: every package is identified by a cryptographic hash of its inputs (source + build recipe + all transitive dependencies). Two machines building the same flake lock file produce byte-identical outputs.
 
-`nix build .#iso` outputs:
+No Nix installation is required on the developer's host. Builds run in Docker:
+
+```sh
+make nix-check      # nix build .#anodize-ceremony  (via act + Docker, same as make ci)
+make nix-iso        # nix build .#iso               (nixos/nix image, --privileged, release-only)
+```
+
+`nix build .#iso` outputs an ISO image. For release:
 - `anodize-YYYYMMDD.iso`
 - `anodize-YYYYMMDD.iso.sha256`
 - `anodize-YYYYMMDD.iso.sig` (detached signature)
@@ -249,11 +256,15 @@ The operator interaction surface is entirely the numbered ratatui TUI menu.
 - PIN input masked with random-length noise: display length ∈ [8, 20], independent of actual PIN length, refreshed on every keystroke. Prevents shoulder-surf length disclosure without requiring a CSPRNG — `SystemTime::now().subsec_nanos()` is sufficient for a human-visible display. Field shows 0 stars only when empty (confirms cleared), nonzero otherwise.
 - Runbooks (`docs/ceremony-init.md`, `docs/ceremony-sign.md`): deferred to Phase 5
 
-### Phase 5 — Live ISO
-- `nix/flake.nix` + `nix/iso.nix`
-- Minimal NixOS: no network, read-only root, tmpfs, udev for YubiHSM USB
-- Reproducible: `nix build .#iso` is byte-identical across machines
-- udev rule: `SUBSYSTEM=="usb", ATTR{idVendor}=="1050", MODE="0660", GROUP="wheel"`
+### Phase 5 — Live ISO (done)
+- `flake.nix` (workspace root) + `nix/iso.nix`: Nix flake with `crane` + `rust-overlay` builds `anodize-ceremony` and `anodize` packages; `nix build .#iso` produces the bootable image
+- Minimal NixOS ISO: no network stack, ephemeral tmpfs, read-only squashfs root; packages: `anodize-ceremony`, `softhsm`, `opensc`
+- udev rule: `SUBSYSTEM=="usb", ATTR{idVendor}=="1050", MODE="0660", GROUP="wheel"` — grants ceremony user access to YubiHSM 2 without requiring root
+- Auto-login → `anodize-ceremony` launches on tty1 via systemd service; no shell exposed to operator
+- udisks2 automounts USB; launcher scans `/run/media/ceremony/*/profile.toml` and execs the TUI with the found profile
+- Sample profile at `/etc/anodize/profile.example.toml` on the ISO
+- **Builds run in Docker** (same philosophy as Rust CI): `make nix-check` runs the `nix` CI job via `act`; `make nix-iso` runs `nixos/nix` Docker image with `--privileged` for release ISO builds
+- Runbooks: `docs/ceremony-init.md` (root key ceremony), `docs/ceremony-sign.md` (intermediate signing + CRL)
 
 ### Phase 6 — Production hardening (ongoing)
 - `cargo-deny` + `cargo-vet` in CI
