@@ -43,14 +43,11 @@ jobs:
           sudo apt-get install -y softhsm2
           echo "SOFTHSM2_MODULE=/usr/lib/softhsm/libsofthsm2.so" >> "$GITHUB_ENV"
 
-      - name: Prepare SoftHSM config
+      - name: Export SoftHSM2 conf path
+        # init_test_token() writes the conf file; we just need SOFTHSM2_CONF set in the
+        # environment so libsofthsm2.so knows where to find it at runtime.
         run: |
-          TOKEN_DIR="$(pwd)/target/test-softhsm/tokens"
-          CONF="$(pwd)/target/test-softhsm/softhsm2.conf"
-          mkdir -p "$TOKEN_DIR"
-          sed "s|\$TOKEN_DIR|$TOKEN_DIR|g" \
-            tests/softhsm-fixtures/softhsm2.conf.template > "$CONF"
-          echo "SOFTHSM2_CONF=$CONF" >> "$GITHUB_ENV"
+          echo "SOFTHSM2_CONF=$(pwd)/target/test-softhsm/softhsm2.conf" >> "$GITHUB_ENV"
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -59,8 +56,8 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: cargo test
-        # --test-threads=1: PKCS#11 C_Initialize may only be called once per
-        # process; parallel threads in the same test binary will SIGSEGV.
+        # --test-threads=1: init_test_token() rm-rf's and recreates the shared
+        # target/test-softhsm/ directory; parallel threads would stomp each other.
         run: cargo test --all -- --test-threads=1
 
       - name: cargo deny

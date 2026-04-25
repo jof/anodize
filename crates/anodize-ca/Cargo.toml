@@ -9,6 +9,13 @@ anodize-hsm = { path = "../anodize-hsm" }
 x509-cert.workspace = true
 der.workspace = true
 spki.workspace = true
+p384.workspace = true
 time.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+anodize-hsm = { path = "../anodize-hsm" }
+p384.workspace = true
+secrecy.workspace = true
+anyhow.workspace = true

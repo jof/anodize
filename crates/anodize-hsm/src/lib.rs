@@ -6,6 +6,7 @@ use cryptoki::{
     types::AuthPin,
 };
 use secrecy::{ExposeSecret, SecretString};
+use sha2::Digest;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -24,9 +25,18 @@ pub enum HsmError {
 
 pub type Result<T> = std::result::Result<T, HsmError>;
 
-/// Opaque handle to a key object on the HSM (stores the private key handle).
+/// Opaque handle to a key pair on the HSM.
+///
+/// Stores the private key handle (always present) and, when the pair was
+/// generated in this session, the matching public key handle. Having the
+/// public handle lets `public_key_der` read `CKA_PUBLIC_KEY_INFO` directly
+/// rather than searching for the public object by label (which can fail on
+/// some SoftHSM2 builds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct KeyHandle(pub(crate) cryptoki::object::ObjectHandle);
+pub struct KeyHandle {
+    pub(crate) priv_handle: cryptoki::object::ObjectHandle,
+    pub(crate) pub_handle: Option<cryptoki::object::ObjectHandle>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeySpec {
@@ -79,7 +89,17 @@ impl Pkcs11Hsm {
     /// label matches `token_label`. Does not log in; call `login()` next.
     pub fn new(module_path: &std::path::Path, token_label: &str) -> Result<Self> {
         let ctx = Pkcs11::new(module_path)?;
-        ctx.initialize(CInitializeArgs::OsThreads)?;
+        match ctx.initialize(CInitializeArgs::OsThreads) {
+            Ok(()) => {}
+            // A second Pkcs11Hsm in the same process reuses the already-initialized
+            // library. PKCS#11 spec §11.4: the library stays initialized until the
+            // last C_Finalize call, so this is safe to ignore.
+            Err(cryptoki::error::Error::Pkcs11(
+                cryptoki::error::RvError::CryptokiAlreadyInitialized,
+                _,
+            )) => {}
+            Err(e) => return Err(HsmError::Pkcs11(e)),
+        }
 
         let slot = ctx
             .get_slots_with_token()?
@@ -102,7 +122,14 @@ impl Pkcs11Hsm {
     /// List all slots with a token present — useful for diagnostics and tests.
     pub fn list_slots(module_path: &std::path::Path) -> Result<Vec<cryptoki::slot::Slot>> {
         let ctx = Pkcs11::new(module_path)?;
-        ctx.initialize(CInitializeArgs::OsThreads)?;
+        match ctx.initialize(CInitializeArgs::OsThreads) {
+            Ok(())
+            | Err(cryptoki::error::Error::Pkcs11(
+                cryptoki::error::RvError::CryptokiAlreadyInitialized,
+                _,
+            )) => {}
+            Err(e) => return Err(HsmError::Pkcs11(e)),
+        }
         Ok(ctx.get_slots_with_token()?)
     }
 
@@ -131,15 +158,28 @@ impl Hsm for Pkcs11Hsm {
     }
 
     fn find_key(&self, label: &str) -> Result<KeyHandle> {
-        let handles = self.session().find_objects(&[
+        let priv_handles = self.session().find_objects(&[
             Attribute::Label(label.as_bytes().to_vec()),
             Attribute::Class(ObjectClass::PRIVATE_KEY),
         ])?;
-        handles
+        let priv_handle = priv_handles
             .into_iter()
             .next()
-            .map(KeyHandle)
-            .ok_or_else(|| HsmError::KeyNotFound(label.to_string()))
+            .ok_or_else(|| HsmError::KeyNotFound(label.to_string()))?;
+
+        let pub_handle = self
+            .session()
+            .find_objects(&[
+                Attribute::Label(label.as_bytes().to_vec()),
+                Attribute::Class(ObjectClass::PUBLIC_KEY),
+            ])?
+            .into_iter()
+            .next();
+
+        Ok(KeyHandle {
+            priv_handle,
+            pub_handle,
+        })
     }
 
     fn generate_keypair(&mut self, label: &str, spec: KeySpec) -> Result<KeyHandle> {
@@ -167,60 +207,147 @@ impl Hsm for Pkcs11Hsm {
             Attribute::Label(label.as_bytes().to_vec()),
         ];
 
-        let (_, priv_handle) = self.session().generate_key_pair(
+        let (pub_handle, priv_handle) = self.session().generate_key_pair(
             &Mechanism::EccKeyPairGen,
             &pub_template,
             &priv_template,
         )?;
 
-        Ok(KeyHandle(priv_handle))
+        Ok(KeyHandle {
+            priv_handle,
+            pub_handle: Some(pub_handle),
+        })
     }
 
     fn sign(&self, key: KeyHandle, mech: SignMech, data: &[u8]) -> Result<Vec<u8>> {
-        let mechanism = match mech {
-            SignMech::EcdsaSha384 => Mechanism::EcdsaSha384,
-            SignMech::EcdsaSha256 => Mechanism::EcdsaSha256,
+        // Pre-hash the data in software and sign the digest with CKM_ECDSA (raw).
+        // CKM_ECDSA_SHA{256,384} are not universally supported across PKCS#11
+        // implementations (e.g. SoftHSM2 2.6.x on Ubuntu). Pre-hashing here
+        // produces an identical signature and avoids the mechanism support issue.
+        let digest: Vec<u8> = match mech {
+            SignMech::EcdsaSha384 => sha2::Sha384::digest(data).to_vec(),
+            SignMech::EcdsaSha256 => sha2::Sha256::digest(data).to_vec(),
             _ => return Err(HsmError::UnsupportedKeySpec),
         };
-        Ok(self.session().sign(&mechanism, key.0, data)?)
+        Ok(self
+            .session()
+            .sign(&Mechanism::Ecdsa, key.priv_handle, &digest)?)
     }
 
     fn public_key_der(&self, key: KeyHandle) -> Result<Vec<u8>> {
         let session = self.session();
 
-        // Try CKA_PUBLIC_KEY_INFO on the private key handle (PKCS#11 3.0).
-        // SoftHSM2 2.6+ and YubiHSM 2 both support this.
-        let attrs = session.get_attributes(key.0, &[AttributeType::PublicKeyInfo])?;
+        // Resolve the public key object handle, preferring the one stored at
+        // key-generation time (avoids a label-based search that can fail on some
+        // SoftHSM2 builds when CKA_LABEL matching behaves unexpectedly).
+        let pub_handle = match key.pub_handle {
+            Some(h) => h,
+            None => {
+                // Fallback: search by label on the private key.
+                let label = {
+                    let attrs = session.get_attributes(key.priv_handle, &[AttributeType::Label])?;
+                    match attrs.into_iter().next() {
+                        Some(Attribute::Label(bytes)) => {
+                            String::from_utf8_lossy(&bytes).into_owned()
+                        }
+                        _ => return Err(HsmError::KeyNotFound("(no label)".into())),
+                    }
+                };
+                session
+                    .find_objects(&[
+                        Attribute::Label(label.as_bytes().to_vec()),
+                        Attribute::Class(ObjectClass::PUBLIC_KEY),
+                    ])?
+                    .into_iter()
+                    .next()
+                    .ok_or(HsmError::KeyNotFound(label))?
+            }
+        };
+
+        // Try CKA_PUBLIC_KEY_INFO (PKCS#11 3.0 attribute on public key objects).
+        // SoftHSM2 2.6.x on Ubuntu returns this as empty for EC keys; fall through if so.
+        let attrs = session.get_attributes(pub_handle, &[AttributeType::PublicKeyInfo])?;
         if let Some(Attribute::PublicKeyInfo(der)) = attrs.into_iter().next() {
             if !der.is_empty() {
                 return Ok(der);
             }
         }
 
-        // Fallback: find the corresponding public key object by label and
-        // read CKA_PUBLIC_KEY_INFO from that object.
-        let label = {
-            let attrs = session.get_attributes(key.0, &[AttributeType::Label])?;
-            match attrs.into_iter().next() {
-                Some(Attribute::Label(bytes)) => String::from_utf8_lossy(&bytes).into_owned(),
-                _ => return Err(HsmError::KeyNotFound("(no label)".into())),
+        // Fallback: build SPKI manually from CKA_EC_PARAMS and CKA_EC_POINT.
+        // Needed for SoftHSM2 2.6.x builds that do not populate CKA_PUBLIC_KEY_INFO.
+        let attrs = session.get_attributes(
+            pub_handle,
+            &[AttributeType::EcParams, AttributeType::EcPoint],
+        )?;
+        let mut ec_params_opt = None;
+        let mut ec_point_opt = None;
+        for attr in attrs {
+            match attr {
+                Attribute::EcParams(b) => ec_params_opt = Some(b),
+                Attribute::EcPoint(b) => ec_point_opt = Some(b),
+                _ => {}
             }
+        }
+        let ec_params =
+            ec_params_opt.ok_or_else(|| HsmError::KeyNotFound("CKA_EC_PARAMS missing".into()))?;
+        let ec_point =
+            ec_point_opt.ok_or_else(|| HsmError::KeyNotFound("CKA_EC_POINT missing".into()))?;
+
+        Ok(ec_spki_from_params_and_point(&ec_params, &ec_point))
+    }
+}
+
+// id-ecPublicKey OID: 1.2.840.10045.2.1
+const ID_EC_PUBLIC_KEY_OID: &[u8] = &[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
+
+/// Build a DER SubjectPublicKeyInfo for an EC public key from raw PKCS#11 attributes.
+///
+/// `ec_params_der` is the DER-encoded curve OID (from CKA_EC_PARAMS).
+/// `ec_point_raw` is the EC point from CKA_EC_POINT; some implementations wrap
+/// it in a DER OCTET STRING — we unwrap if needed.
+fn ec_spki_from_params_and_point(ec_params_der: &[u8], ec_point_raw: &[u8]) -> Vec<u8> {
+    // Some PKCS#11 implementations return CKA_EC_POINT wrapped in a DER OCTET STRING.
+    // Heuristic: if the bytes look like `04 <len> 04 ...`, strip the outer wrapper.
+    let point: &[u8] =
+        if ec_point_raw.len() > 2 && ec_point_raw[0] == 0x04 && ec_point_raw[2] == 0x04 {
+            let inner_len = ec_point_raw[1] as usize;
+            if inner_len + 2 == ec_point_raw.len() {
+                &ec_point_raw[2..] // strip DER OCTET STRING tag + length
+            } else {
+                ec_point_raw
+            }
+        } else {
+            ec_point_raw
         };
 
-        let pub_handles = session.find_objects(&[
-            Attribute::Label(label.as_bytes().to_vec()),
-            Attribute::Class(ObjectClass::PUBLIC_KEY),
-        ])?;
-        let pub_handle = pub_handles
-            .into_iter()
-            .next()
-            .ok_or_else(|| HsmError::KeyNotFound(label.clone()))?;
+    // AlgorithmIdentifier SEQUENCE { id-ecPublicKey OID, ec_params_der }
+    let alg_inner = [ID_EC_PUBLIC_KEY_OID, ec_params_der].concat();
+    let alg_id = der_sequence(&alg_inner);
 
-        let attrs = session.get_attributes(pub_handle, &[AttributeType::PublicKeyInfo])?;
-        match attrs.into_iter().next() {
-            Some(Attribute::PublicKeyInfo(der)) if !der.is_empty() => Ok(der),
-            _ => Err(HsmError::KeyNotFound(label)),
-        }
+    // BIT STRING: 0x00 (no unused bits) || point
+    let mut bs_content = vec![0x00u8];
+    bs_content.extend_from_slice(point);
+    let mut bit_string = vec![0x03];
+    bit_string.extend(der_len(bs_content.len()));
+    bit_string.extend(bs_content);
+
+    der_sequence(&[alg_id, bit_string].concat())
+}
+
+fn der_sequence(content: &[u8]) -> Vec<u8> {
+    let mut out = vec![0x30u8];
+    out.extend(der_len(content.len()));
+    out.extend_from_slice(content);
+    out
+}
+
+fn der_len(n: usize) -> Vec<u8> {
+    if n < 128 {
+        vec![n as u8]
+    } else if n < 256 {
+        vec![0x81, n as u8]
+    } else {
+        vec![0x82, (n >> 8) as u8, (n & 0xff) as u8]
     }
 }
 
@@ -278,7 +405,12 @@ fn actor_loop(mut hsm: Pkcs11Hsm, rx: std::sync::mpsc::Receiver<HsmRequest>) {
             HsmRequest::GenerateKeypair { label, spec, tx } => {
                 let _ = tx.send(hsm.generate_keypair(&label, spec));
             }
-            HsmRequest::Sign { key, mech, data, tx } => {
+            HsmRequest::Sign {
+                key,
+                mech,
+                data,
+                tx,
+            } => {
                 let _ = tx.send(hsm.sign(key, mech, &data));
             }
             HsmRequest::PublicKeyDer { key, tx } => {
@@ -290,6 +422,10 @@ fn actor_loop(mut hsm: Pkcs11Hsm, rx: std::sync::mpsc::Receiver<HsmRequest>) {
 
 /// `Send + Sync` wrapper around `Pkcs11Hsm` that serialises all PKCS#11 calls
 /// onto a single dedicated thread via a rendezvous channel.
+///
+/// `Clone` gives a second handle to the same underlying session; callers share
+/// the session safely because all requests are serialised on the actor thread.
+#[derive(Clone)]
 pub struct HsmActor {
     tx: std::sync::mpsc::SyncSender<HsmRequest>,
 }

@@ -1,6 +1,6 @@
 use std::{env, fs, path::PathBuf, process::Command};
 
-use anodize_hsm::{HsmActor, Hsm, KeySpec, Pkcs11Hsm, SignMech};
+use anodize_hsm::{Hsm, HsmActor, KeySpec, Pkcs11Hsm, SignMech};
 
 /// Returns (module_path, conf_path) or skips the test if the env vars aren't set.
 fn softhsm_env() -> Option<(PathBuf, PathBuf)> {
@@ -78,8 +78,8 @@ fn open_session_by_token_label() {
 
     init_test_token("anodize-test");
 
-    let hsm = Pkcs11Hsm::new(&module, "anodize-test")
-        .expect("failed to open session by token label");
+    let hsm =
+        Pkcs11Hsm::new(&module, "anodize-test").expect("failed to open session by token label");
     drop(hsm);
 }
 
@@ -106,9 +106,7 @@ fn p384_keygen_sign_verify() {
         .expect("generate_keypair");
 
     let message = b"anodize root CA ceremony -- test vector";
-    let sig_bytes = hsm
-        .sign(key, SignMech::EcdsaSha384, message)
-        .expect("sign");
+    let sig_bytes = hsm.sign(key, SignMech::EcdsaSha384, message).expect("sign");
 
     // P1363 signature for P-384 is 96 bytes (48 bytes r || 48 bytes s).
     assert_eq!(
@@ -123,21 +121,21 @@ fn p384_keygen_sign_verify() {
 
     // Verify using the p384 crate (hash-then-verify, matching CKM_ECDSA_SHA384).
     use p384::{
-        ecdsa::{
-            signature::Verifier,
-            Signature, VerifyingKey,
-        },
+        ecdsa::{signature::Verifier, Signature, VerifyingKey},
         pkcs8::DecodePublicKey,
     };
 
     let vk = VerifyingKey::from_public_key_der(&spki_der)
         .expect("failed to decode SPKI DER into P-384 VerifyingKey");
 
-    let sig = Signature::try_from(sig_bytes.as_slice())
-        .expect("failed to parse P1363 signature");
+    let sig = Signature::try_from(sig_bytes.as_slice()).expect("failed to parse P1363 signature");
 
-    vk.verify(message, &sig).expect("signature verification failed");
-    println!("P-384 keygen+sign+verify: OK (SPKI {} bytes)", spki_der.len());
+    vk.verify(message, &sig)
+        .expect("signature verification failed");
+    println!(
+        "P-384 keygen+sign+verify: OK (SPKI {} bytes)",
+        spki_der.len()
+    );
 }
 
 /// Verify that HsmActor is Send + Sync (compile-time check).
@@ -184,10 +182,8 @@ fn p384_via_actor() {
         pkcs8::DecodePublicKey,
     };
 
-    let vk = VerifyingKey::from_public_key_der(&spki_der)
-        .expect("decode SPKI DER");
-    let sig = Signature::try_from(sig_bytes.as_slice())
-        .expect("parse P1363 signature");
+    let vk = VerifyingKey::from_public_key_der(&spki_der).expect("decode SPKI DER");
+    let sig = Signature::try_from(sig_bytes.as_slice()).expect("parse P1363 signature");
     vk.verify(message, &sig).expect("verify");
 
     println!("HsmActor P-384 keygen+sign+verify: OK");

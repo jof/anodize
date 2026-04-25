@@ -13,7 +13,7 @@ resolver = "2"
 # HSM / crypto
 cryptoki       = "0.7"
 # X.509
-x509-cert      = "0.2"
+x509-cert      = { version = "0.2", features = ["builder"] }
 der            = "0.7"
 spki           = "0.7"
 # CLI (dev binary only)
@@ -27,6 +27,8 @@ toml           = "0.8"
 # Secrets / crypto primitives
 secrecy        = "0.8"
 sha2           = "0.10"
+hex            = "0.4"
+serde_json     = "1"
 # ECDSA verification (tests + anodize-ca)
 p384           = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 # Time (date arithmetic for validity periods)

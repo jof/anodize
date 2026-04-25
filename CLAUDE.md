@@ -12,37 +12,37 @@ make deny    # cargo deny check
 make ci      # full CI job locally via act + Docker
 ```
 
-`--test-threads=1` is mandatory: PKCS#11's `C_Initialize` is process-global and parallel test threads in the same binary will SIGSEGV.
+`--test-threads=1` is used in `make test` as a safe default. It is required for `anodize-hsm` and `anodize-ca` integration tests because `init_test_token()` uses a shared `target/test-softhsm/` directory (rm-rf + recreate). Pure-logic crates (`anodize-config`, `anodize-audit`) do not need it.
 
 ### Running a single test
 
 ```sh
 cargo test -p anodize-hsm p384_keygen_sign_verify -- --test-threads=1
+cargo test -p anodize-audit hash_chain_arithmetic   # no flag needed
 ```
 
 ### HSM integration tests
 
-Tests in `crates/anodize-hsm/tests/softhsm_basic.rs` require two env vars:
+Tests in `crates/anodize-hsm/tests/softhsm_basic.rs` and `crates/anodize-ca/tests/ca_integration.rs` require:
 
 ```sh
 export SOFTHSM2_MODULE=/usr/lib/softhsm/libsofthsm2.so
-export SOFTHSM2_CONF=/path/to/softhsm2.conf
 ```
 
-Each test calls `init_test_token(label)` which runs `softhsm2-util --init-token` and writes a config from `tests/softhsm-fixtures/softhsm2.conf.template` into `target/test-softhsm/`. If the env vars are absent the tests print `SKIP` and return — they do not fail.
+Each test calls `init_test_token(label)` which runs `softhsm2-util --init-token` and writes a config from `tests/softhsm-fixtures/softhsm2.conf.template` into `target/test-softhsm/`. If `SOFTHSM2_MODULE` is absent the tests print `SKIP` and return — they do not fail.
 
 ## Architecture
 
 ### Workspace structure
 
-Seven crates. The only ones with real implementations are `anodize-hsm` and the two binaries (currently `todo!()`). The rest are placeholders awaiting Phase 2–4.
+Six crates plus two placeholder binaries (`anodize-tui`, `anodize-cli`).
 
 | Crate | Role | Status |
 |---|---|---|
 | `anodize-hsm` | PKCS#11 abstraction | Implemented |
-| `anodize-ca` | X.509 cert/CRL/CSR | Placeholder |
-| `anodize-audit` | Hash-chained JSONL log | Placeholder |
-| `anodize-config` | TOML profile loader | Placeholder |
+| `anodize-ca` | X.509 cert/CRL/CSR | Implemented |
+| `anodize-audit` | Hash-chained JSONL log | Implemented |
+| `anodize-config` | TOML profile loader | Implemented |
 | `anodize-tui` | Ceremony binary (ratatui) | Placeholder |
 | `anodize-cli` | Dev binary (clap) | Placeholder |
 
@@ -56,13 +56,14 @@ Two implementations:
 
 - **`HsmActor`**: `Pkcs11Hsm` is `!Sync` because `cryptoki::Session` holds a raw pointer. `HsmActor` resolves this by owning `Pkcs11Hsm` on a dedicated thread and forwarding all calls via `SyncSender<HsmRequest>` rendezvous channels. `HsmActor` is `Send + Sync` and is the type to use everywhere outside the HSM crate itself.
 
-### X.509 signing bridge (to be built in Phase 2)
+### X.509 signing bridge (`anodize-ca`)
 
-`x509-cert`'s builder API requires a signer implementing `signature::Keypair + spki::DynSignatureAlgorithmIdentifier`. The bridge is `P384HsmSigner<H: Hsm>`:
+`x509-cert`'s builder API requires a signer implementing `signature::Keypair + spki::DynSignatureAlgorithmIdentifier`. The bridge is `P384HsmSigner<H: Hsm>` in `crates/anodize-ca/src/lib.rs`:
 
 - Constructed with a `KeyHandle` and a `p384::ecdsa::VerifyingKey` (parsed from `hsm.public_key_der()`)
-- `try_sign(msg)` calls `hsm.sign(key, EcdsaSha384, msg)` → parses the 96-byte P1363 result → converts to DER via `ecdsa::Signature::from_slice(bytes)?.to_der()`
-- Requires the `builder` feature on `x509-cert` and the `der` feature on `ecdsa`
+- `try_sign(msg)` calls `hsm.sign(key, EcdsaSha384, msg)` → parses the 96-byte P1363 result → converts to DER via `p384::ecdsa::Signature::try_from(bytes)?.to_der()`
+- No CRL builder exists in x509-cert 0.2; `issue_crl` manually constructs `TbsCertList`, signs its DER bytes, calls `to_bitstring()` on the `DerSignature`
+- `sign_intermediate_csr` verifies the CSR self-signature before reading any fields
 
 ### Security invariants to preserve
 
