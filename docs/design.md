@@ -243,11 +243,11 @@ The operator interaction surface is entirely the numbered ratatui TUI menu.
 - `genesis_hash(root_cert_der)` = SHA-256(root cert DER) — ties genesis to the specific ceremony
 - Corruption test: single-byte flip detected at correct record index
 
-### Phase 4 — CLI + ceremony TUI
-- `anodize-cli`: wire all crates, clap subcommands, confirmation prompts
-- `anodize-tui`: ratatui ceremony menu, disc-before-USB state machine
-- Printable fingerprints at each step
-- Runbooks: `docs/ceremony-init.md`, `docs/ceremony-sign.md`
+### Phase 4 — CLI + ceremony TUI (done)
+- `anodize-cli` (`anodize` binary): clap subcommands `init`, `sign-csr`, `issue-crl`, `verify-log`; resolves PIN from `PinSource` (prompt / env / file); prints SHA-256 fingerprint after each signing operation; appends an audit record on every CA operation
+- `anodize-tui` (`anodize-ceremony` binary): ratatui ceremony wizard with six screens (Welcome → EnterPin → KeyAction → CertPreview → DiscDone → Done); disc-before-USB invariant enforced structurally — `do_write_usb()` is only reachable from the `DiscDone` match arm; cert DER held in RAM until disc write succeeds
+- PIN input masked with random-length noise: display length ∈ [8, 20], independent of actual PIN length, refreshed on every keystroke. Prevents shoulder-surf length disclosure without requiring a CSPRNG — `SystemTime::now().subsec_nanos()` is sufficient for a human-visible display. Field shows 0 stars only when empty (confirms cleared), nonzero otherwise.
+- Runbooks (`docs/ceremony-init.md`, `docs/ceremony-sign.md`): deferred to Phase 5
 
 ### Phase 5 — Live ISO
 - `nix/flake.nix` + `nix/iso.nix`
