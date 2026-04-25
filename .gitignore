@@ -1,3 +1,6 @@
 target/
-Cargo.lock
+# Cargo.lock is committed for binary crates (required for reproducible Nix builds).
 .claude/
+# Nix build result symlinks
+result
+result-*
