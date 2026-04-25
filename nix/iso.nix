@@ -57,7 +57,7 @@ in
   # ── ISO image settings ─────────────────────────────────────────────────────
 
   isoImage.squashfsCompression = "zstd -Xcompression-level 6";
-  isoImage.isoBaseName = lib.mkForce "anodize";
+  image.baseName = lib.mkForce "anodize";
   isoImage.makeEfiBootable = true;
   isoImage.makeUsbBootable = true;
 
