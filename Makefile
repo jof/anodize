@@ -11,12 +11,17 @@ nix-check:
 # Build the bootable ceremony ISO via Docker.
 # Requires --privileged for squashfs/bootloader tooling.
 # This is a release-only step; it takes 10-30 minutes on first run.
+# A named volume (nix-store) persists the Nix store across runs so repeated
+# builds don't re-download everything and the container doesn't run out of space.
 nix-iso:
+	docker volume create nix-store 2>/dev/null || true
 	docker run --rm --privileged \
+		-v nix-store:/nix \
 		-v "$(CURDIR):/src" \
 		-w /src \
 		nixos/nix \
-		nix --extra-experimental-features 'nix-command flakes' build .#iso
+		sh -c 'git config --global --add safe.directory /src && \
+		       nix --extra-experimental-features "nix-command flakes" build .#iso'
 
 # Inner-loop shortcuts (no Docker overhead)
 fmt:

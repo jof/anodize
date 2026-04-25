@@ -2,11 +2,10 @@
   description = "Anodize — offline root CA ceremony tool";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
 
     # Crane: incremental Rust builds with good workspace support.
     crane.url = "github:ipetkov/crane";
-    crane.inputs.nixpkgs.follows = "nixpkgs";
 
     # rust-overlay: pins the Rust toolchain to rust-toolchain.toml.
     rust-overlay.url = "github:oxalica/rust-overlay";
@@ -45,8 +44,9 @@
         };
 
       # Pre-build all workspace dependencies once so both binaries share the cache.
+      # pname suppresses crane's warning about missing name in a virtual workspace root.
       mkCargoArtifacts = system:
-        (mkCraneLib system).buildDepsOnly (mkCommonArgs system);
+        (mkCraneLib system).buildDepsOnly ((mkCommonArgs system) // { pname = "anodize-deps"; version = "0.1.0"; });
     in
 
     # ---------------------------------------------------------------------------
