@@ -2,7 +2,7 @@
   description = "Anodize — offline root CA ceremony tool";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
 
     # Crane: incremental Rust builds with good workspace support.
     crane.url = "github:ipetkov/crane";
