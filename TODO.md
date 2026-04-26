@@ -14,15 +14,3 @@ operator. A future migration flow would let them carry the audit chain to a fres
 
 Separate TUI state or `--migrate-disc` CLI flag. Plan when multi-cert ceremony flow matures.
 
-## Wire sentinel into the ceremony ISO
-
-`anodize-sentinel` is implemented (`crates/anodize-tui/src/sentinel.rs`).
-It uses `Flock::lock` (non-blocking) on `/run/anodize/ceremony.lock`, clears
-`FD_CLOEXEC`, and `exec`s into `anodize-ceremony`. The lock fd is inherited by
-the ceremony process and released automatically on exit.
-
-Remaining work:
-- Add a `systemd` (or `agetty`-replacement) service unit that runs
-  `anodize-sentinel` on both `ttyS0` and the EFI framebuffer (`tty1`) at boot.
-- Ensure `/run/anodize/` is created by a `tmpfiles.d` entry or the service unit
-  before sentinel starts.

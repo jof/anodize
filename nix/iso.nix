@@ -8,6 +8,7 @@
 #   - No SSH, no package manager, no arbitrary shell for the operator
 #   - Auto-login → sentinel → ceremony TUI on both tty1 and ttyS0
 #   - CAP_SYS_ADMIN granted only to the ceremony wrapper (needed for mount(2))
+#   - CAP_SYS_BOOT granted only to the sentinel wrapper (needed for reboot(2))
 #   - flock on /run/anodize/ceremony.lock prevents two terminals from starting
 #     the ceremony simultaneously; the sentinel holds the lock across exec
 #
@@ -17,18 +18,16 @@
 { config, pkgs, lib, anodize-ceremony, ... }:
 
 let
-  # The ceremony user's login shell: exec the sentinel directly.
-  # Using getty (not a raw systemd service) is important: it creates a real
-  # logind user session.  The binary handles all device discovery internally.
+  # The ceremony user's login shell: exec the sentinel via its capability
+  # wrapper (/run/wrappers/bin) so it has CAP_SYS_BOOT for the power-off
+  # option and creates a real logind session (unlike a raw systemd service).
   #
-  # ESC-c (RIS) resets the Linux VT to a clean state before the sentinel
-  # prompt appears, wiping any getty/login residue from the screen.
-  #
+  # ESC-c (RIS) resets the Linux VT before the sentinel prompt appears.
   # The sentinel acquires /run/anodize/ceremony.lock (flock) before exec-ing
-  # /run/wrappers/bin/anodize-ceremony, so only one terminal can run the
-  # ceremony at a time.  /run/wrappers/bin is in PATH for the ceremony user.
+  # /run/wrappers/bin/anodize-ceremony, preventing two terminals from running
+  # the ceremony simultaneously.
   ceremonyShell = (pkgs.writeShellScriptBin "ceremony-shell" ''
-    exec ${anodize-ceremony}/bin/anodize-sentinel
+    exec /run/wrappers/bin/anodize-sentinel
   '') // { shellPath = "/bin/ceremony-shell"; };
 
 in
@@ -133,16 +132,25 @@ in
     pin_source   = "prompt"
   '';
 
-  # ── Capability wrapper — mount(2) requires CAP_SYS_ADMIN ──────────────────
+  # ── Capability wrappers ────────────────────────────────────────────────────
 
   # The ceremony binary mounts USB sticks internally via nix::mount::mount().
-  # A minimal capability wrapper grants only CAP_SYS_ADMIN; no setuid bit.
+  # The sentinel binary calls reboot(2) for the power-off option.
+  # Minimal capability wrappers — no setuid bit.
   security.wrappers.anodize-ceremony = {
-    source      = "${anodize-ceremony}/bin/anodize-ceremony";
+    source       = "${anodize-ceremony}/bin/anodize-ceremony";
     capabilities = "cap_sys_admin=ep";
-    owner       = "root";
-    group       = "wheel";
-    permissions = "u+rx,g+rx";
+    owner        = "root";
+    group        = "wheel";
+    permissions  = "u+rx,g+rx";
+  };
+
+  security.wrappers.anodize-sentinel = {
+    source       = "${anodize-ceremony}/bin/anodize-sentinel";
+    capabilities = "cap_sys_boot=ep";
+    owner        = "root";
+    group        = "wheel";
+    permissions  = "u+rx,g+rx";
   };
 
   # ── udev: YubiHSM 2 and optical drive access ──────────────────────────────

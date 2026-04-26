@@ -24,7 +24,8 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode},
 };
 use nix::fcntl::{fcntl, Flock, FcntlArg, FdFlag, FlockArg};
-use nix::unistd::close;
+use nix::sys::reboot::{reboot, RebootMode};
+use nix::unistd::{close, sync};
 
 #[derive(Parser)]
 #[command(name = "anodize-sentinel", about = "Terminal gatekeeper for the ceremony")]
@@ -59,6 +60,12 @@ fn main() -> Result<()> {
 
         match key {
             KeyCode::Char('q') | KeyCode::Char('Q') => break,
+            KeyCode::Char('s') | KeyCode::Char('S') => {
+                if confirm_shutdown() {
+                    poweroff();
+                }
+                continue;
+            }
             KeyCode::Enter => {}
             _ => continue,
         }
@@ -163,6 +170,33 @@ fn read_keypress() -> Result<KeyCode> {
     }
 }
 
+/// Ask the operator to confirm shutdown. Returns `true` if confirmed.
+fn confirm_shutdown() -> bool {
+    disable_raw_mode().ok();
+    println!("\r");
+    println!("  POWER OFF this machine? Press [y] to confirm, any other key to cancel.\r");
+    println!("\r");
+
+    enable_raw_mode().ok();
+    let key = read_keypress().unwrap_or(KeyCode::Esc);
+    disable_raw_mode().ok();
+
+    matches!(key, KeyCode::Char('y') | KeyCode::Char('Y'))
+}
+
+/// Sync filesystems and power off. Does not return on success.
+fn poweroff() {
+    // Flush all pending writes before pulling power.
+    sync();
+
+    // reboot() returns Result<Void, Errno>; Ok(Void) is uninhabited so the
+    // only reachable branch is Err (CAP_SYS_BOOT missing).
+    let Err(e) = reboot(RebootMode::RB_POWER_OFF);
+    disable_raw_mode().ok();
+    eprintln!("\r\n  poweroff failed: {e}\r");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
 fn print_banner() {
     // ANSI: clear screen + cursor home; works on both serial and EFI consoles.
     print!("\x1b[2J\x1b[H");
@@ -172,6 +206,7 @@ fn print_banner() {
     println!("+-----------------------------------------+");
     println!();
     println!("  Press Enter to begin the ceremony.");
+    println!("  Press [s] to power off.");
     println!("  Press [q] to exit.");
     println!();
 }
