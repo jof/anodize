@@ -143,6 +143,11 @@
             # Distinguish the dev ISO from the production ISO by name.
             isoImage.isoName = nixpkgs.lib.mkForce "anodize-dev";
             isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-DEV";
+
+            # Route kernel + early-userspace output to ttyS0 so the dev warning
+            # printed by anodize-ceremony (before TUI raw mode) appears on serial.
+            # console=tty0 keeps framebuffer output as well.
+            boot.kernelParams = [ "console=ttyS0,115200" "console=tty0" ];
           }
         ];
       };

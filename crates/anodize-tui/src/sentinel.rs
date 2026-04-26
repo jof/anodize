@@ -67,6 +67,7 @@ fn main() -> Result<()> {
         let lock_file = match OpenOptions::new()
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&cli.lock_file)
         {
             Ok(f) => f,

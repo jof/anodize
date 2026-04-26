@@ -32,6 +32,8 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
+#[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
+use ratatui::{style::Modifier, text::{Line, Span}};
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 
@@ -862,15 +864,41 @@ fn configure_softhsm_from_usb(usb_mountpoint: &std::path::Path) -> Result<()> {
 
 fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
+
+    #[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
+    let header_height = 4u16; // 2 content lines + 2 border lines
+    #[cfg(not(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb")))]
+    let header_height = 3u16;
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(10), Constraint::Length(3)])
+        .constraints([Constraint::Length(header_height), Constraint::Min(10), Constraint::Length(3)])
         .split(area);
 
-    let title = Paragraph::new("ANODIZE ROOT CA CEREMONY")
+    #[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
+    {
+        let title = Paragraph::new(vec![
+            Line::from("ANODIZE ROOT CA CEREMONY"),
+            Line::from(Span::styled(
+                "*** DEV BUILD — NOT FOR PRODUCTION USE ***",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )),
+        ])
         .alignment(Alignment::Center)
-        .block(Block::default().borders(Borders::ALL));
-    frame.render_widget(title, chunks[0]);
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red)),
+        );
+        frame.render_widget(title, chunks[0]);
+    }
+    #[cfg(not(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb")))]
+    {
+        let title = Paragraph::new("ANODIZE ROOT CA CEREMONY")
+            .alignment(Alignment::Center)
+            .block(Block::default().borders(Borders::ALL));
+        frame.render_widget(title, chunks[0]);
+    }
 
     let screen_title = match app.state {
         AppState::ClockCheck    => "Clock Verification",
@@ -1121,10 +1149,29 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App
     Ok(())
 }
 
+// ── Dev build serial warning ──────────────────────────────────────────────────
+
+/// Print a plaintext warning to the serial console (/dev/ttyS0) before the TUI
+/// takes over the framebuffer.  Silently no-ops if the device is absent or
+/// unwritable (e.g. production hardware with no serial port).
+#[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
+fn warn_dev_serial() {
+    use std::io::Write;
+    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/ttyS0") {
+        let _ = writeln!(tty);
+        let _ = writeln!(tty, "*** ANODIZE DEV BUILD — NOT FOR PRODUCTION USE ***");
+        let _ = writeln!(tty, "*** dev-usb-disc and/or dev-softhsm-usb features enabled  ***");
+        let _ = writeln!(tty);
+    }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    #[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
+    warn_dev_serial();
 
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)?;
