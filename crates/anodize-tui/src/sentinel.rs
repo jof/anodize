@@ -29,10 +29,10 @@ use nix::unistd::close;
 #[derive(Parser)]
 #[command(name = "anodize-sentinel", about = "Terminal gatekeeper for the ceremony")]
 struct Cli {
-    /// Exclusive lock file path.  /run/lock is world-writable (1777) on every
-    /// Linux system so the default works in the ISO and in local dev testing
+    /// Exclusive lock file path.  /tmp is a shared tmpfs (1777) in the ISO
+    /// and on every development machine, so the default works everywhere
     /// without any prior setup.
-    #[arg(long, default_value = "/run/lock/anodize-ceremony.lock")]
+    #[arg(long, default_value = "/tmp/anodize-ceremony.lock")]
     lock_file: PathBuf,
 }
 
