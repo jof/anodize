@@ -6,8 +6,10 @@
 #   - Read-only squashfs root (inherent to ISO image builds)
 #   - udev rules give the ceremony user access to YubiHSM 2 and optical drives
 #   - No SSH, no package manager, no arbitrary shell for the operator
-#   - Auto-login → ceremony TUI launches immediately on tty1
+#   - Auto-login → sentinel → ceremony TUI on both tty1 and ttyS0
 #   - CAP_SYS_ADMIN granted only to the ceremony wrapper (needed for mount(2))
+#   - flock on /run/anodize/ceremony.lock prevents two terminals from starting
+#     the ceremony simultaneously; the sentinel holds the lock across exec
 #
 # Disc-before-USB invariant is enforced in the anodize-ceremony binary itself;
 # this module only provides the environment in which it runs.
@@ -15,15 +17,19 @@
 { config, pkgs, lib, anodize-ceremony, ... }:
 
 let
-  # The ceremony user's login shell: exec the wrapper binary directly.
+  # The ceremony user's login shell: exec the sentinel directly.
   # Using getty (not a raw systemd service) is important: it creates a real
   # logind user session.  The binary handles all device discovery internally.
   #
-  # ESC-c (RIS) resets the Linux VT to a clean state before the TUI starts,
-  # wiping any getty/login residue that would bleed through into the TUI.
+  # ESC-c (RIS) resets the Linux VT to a clean state before the sentinel
+  # prompt appears, wiping any getty/login residue from the screen.
+  #
+  # The sentinel acquires /run/anodize/ceremony.lock (flock) before exec-ing
+  # /run/wrappers/bin/anodize-ceremony, so only one terminal can run the
+  # ceremony at a time.  /run/wrappers/bin is in PATH for the ceremony user.
   ceremonyShell = (pkgs.writeShellScriptBin "ceremony-shell" ''
     printf '\033c'
-    exec /run/wrappers/bin/anodize-ceremony
+    exec ${anodize-ceremony}/bin/anodize-sentinel
   '') // { shellPath = "/bin/ceremony-shell"; };
 
 in
@@ -62,9 +68,13 @@ in
   # ── Boot ──────────────────────────────────────────────────────────────────
 
   # nomodeset: disables KMS/DRM so the kernel uses the basic efifb/vesa
-  # framebuffer.  Verbose boot is intentional; the TUI clears the screen
+  # framebuffer.  Verbose boot is intentional; the sentinel clears the screen
   # (ESC-c in ceremony-shell) when it takes over.
-  boot.kernelParams = [ "nomodeset" ];
+  # console=tty0: kernel messages go to the EFI framebuffer (tty1).
+  # console=ttyS0,115200: kernel messages also go to the serial port;
+  #   listing ttyS0 last makes it the primary console so
+  #   systemd-getty-generator activates serial-getty@ttyS0.service.
+  boot.kernelParams = [ "nomodeset" "console=tty0" "console=ttyS0,115200n8" ];
 
   # Disable the graphical Plymouth boot splash — irrelevant for an appliance
   # and would require a framebuffer driver that nomodeset prevents loading.
@@ -168,7 +178,7 @@ in
   # Disable root login; ceremony user is the only interactive account.
   users.users.root.hashedPassword = "!";
 
-  # ── Auto-login → ceremony TUI ─────────────────────────────────────────────
+  # ── Auto-login → sentinel (tty1) ──────────────────────────────────────────
 
   # Getty on tty1 auto-logs in as ceremony → exec's ceremonyShell immediately.
   services.getty.autologinUser = "ceremony";
@@ -187,6 +197,31 @@ in
     NAutoVTs = 0;
     ReserveVT = 0;
   };
+
+  # ── Serial console: auto-login → sentinel ─────────────────────────────────
+
+  # systemd-getty-generator activates serial-getty@ttyS0 because ttyS0 is
+  # listed last in console= kernel params.  Override ExecStart to add
+  # --autologin so it behaves identically to the VT getty on tty1: the
+  # ceremony user is logged in immediately and ceremonyShell → sentinel runs.
+  systemd.services."serial-getty@ttyS0" = {
+    enable = true;
+    wantedBy = [ "getty.target" ];
+    # Disable systemd's restart rate-limit so the sentinel is relaunched
+    # unconditionally even after repeated rapid exits or crashes.
+    unitConfig.StartLimitIntervalSec = 0;
+    serviceConfig = {
+      ExecStart = [
+        ""   # clear the template's ExecStart before adding ours
+        "${pkgs.util-linux}/sbin/agetty --autologin ceremony --keep-baud 115200,57600,38400,9600 ttyS0 vt220"
+      ];
+      Restart    = "always";
+      RestartSec = "0";
+    };
+  };
+
+  # Same rate-limit override for the VT getty so tty1 also restarts forever.
+  systemd.services."getty@tty1".unitConfig.StartLimitIntervalSec = 0;
 
   # ── Disable unnecessary services ──────────────────────────────────────────
 

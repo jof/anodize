@@ -17,6 +17,10 @@ dev-softhsm-usb = []
 name = "anodize-ceremony"
 path = "src/main.rs"
 
+[[bin]]
+name = "anodize-sentinel"
+path = "src/sentinel.rs"
+
 [dependencies]
 anodize-hsm    = { path = "../anodize-hsm" }
 anodize-ca     = { path = "../anodize-ca" }

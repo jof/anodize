@@ -125,9 +125,14 @@ fake-disc-usb.img:
 	printf 'disc-usb-dev' | mcopy -i $@ - ::ANODIZE_DISC_ID
 	@echo "$@ ready"
 
-# Build anodize-ceremony with all dev features enabled (never use in ceremony).
+# Build anodize-ceremony and anodize-sentinel with all dev features enabled
+# (never use in a real ceremony).
 # dev-usb-disc:    USB stick as M-Disc substitute
 # dev-softhsm-usb: SoftHSM2 token directory on profile USB as HSM backend
+#
+# To run the sentinel locally without a full ISO boot:
+#   mkdir -p /tmp/anodize
+#   ./target/debug/anodize-sentinel --lock-file /tmp/anodize/ceremony.lock
 build-dev:
 	cargo build -p anodize-tui --features dev-usb-disc,dev-softhsm-usb
 

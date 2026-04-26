@@ -14,18 +14,15 @@ operator. A future migration flow would let them carry the audit chain to a fres
 
 Separate TUI state or `--migrate-disc` CLI flag. Plan when multi-cert ceremony flow matures.
 
-## Support serial terminal and EFI framebuffer simultaneously
+## Wire sentinel into the ceremony ISO
 
-A single `anodize-tui` process can only run on one terminal. To support both a serial
-console and an EFI framebuffer without race conditions, introduce a small **sentinel**
-program that runs at boot on each terminal:
+`anodize-sentinel` is implemented (`crates/anodize-tui/src/sentinel.rs`).
+It uses `Flock::lock` (non-blocking) on `/run/anodize/ceremony.lock`, clears
+`FD_CLOEXEC`, and `exec`s into `anodize-ceremony`. The lock fd is inherited by
+the ceremony process and released automatically on exit.
 
-- Displays a prompt and waits for a keypress (e.g. `Enter` or a chord)
-- On keypress, attempts to acquire an exclusive `flock` on a well-known lockfile
-  (e.g. `/run/anodize-ceremony.lock`)
-- If the lock is acquired, execs into `anodize-tui` on that terminal
-- If the lock is already held, prints a message ("ceremony in progress on another terminal")
-  and exits or loops
-
-This guarantees at most one TUI instance runs regardless of which terminal an operator
-reaches first. The lockfile is released automatically when `anodize-tui` exits.
+Remaining work:
+- Add a `systemd` (or `agetty`-replacement) service unit that runs
+  `anodize-sentinel` on both `ttyS0` and the EFI framebuffer (`tty1`) at boot.
+- Ensure `/run/anodize/` is created by a `tmpfiles.d` entry or the service unit
+  before sentinel starts.
