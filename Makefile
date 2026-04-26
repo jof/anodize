@@ -1,4 +1,4 @@
-.PHONY: ci nix-check qemu test fmt lint deny
+.PHONY: ci nix-check qemu qemu-sdl qemu-curses test fmt lint deny
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -46,22 +46,36 @@ fake-usb.img:
 	@echo "$@ ready"
 
 # Boot anodize.iso in QEMU via EFI (OVMF) with a fake USB stick.
-# EFI boot uses GRUB (timeout=0 → instant, no splash) rather than legacy
-# BIOS/ISOLINUX where TIMEOUT 0 means "wait forever".
+# EFI boot uses GRUB (timeout=0 → instant boot) rather than legacy BIOS/ISOLINUX
+# where TIMEOUT 0 means "wait forever for user input".
 # Requires: ovmf package (OVMF_CODE_4M.fd), mtools (for fake-usb.img).
 # OVMF vars are copied to a temp file so boot entries are not persisted.
+#
+# The ISO kernel params include video=efifb:off so Linux uses the VGA text
+# console rather than the EFI framebuffer (efifb breaks SDL VGA capture).
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
-qemu: anodize.iso fake-usb.img
-	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
-	qemu-system-x86_64 -enable-kvm -machine q35 -cpu host -m 2G -smp 2 \
+QEMU_BASE = qemu-system-x86_64 -enable-kvm -machine q35 -cpu host -m 2G -smp 2 \
 	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 	  -drive if=pflash,format=raw,file=/tmp/anodize-ovmf-vars.fd \
-	  -cdrom anodize.iso \
-	  -display sdl -vga std -no-reboot \
+	  -cdrom anodize.iso -no-reboot \
 	  -drive file=fake-usb.img,format=raw,if=none,id=usb0 \
 	  -device usb-ehci,id=ehci \
 	  -device usb-storage,drive=usb0,bus=ehci.0
+
+qemu: qemu-sdl
+
+# SDL graphical window — requires a display.  The TUI renders via the VGA text
+# console (video=efifb:off in kernel params) which SDL captures through VGA.
+qemu-sdl: anodize.iso fake-usb.img
+	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
+	$(QEMU_BASE) -display sdl -vga std
+
+# Curses mode — renders the VT directly in the current terminal.  No window
+# needed; good for headless/SSH environments.  Press Ctrl-A X to quit QEMU.
+qemu-curses: anodize.iso fake-usb.img
+	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
+	$(QEMU_BASE) -display curses -vga std
 
 # Inner-loop shortcuts (no Docker overhead)
 fmt:
