@@ -26,8 +26,13 @@ use sgdev::{SgDev, CDS_DISC_OK};
 
 // ── USB discovery and mounting ────────────────────────────────────────────────
 
-/// Scan /sys/block/sd* for removable block devices and enumerate their partitions.
-/// Returns device paths like /dev/sda1, /dev/sdb1, etc.
+/// Scan /sys/block/sd* and enumerate all sd* block devices and their partitions.
+/// Returns device paths like /dev/sda, /dev/sda1, /dev/sdb1, etc.
+///
+/// The removable=1 sysfs check is intentionally omitted: QEMU usb-storage may report
+/// removable=0 depending on kernel/QEMU version, and the profile.toml presence check
+/// in find_profile_usb() is the real discriminator — any drive without it is unmounted
+/// immediately and has no further effect.
 pub fn scan_usb_partitions() -> Vec<PathBuf> {
     let mut result = Vec::new();
     let Ok(entries) = std::fs::read_dir("/sys/block") else {
@@ -41,15 +46,6 @@ pub fn scan_usb_partitions() -> Vec<PathBuf> {
             continue;
         }
 
-        // Check if the block device is removable
-        let removable_path = entry.path().join("removable");
-        let removable = std::fs::read_to_string(&removable_path)
-            .map(|s| s.trim() == "1")
-            .unwrap_or(false);
-        if !removable {
-            continue;
-        }
-
         // Look for partition sub-entries (sda1, sda2, …)
         let block_dir = entry.path();
         if let Ok(sub) = std::fs::read_dir(&block_dir) {
@@ -58,18 +54,54 @@ pub fn scan_usb_partitions() -> Vec<PathBuf> {
                 let sub_name = sub_entry.file_name();
                 let sub_str = sub_name.to_string_lossy();
                 if sub_str.starts_with(name_str.as_ref()) && sub_str.len() > name_str.len() {
-                    result.push(PathBuf::from(format!("/dev/{}", sub_str)));
+                    result.push(PathBuf::from(format!("/dev/{sub_str}")));
                     has_parts = true;
                 }
             }
             // If no partitions found, add the raw device itself
             if !has_parts {
-                result.push(PathBuf::from(format!("/dev/{}", name_str)));
+                result.push(PathBuf::from(format!("/dev/{name_str}")));
             }
         }
     }
 
     result
+}
+
+/// Return a human-readable summary of sd* devices visible in /sys/block, including
+/// their removable flag value. Used by the TUI to show the operator what's happening
+/// during USB discovery even when no matching device is found.
+///
+/// Examples:
+///   "No sd* devices in /sys/block"
+///   "sda (removable=1)"
+///   "sda (removable=0), sdb (removable=1)"
+pub fn usb_scan_diagnostics() -> String {
+    let Ok(entries) = std::fs::read_dir("/sys/block") else {
+        return "Cannot read /sys/block".into();
+    };
+
+    let mut found: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name();
+            let name_str = name.to_string_lossy();
+            if !name_str.starts_with("sd") {
+                return None;
+            }
+            let removable = std::fs::read_to_string(e.path().join("removable"))
+                .map(|s| s.trim().to_owned())
+                .unwrap_or_else(|_| "?".into());
+            Some(format!("{name_str} (removable={removable})"))
+        })
+        .collect();
+
+    if found.is_empty() {
+        "No sd* devices in /sys/block".into()
+    } else {
+        found.sort();
+        found.join(", ")
+    }
 }
 
 /// Mount a USB partition (vfat, then ext4 on failure) at `mountpoint`.

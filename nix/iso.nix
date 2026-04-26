@@ -1,4 +1,4 @@
-# NixOS module for the Anodize ceremony ISO.
+# Anodize ceremony ISO — NixOS-based appliance image.
 #
 # Security properties enforced here:
 #   - No network stack at runtime
@@ -35,6 +35,18 @@ in
   isoImage.makeEfiBootable = true;
   isoImage.makeUsbBootable = true;
 
+  # ── Identity ───────────────────────────────────────────────────────────────
+
+  networking.hostName = "anodize";
+
+  # Replace NixOS identification so tools reading /etc/os-release show "Anodize".
+  environment.etc."os-release".text = ''
+    NAME="Anodize"
+    ID=anodize
+    PRETTY_NAME="Anodize Root CA Ceremony"
+    ANSI_COLOR="1;34"
+  '';
+
   # ── Network: disabled entirely ─────────────────────────────────────────────
 
   networking.useDHCP = false;
@@ -51,7 +63,13 @@ in
 
   # nomodeset: disables KMS/DRM so QEMU's SDL display can capture the
   # framebuffer.  On real hardware remove this — the GPU driver is preferable.
-  boot.kernelParams = [ "nomodeset" ];
+  # quiet + loglevel=3: suppress informational kernel messages during boot so
+  # the screen is clean when the TUI takes over; errors still show through.
+  boot.kernelParams = [ "nomodeset" "quiet" "loglevel=3" ];
+
+  # Disable the graphical Plymouth boot splash — we want a clean text console,
+  # and the ceremony appliance has no need for an animated boot screen.
+  boot.plymouth.enable = false;
 
   # ── Packages ──────────────────────────────────────────────────────────────
 

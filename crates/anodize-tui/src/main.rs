@@ -196,8 +196,10 @@ impl App {
     fn background_tick(&mut self) {
         match self.state {
             AppState::WaitUsb => {
+                let diagnostics = media::usb_scan_diagnostics();
                 let candidates = media::scan_usb_partitions();
                 if candidates.is_empty() {
+                    self.status = format!("Scanning… {diagnostics}");
                     return;
                 }
                 match media::find_profile_usb(&candidates, &self.usb_mountpoint) {
@@ -220,10 +222,15 @@ impl App {
                         }
                     }
                     Ok(None) => {
-                        self.status = "USB found but no profile.toml — \
-                                       insert USB with profile.toml.".into();
+                        self.status = format!(
+                            "No profile.toml found ({diagnostics}) — \
+                             insert USB with profile.toml."
+                        );
                     }
-                    Err(_) => {} // mount failure — try again next tick
+                    Err(e) => {
+                        // Mount attempt failed — show why so the operator isn't left guessing
+                        self.status = format!("Mount failed ({diagnostics}): {e}");
+                    }
                 }
             }
 
