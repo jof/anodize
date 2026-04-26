@@ -1,4 +1,4 @@
-.PHONY: ci nix-check qemu qemu-sdl qemu-curses test fmt lint deny
+.PHONY: ci nix-check qemu qemu-sdl qemu-curses clean test fmt lint deny
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -78,6 +78,9 @@ qemu-sdl: anodize.iso fake-usb.img
 qemu-curses: anodize.iso fake-usb.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_BASE) -display curses -vga std
+
+clean:
+	rm -f anodize.iso fake-usb.img /tmp/anodize-ovmf-vars.fd
 
 # Inner-loop shortcuts (no Docker overhead)
 fmt:
