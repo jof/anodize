@@ -58,10 +58,11 @@ enum AppState {
     WaitUsb,       // Scan for USB containing profile.toml (auto-advance)
     ProfileLoaded, // Profile read; show CA info; [1] to continue
     EnterPin,      // HSM PIN entry
+    WaitDisc,      // Wait for appendable write-once disc — BEFORE key operation
     KeyAction,     // Generate new key or find existing
-    CertPreview,   // Show cert + fingerprint; [1] to proceed to disc
-    WaitDisc,      // Wait for appendable write-once disc (or staging in skip_disc mode)
-    BurningDisc,   // Background burn in progress
+    WritingIntent, // Background burn of intent session; HSM op follows on success
+    CertPreview,   // Show cert + fingerprint; [1] to burn cert session
+    BurningDisc,   // Background burn of cert session in progress
     DiscDone,      // Disc written; [1] to write USB; [q] to skip USB
     Done,          // Complete
 }
@@ -73,6 +74,8 @@ struct App {
     // USB
     usb_mountpoint: PathBuf,
     profile: Option<Profile>,
+    // Raw profile.toml bytes — used as genesis anchor for the audit log chain.
+    profile_toml_bytes: Option<Vec<u8>>,
 
     // TUI state
     state: AppState,
@@ -96,6 +99,14 @@ struct App {
     burn_rx: Option<Receiver<Result<()>>>,
     #[cfg_attr(feature = "dev-usb-disc", allow(dead_code))]
     skip_disc: bool,
+    // Sessions remaining on disc (set in WaitDisc tick; None = not checked yet)
+    #[cfg_attr(feature = "dev-usb-disc", allow(dead_code))]
+    sessions_remaining: Option<u16>,
+
+    // WAL intent session written before HSM key operation
+    intent_session_dir_name: Option<String>,
+    pending_key_action: Option<u8>,          // 1=generate, 2=find-existing
+    pending_intent_session: Option<SessionEntry>,
 
     // Dev-mode disc USB (replaces optical when feature is enabled)
     #[cfg(feature = "dev-usb-disc")]
@@ -111,6 +122,7 @@ impl App {
             confirmed_time: None,
             usb_mountpoint,
             profile: None,
+            profile_toml_bytes: None,
             state: AppState::ClockCheck,
             status: String::new(),
             actor: None,
@@ -123,6 +135,10 @@ impl App {
             prior_sessions: Vec::new(),
             burn_rx: None,
             skip_disc,
+            sessions_remaining: None,
+            intent_session_dir_name: None,
+            pending_key_action: None,
+            pending_intent_session: None,
             #[cfg(feature = "dev-usb-disc")]
             disc_usb: None,
             #[cfg(feature = "dev-usb-disc")]
@@ -171,32 +187,34 @@ impl App {
                 _ => {}
             },
 
-            AppState::KeyAction => match code {
-                KeyCode::Char('1') => self.do_generate_and_build(),
-                KeyCode::Char('2') => self.do_find_and_build(),
-                _ => {}
-            },
-
-            AppState::CertPreview => {
-                if code == KeyCode::Char('1') {
-                    self.state = AppState::WaitDisc;
-                    self.status = if cfg!(feature = "dev-usb-disc") {
-                        "Insert disc USB with ANODIZE_DISC_ID (separate from profile USB)…"
-                    } else {
-                        "Insert write-once disc into optical drive…"
-                    }.into();
-                }
-            }
-
             AppState::WaitDisc => {
                 if code == KeyCode::Char('1') {
                     #[cfg(feature = "dev-usb-disc")]
                     let ready = self.disc_usb.is_some();
                     #[cfg(not(feature = "dev-usb-disc"))]
-                    let ready = self.skip_disc || self.optical_dev.is_some();
+                    let ready = self.skip_disc
+                        || (self.optical_dev.is_some()
+                            && self.sessions_remaining.map(|r| r >= 2).unwrap_or(false));
                     if ready {
-                        self.do_start_burn();
+                        self.state = AppState::KeyAction;
+                        self.status =
+                            "[1] Generate new P-384 keypair (fresh)  \
+                             [2] Use existing key (resume)".into();
                     }
+                }
+            }
+
+            AppState::KeyAction => match code {
+                KeyCode::Char('1') => { self.pending_key_action = Some(1); self.do_write_intent(); }
+                KeyCode::Char('2') => { self.pending_key_action = Some(2); self.do_write_intent(); }
+                _ => {}
+            },
+
+            AppState::WritingIntent => {} // auto-advance when intent burn completes
+
+            AppState::CertPreview => {
+                if code == KeyCode::Char('1') {
+                    self.do_start_burn();
                 }
             }
 
@@ -235,6 +253,8 @@ impl App {
                             let _ = media::unmount(&self.usb_mountpoint);
                             return;
                         }
+                        // Read raw bytes before parsing — used as genesis anchor for audit chain.
+                        let raw_bytes = std::fs::read(&profile_path).unwrap_or_default();
                         match load_profile(&profile_path) {
                             Ok(profile) => {
                                 if profile.hsm.pin_source != PinSource::Prompt {
@@ -243,6 +263,7 @@ impl App {
                                          unsuitable for ceremony".into();
                                 }
                                 self.profile = Some(profile);
+                                self.profile_toml_bytes = Some(raw_bytes);
                                 self.state = AppState::ProfileLoaded;
                                 self.status = "Profile loaded from USB.".into();
                             }
@@ -313,17 +334,28 @@ impl App {
                                 // Read existing sessions if disc is incomplete
                                 let prior = media::read_disc_sessions(dev).unwrap_or_default();
                                 let n = prior.len();
+                                // Capacity check: WAL requires 2 sessions (intent + cert)
+                                let (cap_summary, remaining) = media::disc_capacity_summary(dev);
+                                self.sessions_remaining = Some(remaining);
+                                if remaining < 2 {
+                                    self.status = format!(
+                                        "Disc in {} is full ({cap_summary}). \
+                                         Need 2 sessions for WAL. Insert a new disc.",
+                                        dev.display()
+                                    );
+                                    continue;
+                                }
                                 self.optical_dev = Some(dev.clone());
                                 self.prior_sessions = prior;
                                 self.status = if n == 0 {
                                     format!(
-                                        "Blank disc in {}. Press [1] to burn session.",
+                                        "Blank disc in {} ({cap_summary}). Press [1] to continue.",
                                         dev.display()
                                     )
                                 } else {
                                     format!(
-                                        "Disc in {} has {n} prior session(s). \
-                                         Press [1] to append new session.",
+                                        "Disc in {} — {n} prior session(s), {cap_summary}. \
+                                         Press [1] to continue.",
                                         dev.display()
                                     )
                                 };
@@ -345,6 +377,39 @@ impl App {
                         self.status =
                             "No blank/appendable disc found. Insert write-once disc \
                              (BD-R, DVD-R, CD-R, or M-Disc).".into();
+                    }
+                }
+            }
+
+            AppState::WritingIntent => {
+                if let Some(rx) = &self.burn_rx {
+                    if let Ok(result) = rx.try_recv() {
+                        self.burn_rx = None;
+                        match result {
+                            Err(e) => {
+                                self.status = format!("Intent disc write failed: {e}");
+                                self.state = AppState::WaitDisc;
+                                self.optical_dev = None;
+                                #[cfg(feature = "dev-usb-disc")]
+                                { self.disc_usb = None; }
+                            }
+                            Ok(()) => {
+                                // Commit intent session to prior_sessions before HSM operation
+                                if let Some(intent) = self.pending_intent_session.take() {
+                                    self.intent_session_dir_name = Some(intent.dir_name.clone());
+                                    self.prior_sessions.push(intent);
+                                }
+                                // Disc commit confirmed — HSM key operation is now safe
+                                match self.pending_key_action {
+                                    Some(1) => self.do_generate_and_build(),
+                                    Some(2) => self.do_find_and_build(),
+                                    _ => {
+                                        self.status = "Unknown key action".into();
+                                        self.state = AppState::WaitDisc;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -404,8 +469,12 @@ impl App {
             return;
         }
         self.actor = Some(actor);
-        self.status = "Logged in.".into();
-        self.state = AppState::KeyAction;
+        self.state = AppState::WaitDisc;
+        self.status = if cfg!(feature = "dev-usb-disc") {
+            "Logged in. Insert disc USB with ANODIZE_DISC_ID (separate from profile USB)."
+        } else {
+            "Logged in. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc) and press [1]."
+        }.into();
     }
 
     // ── Key operations ─────────────────────────────────────────────────────────
@@ -482,15 +551,38 @@ impl App {
         self.status = "Certificate built. Verify fingerprint before writing.".into();
     }
 
-    // ── Disc burn ──────────────────────────────────────────────────────────────
+    // ── WAL intent write ───────────────────────────────────────────────────────
 
-    fn do_start_burn(&mut self) {
-        let cert_der = match &self.cert_der {
-            Some(d) => d.clone(),
-            None => { self.status = "No cert in memory".into(); return; }
+    /// Write the intent session to disc BEFORE performing any HSM key operation.
+    /// The intent session contains an AUDIT.LOG with one `cert.root.intent` record,
+    /// anchored to SHA-256(profile.toml bytes). The HSM operation only runs after
+    /// the disc write succeeds (enforced in background_tick WritingIntent arm).
+    fn do_write_intent(&mut self) {
+        let (cn, org, country) = match self.profile.as_ref() {
+            Some(p) => (p.ca.common_name.clone(), p.ca.organization.clone(), p.ca.country.clone()),
+            None => { self.status = "No profile loaded".into(); return; }
+        };
+        let raw_bytes = match self.profile_toml_bytes.clone() {
+            Some(b) => b,
+            None => { self.status = "Profile bytes missing".into(); return; }
         };
 
-        // Build audit log in staging dir
+        // Defense-in-depth capacity check
+        #[cfg(not(feature = "dev-usb-disc"))]
+        if !self.skip_disc && self.sessions_remaining.map(|r| r < 2).unwrap_or(false) {
+            self.status = "Disc full — cannot write intent session. Insert new disc.".into();
+            return;
+        }
+
+        let action_str = match self.pending_key_action {
+            Some(1) => "generate",
+            Some(2) => "find-existing",
+            _ => "unknown",
+        };
+        let ts = self.confirmed_time.unwrap_or_else(SystemTime::now);
+        let dir_name = media::session_dir_name(ts) + "-intent";
+
+        // Create staging dir and partial audit log anchored to profile.toml bytes
         #[cfg(not(feature = "dev-usb-disc"))]
         let staging = PathBuf::from("/run/anodize/staging");
         #[cfg(feature = "dev-usb-disc")]
@@ -500,16 +592,118 @@ impl App {
             return;
         }
         let log_path = staging.join("audit.log");
-        let genesis = genesis_hash(&cert_der);
+        let genesis = genesis_hash(&raw_bytes);
+        let genesis_hex: String = genesis.iter().map(|b| format!("{b:02x}")).collect();
         let mut log = match AuditLog::create(&log_path, &genesis) {
             Ok(l) => l,
             Err(e) => { self.status = format!("Audit log create failed: {e}"); return; }
+        };
+        if let Err(e) = log.append("cert.root.intent", serde_json::json!({
+            "operation": "sign-root-cert",
+            "key_action": action_str,
+            "cert_params": {
+                "subject": {
+                    "common_name": cn,
+                    "organization": org,
+                    "country": country,
+                },
+                "validity_days": 7305,
+                "key_algorithm": "ecdsa-p384",
+                "key_usage": ["keyCertSign", "cRLSign"],
+                "basic_constraints": { "ca": true, "path_len_constraint": null },
+            },
+            "profile_toml_sha256": genesis_hex,
+        })) {
+            self.status = format!("Audit intent append failed: {e}");
+            return;
+        }
+        drop(log);
+
+        let partial_log_bytes = match std::fs::read(&log_path) {
+            Ok(b) => b,
+            Err(e) => { self.status = format!("Cannot read intent audit log: {e}"); return; }
+        };
+
+        let intent_session = SessionEntry {
+            dir_name: dir_name.clone(),
+            timestamp: ts,
+            files: vec![IsoFile { name: "AUDIT.LOG".into(), data: partial_log_bytes }],
+        };
+        let mut all_sessions = self.prior_sessions.clone();
+        all_sessions.push(intent_session.clone());
+
+        let (tx, rx) = mpsc::channel();
+        self.burn_rx = Some(rx);
+        self.pending_intent_session = Some(intent_session);
+
+        #[cfg(feature = "dev-usb-disc")]
+        {
+            let disc = match self.disc_usb.clone() {
+                Some(d) => d,
+                None => {
+                    self.status = "No disc USB — cannot write intent".into();
+                    self.burn_rx = None;
+                    self.pending_intent_session = None;
+                    return;
+                }
+            };
+            let iso = media::iso9660::build_iso(&all_sessions);
+            std::thread::spawn(move || {
+                tx.send(media::usb_disc::write_iso_to_disc_usb(&disc, &iso)).ok();
+            });
+        }
+
+        #[cfg(not(feature = "dev-usb-disc"))]
+        {
+            if self.skip_disc {
+                let iso = media::iso9660::build_iso(&all_sessions);
+                let iso_path = staging.join("ceremony.iso");
+                match std::fs::write(&iso_path, &iso) {
+                    Ok(()) => { tx.send(Ok(())).ok(); }
+                    Err(e) => { tx.send(Err(anyhow::anyhow!("write intent ISO: {e}"))).ok(); }
+                }
+            } else if let Some(dev) = self.optical_dev.clone() {
+                media::write_session(&dev, all_sessions, false, tx);
+            } else {
+                self.status = "No optical device — cannot write intent".into();
+                self.burn_rx = None;
+                self.pending_intent_session = None;
+                return;
+            }
+        }
+
+        self.state = AppState::WritingIntent;
+        self.status = "Writing intent to disc. HSM key operation will follow...".into();
+    }
+
+    // ── Disc burn ──────────────────────────────────────────────────────────────
+
+    fn do_start_burn(&mut self) {
+        let cert_der = match &self.cert_der {
+            Some(d) => d.clone(),
+            None => { self.status = "No cert in memory".into(); return; }
+        };
+
+        // Reopen the partial audit log written in do_write_intent() and append the cert record.
+        // The staging path must match the one used in do_write_intent().
+        #[cfg(not(feature = "dev-usb-disc"))]
+        let staging = PathBuf::from("/run/anodize/staging");
+        #[cfg(feature = "dev-usb-disc")]
+        let staging = PathBuf::from("/tmp/anodize-staging");
+        let log_path = staging.join("audit.log");
+        let mut log = match AuditLog::open(&log_path) {
+            Ok(l) => l,
+            Err(e) => { self.status = format!("Audit log reopen failed: {e}"); return; }
         };
         let fp = self.fingerprint.clone().unwrap_or_default();
         let ca_name = self.profile.as_ref().map(|p| p.ca.common_name.clone()).unwrap_or_default();
         if let Err(e) = log.append(
             "cert.root.issue",
-            serde_json::json!({ "subject": ca_name, "fingerprint": fp }),
+            serde_json::json!({
+                "subject": ca_name,
+                "fingerprint": fp,
+                "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+            }),
         ) {
             self.status = format!("Audit log append failed: {e}");
             return;
@@ -683,17 +877,18 @@ fn render(frame: &mut Frame, app: &App) {
         AppState::WaitUsb       => "Waiting for USB",
         AppState::ProfileLoaded => "Profile Loaded",
         AppState::EnterPin      => "HSM Authentication",
-        AppState::KeyAction     => "Key Management",
-        AppState::CertPreview   => "Certificate Preview — VERIFY FINGERPRINT",
         AppState::WaitDisc => if cfg!(feature = "dev-usb-disc") {
             "Insert Disc USB"
         } else {
             "Insert Disc"
         },
+        AppState::KeyAction     => "Key Management",
+        AppState::WritingIntent => "Committing Intent to Disc...",
+        AppState::CertPreview   => "Certificate Preview \u{2014} VERIFY FINGERPRINT",
         AppState::BurningDisc => if cfg!(feature = "dev-usb-disc") {
-            "Writing to Disc USB\u{2026}"
+            "Writing Cert Session to Disc USB\u{2026}"
         } else {
-            "Writing Disc Session\u{2026}"
+            "Writing Cert Session\u{2026}"
         },
         AppState::DiscDone => if cfg!(feature = "dev-usb-disc") {
             "Disc USB Written"
@@ -769,6 +964,40 @@ fn build_body(app: &App) -> Text<'static> {
             ]
         }
 
+        AppState::WaitDisc => {
+            #[cfg(feature = "dev-usb-disc")]
+            let disc_info = match &app.disc_usb {
+                Some(disc) => format!(
+                    "  Disc USB ready ({})  ({} prior session(s))",
+                    disc.uuid,
+                    app.prior_sessions.len()
+                ),
+                None => "  No disc USB found. Insert USB with ANODIZE_DISC_ID \
+                          (must be separate from profile USB).".into(),
+            };
+            #[cfg(not(feature = "dev-usb-disc"))]
+            let disc_info = match &app.optical_dev {
+                Some(dev) => {
+                    let cap = app.sessions_remaining
+                        .map(|r| format!(", {r} sessions remaining"))
+                        .unwrap_or_default();
+                    format!(
+                        "  Disc ready in {}  ({} prior session(s){cap})",
+                        dev.display(),
+                        app.prior_sessions.len()
+                    )
+                }
+                None => "  No appendable disc detected. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc).".into(),
+            };
+            vec![
+                String::new(),
+                disc_info,
+                String::new(),
+                "  [1]  Confirm disc and proceed to key management".into(),
+                "  [q]  Abort".into(),
+            ]
+        }
+
         AppState::KeyAction => {
             let label = app.profile.as_ref().map(|p| p.hsm.key_label.as_str()).unwrap_or("?");
             vec![
@@ -777,8 +1006,18 @@ fn build_body(app: &App) -> Text<'static> {
                 String::new(),
                 "  [1]  Generate new P-384 keypair (fresh ceremony)".into(),
                 "  [2]  Use existing key by label  (resume)".into(),
+                String::new(),
+                "  Selecting either option writes an intent record to disc".into(),
+                "  before using the HSM. Do not remove the disc.".into(),
             ]
         }
+
+        AppState::WritingIntent => vec![
+            String::new(),
+            "  Writing intent session to disc.".into(),
+            "  HSM signing will begin after disc commit completes.".into(),
+            "  Do not remove the disc or power off.".into(),
+        ],
 
         AppState::CertPreview => {
             let fp = app.fingerprint.as_deref().unwrap_or("(none)");
@@ -797,35 +1036,6 @@ fn build_body(app: &App) -> Text<'static> {
                 "  Compare this fingerprint against your paper checklist.".into(),
                 String::new(),
                 "  [1]  Proceed to disc write".into(),
-                "  [q]  Abort".into(),
-            ]
-        }
-
-        AppState::WaitDisc => {
-            #[cfg(feature = "dev-usb-disc")]
-            let disc_info = match &app.disc_usb {
-                Some(disc) => format!(
-                    "  Disc USB ready ({})  ({} prior session(s))",
-                    disc.uuid,
-                    app.prior_sessions.len()
-                ),
-                None => "  No disc USB found. Insert USB with ANODIZE_DISC_ID \
-                          (must be separate from profile USB).".into(),
-            };
-            #[cfg(not(feature = "dev-usb-disc"))]
-            let disc_info = match &app.optical_dev {
-                Some(dev) => format!(
-                    "  Disc ready in {}  ({} prior session(s))",
-                    dev.display(),
-                    app.prior_sessions.len()
-                ),
-                None => "  No appendable disc detected. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc).".into(),
-            };
-            vec![
-                String::new(),
-                disc_info,
-                String::new(),
-                "  [1]  Burn session to disc (only if disc shown above)".into(),
                 "  [q]  Abort".into(),
             ]
         }
