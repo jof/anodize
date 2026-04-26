@@ -1,7 +1,8 @@
 use std::time::SystemTime;
 
 use anodize_hsm::{Hsm, KeyHandle, SignMech};
-use der::asn1::{Ia5String, ObjectIdentifier};
+use der::asn1::{Ia5String, ObjectIdentifier, OctetString, Uint};
+use der::oid::AssociatedOid;
 use der::{Decode, Encode};
 use p384::{
     ecdsa::{
@@ -16,9 +17,13 @@ use x509_cert::{
     builder::{Builder, CertificateBuilder, Profile},
     certificate::Certificate,
     crl::{CertificateList, RevokedCert, TbsCertList},
-    ext::pkix::{
-        crl::{dp::DistributionPoint, CrlDistributionPoints},
-        name::{DistributionPointName, GeneralName},
+    ext::{
+        pkix::{
+            crl::{dp::DistributionPoint, CrlDistributionPoints, CrlNumber},
+            name::{DistributionPointName, GeneralName},
+            AuthorityKeyIdentifier, SubjectKeyIdentifier,
+        },
+        Extension,
     },
     request::{CertReq, ExtensionReq},
     serial_number::SerialNumber,
@@ -230,12 +235,14 @@ pub fn sign_intermediate_csr<H: Hsm>(
 
 /// Issue a CRL signed by the root CA.
 ///
+/// `crl_number` must be monotonically increasing across all CRLs issued by this CA.
 /// Returns DER-encoded `CertificateList` bytes.
 pub fn issue_crl<H: Hsm>(
     signer: &P384HsmSigner<H>,
     root_cert: &Certificate,
     revoked: &[(u64, SystemTime)],
     next_update: SystemTime,
+    crl_number: u64,
 ) -> Result<Vec<u8>, CaError> {
     use spki::SignatureBitStringEncoding;
 
@@ -263,6 +270,8 @@ pub fn issue_crl<H: Hsm>(
         Some(certs)
     };
 
+    let crl_extensions = Some(build_crl_extensions(root_cert, crl_number)?);
+
     let tbs_cert_list = TbsCertList {
         version: Version::V2,
         signature: algorithm.clone(),
@@ -270,7 +279,7 @@ pub fn issue_crl<H: Hsm>(
         this_update,
         next_update: Some(next_update_time),
         revoked_certificates,
-        crl_extensions: None,
+        crl_extensions,
     };
 
     let tbs_bytes = tbs_cert_list.to_der()?;
@@ -287,6 +296,47 @@ pub fn issue_crl<H: Hsm>(
     }
     .to_der()
     .map_err(|e| CaError::Der(e.to_string()))
+}
+
+/// Build the standard CRL extensions: CRL Number and Authority Key Identifier.
+fn build_crl_extensions(
+    root_cert: &Certificate,
+    crl_number: u64,
+) -> Result<Vec<Extension>, CaError> {
+    let crl_num_bytes = crl_number.to_be_bytes();
+    let crl_num_uint = Uint::new(&crl_num_bytes).map_err(|e| CaError::Der(e.to_string()))?;
+    let crl_num_encoded = CrlNumber(crl_num_uint).to_der()?;
+    let crl_num_ext = Extension {
+        extn_id: CrlNumber::OID,
+        critical: false,
+        extn_value: OctetString::new(crl_num_encoded).map_err(|e| CaError::Der(e.to_string()))?,
+    };
+
+    // Derive key_identifier from the root cert's SubjectKeyIdentifier extension.
+    let key_id = root_cert
+        .tbs_certificate
+        .extensions
+        .as_deref()
+        .and_then(|exts| {
+            exts.iter()
+                .find(|ext| ext.extn_id == SubjectKeyIdentifier::OID)
+        })
+        .and_then(|ext| SubjectKeyIdentifier::from_der(ext.extn_value.as_bytes()).ok())
+        .map(|skid| skid.0);
+
+    let akid = AuthorityKeyIdentifier {
+        key_identifier: key_id,
+        authority_cert_issuer: None,
+        authority_cert_serial_number: None,
+    };
+    let akid_encoded = akid.to_der()?;
+    let akid_ext = Extension {
+        extn_id: AuthorityKeyIdentifier::OID,
+        critical: false,
+        extn_value: OctetString::new(akid_encoded).map_err(|e| CaError::Der(e.to_string()))?,
+    };
+
+    Ok(vec![crl_num_ext, akid_ext])
 }
 
 fn parse_dn(cn: &str, org: &str, country: &str) -> Result<x509_cert::name::Name, CaError> {

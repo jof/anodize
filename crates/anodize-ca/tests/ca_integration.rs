@@ -236,7 +236,7 @@ fn issue_crl_encodes_revoked_serials() {
     let next_update = now + std::time::Duration::from_secs(30 * 24 * 3600);
     let revoked = vec![(42u64, now), (99u64, now)];
 
-    let crl_der = issue_crl(&root_signer, &root_cert, &revoked, next_update).expect("issue CRL");
+    let crl_der = issue_crl(&root_signer, &root_cert, &revoked, next_update, 1).expect("issue CRL");
 
     let cert_list = x509_cert::crl::CertificateList::from_der(&crl_der).expect("decode CRL");
     let revoked_certs = cert_list
@@ -267,6 +267,60 @@ fn issue_crl_encodes_revoked_serials() {
 
     println!(
         "issue_crl_encodes_revoked_serials: OK ({} bytes CRL DER)",
+        crl_der.len()
+    );
+}
+
+#[test]
+fn issue_crl_extensions_present() {
+    let module = match softhsm_env() {
+        Some(m) => m,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE not set");
+            return;
+        }
+    };
+
+    init_test_token("ca-crl-ext-test");
+    let mut hsm = Pkcs11Hsm::new(&module, "ca-crl-ext-test").expect("open session");
+    let pin = secrecy::SecretString::new("1234".to_string());
+    hsm.login(&pin).expect("login");
+
+    let root_key = hsm
+        .generate_keypair("root-key", KeySpec::EcdsaP384)
+        .expect("generate root keypair");
+    let root_signer = P384HsmSigner::new(hsm, root_key).expect("root signer");
+    let root_cert =
+        build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305).expect("root cert");
+
+    let next_update = SystemTime::now() + std::time::Duration::from_secs(30 * 24 * 3600);
+    let crl_der = issue_crl(&root_signer, &root_cert, &[], next_update, 1).expect("issue CRL");
+
+    let cert_list = x509_cert::crl::CertificateList::from_der(&crl_der).expect("decode CRL");
+    let exts = cert_list
+        .tbs_cert_list
+        .crl_extensions
+        .as_deref()
+        .expect("no CRL extensions");
+
+    // CRL Number (OID 2.5.29.20) must be present and non-critical
+    let crl_num_oid = der::asn1::ObjectIdentifier::new_unwrap("2.5.29.20");
+    let crl_num_ext = exts
+        .iter()
+        .find(|e| e.extn_id == crl_num_oid)
+        .expect("CRL Number extension missing");
+    assert!(!crl_num_ext.critical, "CRL Number must be non-critical");
+
+    // Authority Key Identifier (OID 2.5.29.35) must be present and non-critical
+    let akid_oid = der::asn1::ObjectIdentifier::new_unwrap("2.5.29.35");
+    let akid_ext = exts
+        .iter()
+        .find(|e| e.extn_id == akid_oid)
+        .expect("Authority Key Identifier extension missing");
+    assert!(!akid_ext.critical, "AKID must be non-critical");
+
+    println!(
+        "issue_crl_extensions_present: OK (CRL Number + AKID verified, {} bytes)",
         crl_der.len()
     );
 }
