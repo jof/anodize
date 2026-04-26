@@ -4,9 +4,10 @@
 #   - No network stack at runtime
 #   - Ephemeral /tmp in RAM (tmpfs); no writable persistent storage
 #   - Read-only squashfs root (inherent to ISO image builds)
-#   - udev rule gives the ceremony user access to the YubiHSM 2 USB device
+#   - udev rules give the ceremony user access to YubiHSM 2 and optical drives
 #   - No SSH, no package manager, no arbitrary shell for the operator
 #   - Auto-login → ceremony TUI launches immediately on tty1
+#   - CAP_SYS_ADMIN granted only to the ceremony wrapper (needed for mount(2))
 #
 # Disc-before-USB invariant is enforced in the anodize-ceremony binary itself;
 # this module only provides the environment in which it runs.
@@ -14,43 +15,12 @@
 { config, pkgs, lib, anodize-ceremony, ... }:
 
 let
-  # Launcher: finds profile.toml on removable media and starts the ceremony TUI.
-  # Runs as the ceremony user; loops until a profile is found so the operator can
-  # insert their USB stick after boot.
-  ceremonyLaunch = pkgs.writeShellScript "anodize-ceremony-launch" ''
-    set -euo pipefail
-
-    clear
-    echo "╔═══════════════════════════════════════════╗"
-    echo "║        ANODIZE ROOT CA CEREMONY           ║"
-    echo "╚═══════════════════════════════════════════╝"
-    echo ""
-
-    # Search for a profile.toml on any removable medium mounted by udisks2.
-    find_profile() {
-      for f in /run/media/ceremony/*/profile.toml; do
-        [ -f "$f" ] && echo "$f" && return 0
-      done
-      return 1
-    }
-
-    while true; do
-      if profile=$(find_profile); then
-        usb_root=$(dirname "$profile")
-        echo "Found profile: $profile"
-        echo "USB root: $usb_root"
-        echo ""
-        exec ${anodize-ceremony}/bin/anodize-ceremony \
-          --profile "$profile" \
-          --disc /run/media/ceremony/disc \
-          --usb "$usb_root"
-      fi
-
-      echo "Insert USB containing profile.toml, then press Enter."
-      read -r
-      clear
-    done
-  '';
+  # The ceremony user's login shell: exec the wrapper binary directly.
+  # Using getty (not a raw systemd service) is important: it creates a real
+  # logind user session.  The binary handles all device discovery internally.
+  ceremonyShell = (pkgs.writeShellScriptBin "ceremony-shell" ''
+    exec /run/wrappers/bin/anodize-ceremony
+  '') // { shellPath = "/bin/ceremony-shell"; };
 
 in
 {
@@ -82,7 +52,7 @@ in
   # ── Packages ──────────────────────────────────────────────────────────────
 
   environment.systemPackages = [
-    anodize-ceremony          # ceremony TUI
+    anodize-ceremony          # ceremony TUI (unwrapped — use /run/wrappers/bin/ at runtime)
     pkgs.softhsm              # dev/testing PKCS#11 backend
     pkgs.opensc               # PKCS#11 utilities (pkcs11-tool, etc.)
     # pkgs.yubihsm-shell     # uncomment if available in your nixpkgs channel
@@ -116,16 +86,33 @@ in
     pin_source   = "prompt"
   '';
 
-  # ── udev: YubiHSM 2 USB access ────────────────────────────────────────────
+  # ── Capability wrapper — mount(2) requires CAP_SYS_ADMIN ──────────────────
+
+  # The ceremony binary mounts USB sticks internally via nix::mount::mount().
+  # A minimal capability wrapper grants only CAP_SYS_ADMIN; no setuid bit.
+  security.wrappers.anodize-ceremony = {
+    source      = "${anodize-ceremony}/bin/anodize-ceremony";
+    capabilities = "cap_sys_admin=ep";
+    owner       = "root";
+    group       = "wheel";
+    permissions = "u+rx,g+rx";
+  };
+
+  # ── udev: YubiHSM 2 and optical drive access ──────────────────────────────
 
   services.udev.extraRules = ''
-    # YubiHSM 2 — grant the ceremony group rw access without requiring root.
+    # YubiHSM 2 — grant the wheel group rw access without requiring root.
     SUBSYSTEM=="usb", ATTR{idVendor}=="1050", MODE="0660", GROUP="wheel"
+    # Optical drives — grant the wheel group rw access for SG_IO disc writes.
+    SUBSYSTEM=="block", KERNEL=="sr[0-9]*", MODE="0660", GROUP="wheel"
   '';
 
-  # ── udisks2: automount USB sticks for the ceremony user ───────────────────
+  # ── tmpfiles: runtime directories for the ceremony binary ─────────────────
 
-  services.udisks2.enable = true;
+  systemd.tmpfiles.rules = [
+    "d /run/anodize     0755 ceremony ceremony -"
+    "d /run/anodize/usb 0700 ceremony ceremony -"
+  ];
 
   # ── Ceremony user ─────────────────────────────────────────────────────────
 
@@ -135,43 +122,26 @@ in
     extraGroups  = [ "wheel" "plugdev" ];
     # No password — physical access to the air-gapped machine is the auth factor.
     password     = "";
+    shell        = ceremonyShell;
   };
+
+  environment.shells = [ ceremonyShell ];   # PAM requires it to be listed here
 
   # Disable root login; ceremony user is the only interactive account.
   users.users.root.hashedPassword = "!";
 
   # ── Auto-login → ceremony TUI ─────────────────────────────────────────────
 
-  # Getty auto-logs in as ceremony on tty1 after boot.
+  # Getty on tty1 auto-logs in as ceremony → exec's ceremonyShell immediately.
   services.getty.autologinUser = "ceremony";
 
-  # The ceremony launch script runs as a systemd service on tty1.
-  # Using a service (rather than .bash_profile) gives cleaner restart behaviour
-  # if the TUI exits or crashes.
-  systemd.services.anodize-ceremony = {
-    description = "Anodize Root CA Ceremony";
-    after       = [ "multi-user.target" "udisks2.service" ];
-    wantedBy    = [ "multi-user.target" ];
-
-    serviceConfig = {
-      Type             = "simple";
-      User             = "ceremony";
-      Group            = "users";
-      ExecStart        = "${ceremonyLaunch}";
-      Restart          = "on-failure";
-      RestartSec       = "3s";
-      # Attach to tty1 so the TUI renders on the physical console / QEMU SDL.
-      StandardInput    = "tty";
-      StandardOutput   = "tty";
-      StandardError    = "tty";
-      TTYPath          = "/dev/tty1";
-      TTYReset         = true;
-      TTYVHangup       = true;
-    };
+  # NAutoVTs=0: prevent logind from dynamically spawning gettys when the
+  # operator presses Alt+F2..F6.  The static autovt@tty1 entry in
+  # getty.target.wants is unaffected — tty1 still works normally.
+  services.logind.settings.Login = {
+    NAutoVTs = 0;
+    ReserveVT = 0;
   };
-
-  # Suppress getty on tty1 — the ceremony service owns the primary console.
-  systemd.services."getty@tty1".enable = false;
 
   # ── Disable unnecessary services ──────────────────────────────────────────
 
