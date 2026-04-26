@@ -29,10 +29,10 @@ use nix::unistd::close;
 #[derive(Parser)]
 #[command(name = "anodize-sentinel", about = "Terminal gatekeeper for the ceremony")]
 struct Cli {
-    /// Exclusive lock file path.  The parent directory must already exist.
-    /// In the ceremony ISO this directory is created by tmpfiles.d before login.
-    /// For local dev testing use e.g. --lock-file /tmp/anodize-ceremony.lock
-    #[arg(long, default_value = "/run/anodize/ceremony.lock")]
+    /// Exclusive lock file path.  /run/lock is world-writable (1777) on every
+    /// Linux system so the default works in the ISO and in local dev testing
+    /// without any prior setup.
+    #[arg(long, default_value = "/run/lock/anodize-ceremony.lock")]
     lock_file: PathBuf,
 }
 
@@ -64,13 +64,6 @@ fn main() -> Result<()> {
         }
 
         // ── Open lock file ─────────────────────────────────────────────────────
-        // Best-effort: create the parent directory if it doesn't exist.
-        // In the ceremony ISO tmpfiles.d handles this; for local dev testing
-        // with a writable --lock-file path this creates it automatically.
-        if let Some(parent) = cli.lock_file.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
         let lock_file = match OpenOptions::new()
             .write(true)
             .create(true)
@@ -78,15 +71,8 @@ fn main() -> Result<()> {
         {
             Ok(f) => f,
             Err(e) => {
-                let hint = if e.kind() == std::io::ErrorKind::NotFound
-                    || e.kind() == std::io::ErrorKind::PermissionDenied
-                {
-                    "\n\n  For local testing outside the ISO use:\n  --lock-file /tmp/anodize-ceremony.lock"
-                } else {
-                    ""
-                };
                 let msg = format!(
-                    "  cannot open lock file {}:\n  {e}{hint}",
+                    "  cannot open lock file {}:\n  {e}",
                     cli.lock_file.display()
                 );
                 if show_and_wait(&msg) { break; }
