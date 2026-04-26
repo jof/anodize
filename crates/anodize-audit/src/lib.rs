@@ -38,9 +38,11 @@ pub struct Record {
     pub entry_hash: String,
 }
 
-/// Compute the SHA-256 genesis hash from a root CA certificate's DER bytes.
-pub fn genesis_hash(root_cert_der: &[u8]) -> [u8; 32] {
-    Sha256::digest(root_cert_der).into()
+/// Compute the SHA-256 genesis anchor for an audit log chain.
+/// Pass any stable byte sequence (e.g. raw profile.toml bytes) that uniquely
+/// identifies the ceremony context and can be verified by auditors.
+pub fn genesis_hash(anchor: &[u8]) -> [u8; 32] {
+    Sha256::digest(anchor).into()
 }
 
 fn compute_entry_hash(
