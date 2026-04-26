@@ -74,7 +74,7 @@ in
   # Boot immediately without showing the GRUB menu — there is exactly one
   # valid boot entry and the operator has no reason to interact with GRUB.
   # The iso-image module sets timeout = mkDefault 10, so plain 0 suffices.
-  boot.loader.timeout = 0;
+  boot.loader.timeout = lib.mkForce 0;
 
   # isoImage.efiSplashImage is a *separate* option from isoImage.grubTheme;
   # it always places efi-background.png on the ISO (the NixOS blue image).
