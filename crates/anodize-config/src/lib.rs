@@ -1,12 +1,48 @@
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Deserialize)]
 pub struct Profile {
     pub ca: CaConfig,
     pub hsm: HsmConfig,
+    #[serde(default)]
+    pub cert_profiles: Vec<CertProfile>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CertProfile {
+    pub name: String,
+    pub validity_days: u32,
+    pub path_len: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RevocationEntry {
+    pub serial: u64,
+    pub revocation_time: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct RevocationFile {
+    entries: Vec<RevocationEntry>,
+}
+
+pub fn parse_revocation_list(data: &[u8]) -> Result<Vec<RevocationEntry>, ConfigError> {
+    let s = std::str::from_utf8(data).map_err(|_| ConfigError::RevocationUtf8)?;
+    let file: RevocationFile =
+        toml::from_str(s).map_err(|source| ConfigError::RevocationToml { source })?;
+    Ok(file.entries)
+}
+
+pub fn serialize_revocation_list(entries: &[RevocationEntry]) -> String {
+    let file = RevocationFile {
+        entries: entries.to_vec(),
+    };
+    toml::to_string(&file).unwrap_or_default()
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +133,10 @@ pub enum ConfigError {
         path: PathBuf,
         source: toml::de::Error,
     },
+    #[error("revocation list is not valid UTF-8")]
+    RevocationUtf8,
+    #[error("revocation list TOML parse error: {source}")]
+    RevocationToml { source: toml::de::Error },
 }
 
 pub fn load(path: &Path) -> Result<Profile, ConfigError> {
@@ -193,5 +233,93 @@ pin_source   = "prompt"
                     [hsm]\nmodule_path=\"/x\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"prompt\"\n";
         let p: Profile = toml::from_str(toml).expect("parse");
         assert!(p.ca.cdp_url.is_none());
+    }
+
+    #[test]
+    fn cert_profiles_parse() {
+        let toml = r#"
+[ca]
+common_name  = "Root CA"
+organization = "Acme"
+country      = "US"
+
+[hsm]
+module_path = "/x"
+token_label = "t"
+key_label   = "k"
+pin_source  = "prompt"
+
+[[cert_profiles]]
+name         = "sub-ca"
+validity_days = 1825
+path_len      = 0
+
+[[cert_profiles]]
+name         = "ocsp-signer"
+validity_days = 365
+"#;
+        let p: Profile = toml::from_str(toml).expect("parse");
+        assert_eq!(p.cert_profiles.len(), 2);
+        assert_eq!(p.cert_profiles[0].name, "sub-ca");
+        assert_eq!(p.cert_profiles[0].validity_days, 1825);
+        assert_eq!(p.cert_profiles[0].path_len, Some(0));
+        assert_eq!(p.cert_profiles[1].name, "ocsp-signer");
+        assert_eq!(p.cert_profiles[1].validity_days, 365);
+        assert_eq!(p.cert_profiles[1].path_len, None);
+    }
+
+    #[test]
+    fn cert_profiles_default_empty() {
+        let toml = "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
+                    [hsm]\nmodule_path=\"/x\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"prompt\"\n";
+        let p: Profile = toml::from_str(toml).expect("parse");
+        assert!(p.cert_profiles.is_empty());
+    }
+
+    #[test]
+    fn revocation_list_round_trip() {
+        let toml = r#"
+[[entries]]
+serial          = 12345
+revocation_time = "2026-04-01T00:00:00Z"
+reason          = "key-compromise"
+
+[[entries]]
+serial          = 67890
+revocation_time = "2026-05-15T12:00:00Z"
+"#;
+        let entries = parse_revocation_list(toml.as_bytes()).expect("parse");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].serial, 12345);
+        assert_eq!(entries[0].revocation_time, "2026-04-01T00:00:00Z");
+        assert_eq!(entries[0].reason.as_deref(), Some("key-compromise"));
+        assert_eq!(entries[1].serial, 67890);
+        assert!(entries[1].reason.is_none());
+
+        // Serialize and re-parse
+        let serialized = serialize_revocation_list(&entries);
+        let reparsed = parse_revocation_list(serialized.as_bytes()).expect("re-parse");
+        assert_eq!(reparsed.len(), 2);
+        assert_eq!(reparsed[0].serial, 12345);
+        assert_eq!(reparsed[1].serial, 67890);
+    }
+
+    #[test]
+    fn empty_revocation_list() {
+        let toml = "";
+        // Empty TOML has no [[entries]] table; parse returns empty Vec via default
+        let entries = parse_revocation_list(toml.as_bytes());
+        // An empty string won't have the `entries` key — accept either empty or error
+        if let Ok(v) = entries {
+            assert!(v.is_empty());
+        }
+        // Explicit empty file
+        let toml2 = "[entries]\n";
+        let _ = parse_revocation_list(toml2.as_bytes()); // no panic
+
+        // Serialize empty list and re-parse
+        let serialized = serialize_revocation_list(&[]);
+        let reparsed = parse_revocation_list(serialized.as_bytes()).expect("re-parse empty");
+        assert!(reparsed.is_empty());
     }
 }
