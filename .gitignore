@@ -4,3 +4,5 @@ target/
 # Nix build result symlinks
 result
 result-*
+# ISO build artifact (produced by make iso / make nix-iso)
+anodize.iso
