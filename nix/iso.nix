@@ -63,13 +63,21 @@ in
 
   # nomodeset: disables KMS/DRM so QEMU's SDL display can capture the
   # framebuffer.  On real hardware remove this — the GPU driver is preferable.
-  # quiet + loglevel=3: suppress informational kernel messages during boot so
-  # the screen is clean when the TUI takes over; errors still show through.
-  boot.kernelParams = [ "nomodeset" "quiet" "loglevel=3" ];
+  # Verbose boot is intentional — kernel messages are visible during boot and
+  # the TUI clears the screen (ESC-c in ceremony shell) when it takes over.
+  boot.kernelParams = [ "nomodeset" ];
 
-  # Disable the graphical Plymouth boot splash — we want a clean text console,
-  # and the ceremony appliance has no need for an animated boot screen.
+  # Disable the graphical Plymouth boot splash — irrelevant for an appliance
+  # and would require a framebuffer driver that nomodeset prevents loading.
   boot.plymouth.enable = false;
+
+  # NixOS ISO builds include a graphical GRUB theme by default (NixOS logo,
+  # styled menu). Set to null for a plain text GRUB menu — the first thing
+  # the operator sees should not be NixOS branding.
+  isoImage.grubTheme = null;
+
+  # Remove the GRUB background image as well (set separately from the theme).
+  boot.loader.grub.splashImage = null;
 
   # ── Packages ──────────────────────────────────────────────────────────────
 
