@@ -71,13 +71,22 @@ in
   # and would require a framebuffer driver that nomodeset prevents loading.
   boot.plymouth.enable = false;
 
-  # NixOS ISO builds include a graphical GRUB theme by default (NixOS logo,
-  # styled menu). Set to null for a plain text GRUB menu — the first thing
-  # the operator sees should not be NixOS branding.
-  isoImage.grubTheme = null;
+  # Boot immediately without showing the GRUB menu — there is exactly one
+  # valid boot entry and the operator has no reason to interact with GRUB.
+  # The iso-image module sets timeout = mkDefault 10, so plain 0 suffices.
+  boot.loader.timeout = 0;
 
-  # Remove the GRUB background image as well (set separately from the theme).
-  boot.loader.grub.splashImage = null;
+  # isoImage.efiSplashImage is a *separate* option from isoImage.grubTheme;
+  # it always places efi-background.png on the ISO (the NixOS blue image).
+  # Replace it with a 1×1 black PNG so if GRUB does render anything before
+  # the instant-boot fires, it is a black screen rather than NixOS branding.
+  isoImage.efiSplashImage = pkgs.runCommand "anodize-efi-splash" {
+    nativeBuildInputs = [ pkgs.imagemagick ];
+  } "convert -size 1x1 xc:black PNG:$out";
+
+  # Disable the graphical GRUB theme — rendered moot by timeout=0 but kept
+  # so any forced menu display (e.g. boot errors) is plain text, not NixOS.
+  isoImage.grubTheme = lib.mkForce null;
 
   # ── Packages ──────────────────────────────────────────────────────────────
 
