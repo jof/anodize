@@ -94,6 +94,11 @@ fn main() -> Result<()> {
 
                 mem::forget(locked); // keeps fd (and flock) alive across exec
 
+                // ESC-c (RIS) resets the terminal before the TUI takes over,
+                // wiping the sentinel banner so ratatui starts with a clean slate.
+                print!("\x1bc");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+
                 let err = Command::new(CEREMONY_BIN).exec();
 
                 // exec returned → it failed.  Close the fd to release the flock

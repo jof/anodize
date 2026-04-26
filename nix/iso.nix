@@ -28,7 +28,6 @@ let
   # /run/wrappers/bin/anodize-ceremony, so only one terminal can run the
   # ceremony at a time.  /run/wrappers/bin is in PATH for the ceremony user.
   ceremonyShell = (pkgs.writeShellScriptBin "ceremony-shell" ''
-    printf '\033c'
     exec ${anodize-ceremony}/bin/anodize-sentinel
   '') // { shellPath = "/bin/ceremony-shell"; };
 
