@@ -72,7 +72,53 @@ caller thread ──SyncSender<HsmRequest>──► hsm-actor thread (owns Pkcs1
 
 ### Disc before USB invariant
 
-Every signed artifact (cert, CRL) is held in RAM after signing. The TUI commits the artifact to M-Disc (write-once archival optical) before writing to USB. The USB write step is only reachable in the TUI state machine after the disc write completes successfully. This is enforced structurally — the data is not on disk in any writable location until after M-Disc commit.
+Every signed artifact (cert, CRL) is held in RAM after signing. The TUI commits the artifact to M-Disc (write-once archival optical) before writing to USB. The USB write step is only reachable in the TUI state machine after the disc write completes — a full SG_IO SAO session burn to an M-Disc, not a file write to a pre-mounted path. This is enforced structurally: the data does not exist on any writable path until after the disc session closes successfully.
+
+### Ceremony disc: multi-session SAO archive
+
+The ceremony M-Disc (BD-R or DVD-R) is a permanent, accumulating archive. Each CA operation appends one Session At Once (SAO) session. The disc is left open after each session so future operations can append further sessions; finalization is a deliberate final act.
+
+Every session's ISO 9660 image contains timestamped subdirectories for **all** prior and current sessions (copy-in). The last session is always the complete, browsable view from a standard OS mount. Each session directory contains a full snapshot of the audit log at that point, independently verifiable without reading earlier sessions.
+
+```
+Session 3 ISO (last written — what `mount` shows):
+  /20260425T143000Z/      ← session 1 (root init)
+    ROOT.CRT
+    AUDIT.LOG             ← log at session 1 (1 entry: genesis)
+  /20260426T091500Z/      ← session 2 (sign intermediate)
+    ROOT.CRT
+    INTCA1.CRT
+    AUDIT.LOG             ← log at session 2 (2 entries)
+  /20260510T110000Z/      ← session 3 (this operation)
+    ROOT.CRT
+    INTCA2.CRT
+    AUDIT.LOG             ← full log through session 3 (3 entries)
+```
+
+Directory naming: `YYYYMMDDTHHMMSSZ` (16 chars, UTC). ISO 9660 Level 2 (31-char directory names). File names are uppercase 8.3 for broad reader compatibility.
+
+All disc operations use SG_IO ioctl MMC commands — no external tools, no subprocesses. Key commands:
+
+- `CDROM_DRIVE_STATUS` (0x5326): disc presence check
+- `READ DISC INFORMATION` (0x51): disc status (blank / incomplete / complete), session count, NWA
+- `READ TRACK INFORMATION` (0x52): per-track LBA and size for reading prior sessions
+- `READ(10)` (0x28): read sectors to reconstruct prior session ISO images
+- `SEND OPC INFORMATION` (0x54): laser power calibration before writing
+- `MODE SELECT 10` (0x55) page 0x05: set SAO write mode, open multi-session, BUFE on
+- `RESERVE TRACK` (0x53): obtain the Next Writable Address
+- `WRITE(10)` (0x2A): write ISO image in 32-sector (64 KiB) chunks
+- `SYNCHRONIZE CACHE` (0x35): flush drive write buffer
+- `CLOSE TRACK SESSION` (0x5B): close track (01h), close session (02h), or finalize disc (03h)
+
+Minimum ISO image size is 300 sectors (614 KiB); images are zero-padded to this minimum for DVD-R SAO compatibility.
+
+The system clock is verified first — the TUI's `ClockCheck` screen displays the current UTC time and requires the operator to confirm accuracy before any timestamped session can be written. If the clock is wrong, the operator exits and corrects it before relaunching.
+
+### Ceremony device discovery
+
+The ceremony binary discovers USB sticks and optical drives internally via Linux sysfs (`/sys/block/`). USB partitions are mounted with `nix::mount::mount(2)` (requires `CAP_SYS_ADMIN`, granted via NixOS `security.wrappers` capability wrapper with `cap_sys_admin=ep`). No udisks2 or automount daemon is involved. The USB stick supplying `profile.toml` remains mounted throughout the ceremony and is the output target for the post-disc USB write.
+
+USB mount uses the `nix` crate (v0.29) with `MS_NOEXEC | MS_NOSUID | MS_NODEV` flags; tries vfat first, falls back to ext4. Optical drives are identified by `/sys/block/sr*`. Unmount uses `umount2(MNT_DETACH)` so the binary never leaves a stale mount entry on failure.
 
 ### Append-only signed audit log
 
@@ -259,12 +305,24 @@ The operator interaction surface is entirely the numbered ratatui TUI menu.
 ### Phase 5 — Live ISO (done)
 - `flake.nix` (workspace root) + `nix/iso.nix`: Nix flake with `crane` + `rust-overlay` builds `anodize-ceremony` and `anodize` packages; `nix build .#iso` produces the bootable image
 - Minimal NixOS ISO: no network stack, ephemeral tmpfs, read-only squashfs root; packages: `anodize-ceremony`, `softhsm`, `opensc`
-- udev rule: `SUBSYSTEM=="usb", ATTR{idVendor}=="1050", MODE="0660", GROUP="wheel"` — grants ceremony user access to YubiHSM 2 without requiring root
-- Auto-login → `anodize-ceremony` launches on tty1 via systemd service; no shell exposed to operator
-- udisks2 automounts USB; launcher scans `/run/media/ceremony/*/profile.toml` and execs the TUI with the found profile
+- udev rules: YubiHSM 2 (`idVendor==1050`) and optical drives (`sr[0-9]*`) accessible to wheel group without root
+- `security.wrappers.anodize-ceremony` with `cap_sys_admin=ep` — grants only `CAP_SYS_ADMIN` for `mount(2)`; no setuid
+- Auto-login → ceremony shell on tty1 via getty; shell execs `/run/wrappers/bin/anodize-ceremony` directly; no arguments needed — binary handles device discovery internally
+- `systemd.tmpfiles.rules` create `/run/anodize` and `/run/anodize/usb` with correct ownership before launch
+- No udisks2 — USB discovery and mounting handled internally by the ceremony binary via sysfs + nix::mount
 - Sample profile at `/etc/anodize/profile.example.toml` on the ISO
 - **Builds run in Docker** (same philosophy as Rust CI): `make nix-check` runs the `nix` CI job via `act`; `make nix-iso` runs `nixos/nix` Docker image with `--privileged` for release ISO builds
 - Runbooks: `docs/ceremony-init.md` (root key ceremony), `docs/ceremony-sign.md` (intermediate signing + CRL)
+
+### Phase 6 — Self-managed disc lifecycle (done)
+- Pure-Rust ISO 9660 Level 2 writer (`media/iso9660.rs`): `build_iso` + `parse_iso` roundtrip; both-endian ECMA-119 fields; ≥300-sector padding for DVD-R SAO compatibility
+- SG_IO abstraction (`media/sgdev.rs`): `SgDev` wraps `/dev/sr*`; `cdb_in/cdb_out/cdb_none` over `sg_io` (0x2285) ioctl; SCSI CHECK CONDITION decoded to key/ASC/ASCQ
+- Typed MMC wrappers (`media/mmc.rs`): all disc operations (OPC, write params, reserve, WRITE(10), READ(10), sync cache, close track/session/disc)
+- Multi-session SAO archive: each CA operation appends one session; disc stays open; each session's ISO contains all prior sessions in timestamped subdirectories
+- `ClockCheck` TUI screen: operator confirms UTC clock before any timestamped session is written
+- Internal USB discovery and mounting: `scan_usb_partitions` via `/sys/block`, `mount_usb` via `nix::mount`, vfat→ext4 fallback
+- `--skip-disc` flag: writes staging ISO to `/run/anodize/staging` for dev/test without optical hardware
+- `write_session` background thread: OPC → write params → reserve NWA → WRITE(10) chunks → sync → close track → close session
 
 ### Phase 6 — Production hardening (ongoing)
 - `cargo-deny` + `cargo-vet` in CI
