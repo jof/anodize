@@ -7,12 +7,9 @@ issuing an updated CRL.
 It is less sensitive than the init ceremony but still requires the YubiHSM 2 with the
 root key.
 
-**Tool used**: `anodize sign-csr` (CLI, runs on any Linux machine with the YubiHSM plugged
-in). The ceremony ISO is not required for signing — it is available if a higher-assurance
-environment is needed.
-
-> **Note**: TUI support for CSR signing is planned but not yet implemented. Until then,
-> signing is performed with the `anodize` CLI on a controlled, offline machine.
+> **Note**: CSR signing and CRL issuance via the ceremony TUI are not yet implemented.
+> Until then, perform these operations on a controlled, offline machine with direct
+> access to the `anodize-ca` and `anodize-audit` library crates.
 
 ---
 
@@ -44,32 +41,13 @@ Confirm with the intermediate CA operator:
 
 ### Step 2 — Sign the intermediate CSR
 
-```sh
-anodize --profile profile.toml sign-csr \
-  --csr intermediate.csr \
-  --root-cert root.crt \
-  --cert-out intermediate.crt \
-  --log audit.log \
-  --path-len 0 \
-  --validity-days 1825
-```
+CSR signing is not yet exposed through the ceremony TUI. It must be performed programmatically
+using the `anodize-ca` library:
 
-**Flags:**
-
-| Flag | Description |
-|---|---|
-| `--path-len 0` | `pathLenConstraint=0` — the intermediate cannot issue sub-CAs |
-| `--validity-days 1825` | 5 years; adjust for your policy |
-| `--log audit.log` | Appends a signed audit record; required |
-
-The `sign-csr` command:
-1. Decodes the CSR
-2. Verifies the CSR self-signature before reading any fields
-3. Applies the extension allowlist (BasicConstraints, KeyUsage, SKID, AKID, CDP only)
-4. Rejects any CSR that requests extensions outside the allowlist
-5. Signs with the HSM and writes `intermediate.crt`
-6. Prints the intermediate's SHA-256 fingerprint
-7. Appends an audit record to `audit.log`
+- `sign_intermediate_csr` verifies the CSR self-signature before parsing any fields
+- Extension allowlist enforced: BasicConstraints (CA:TRUE, configurable pathLen), KeyUsage
+  (keyCertSign | cRLSign), SKID, AKID, CDP only — all other CSR extensions are rejected
+- Audit record appended to `audit.log` on success
 
 ### Step 3 — Verify the issued certificate
 
@@ -85,14 +63,7 @@ Confirm with the intermediate CA operator:
 - Validity period is as expected
 - `CRLDistributionPoints` extension contains the correct CDP URL (from `[ca].cdp_url`)
 
-### Step 4 — Verify the audit log
-
-```sh
-anodize --profile profile.toml verify-log audit.log
-# Expected: Log OK: N records verified  (one more than before this signing)
-```
-
-### Step 5 — Deliver the certificate
+### Step 4 — Deliver the certificate
 
 Deliver `intermediate.crt` to the intermediate CA operator via a verified channel.
 They should independently verify the fingerprint.
@@ -101,18 +72,10 @@ They should independently verify the fingerprint.
 
 ## Issuing a CRL
 
-Issue an initial (empty) CRL immediately after the root ceremony and whenever the
-CRL validity window is about to expire:
+CRL issuance is not yet exposed through the ceremony TUI. Use the `anodize-ca` library's
+`issue_crl` function directly. Publish the resulting DER-encoded CRL to the CDP URL
+specified in `[ca].cdp_url`.
 
-```sh
-anodize --profile profile.toml issue-crl \
-  --root-cert root.crt \
-  --crl-out root.crl \
-  --log audit.log \
-  --next-update-days 30
-```
-
-Publish `root.crl` to the CDP URL specified in `[ca].cdp_url`.
 Verify the CRL:
 
 ```sh
@@ -123,7 +86,6 @@ openssl crl -in root.crl -inform DER -noout -text
 
 ## Revoking an intermediate
 
-Revocation support (passing serial numbers to `issue-crl`) is currently documented
-in the API but not yet exposed via the CLI. Track this in the open questions section
-of `docs/design.md`. As a temporary measure, issue a new CRL that pre-dates the
-compromised intermediate's notBefore, then distribute it urgently.
+Revocation support (passing serial numbers to `issue-crl`) is documented in the `anodize-ca`
+API but not yet exposed via the TUI. Track this in the open questions section of
+`docs/design.md`.

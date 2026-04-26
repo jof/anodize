@@ -69,9 +69,8 @@ anodize/
 │   ├── anodize-ca/               # X.509 cert/CRL generation, CSR validation
 │   ├── anodize-audit/            # hash-chained JSONL audit log
 │   ├── anodize-config/           # TOML profile loader (profile.toml)
-│   ├── anodize-tui/              # ceremony binary (anodize-ceremony) + terminal gatekeeper (anodize-sentinel), ship on ISO
-│   │   └── src/media/            # ISO 9660 writer, SG_IO MMC, USB/optical discovery
-│   └── anodize-cli/              # dev binary: clap subcommands, never on ISO
+│   └── anodize-tui/              # ceremony binary (anodize-ceremony) + terminal gatekeeper (anodize-sentinel), ship on ISO
+│       └── src/media/            # ISO 9660 writer, SG_IO MMC, USB/optical discovery
 ├── nix/
 │   └── iso.nix                   # NixOS module for the live image
 ├── tests/
@@ -119,19 +118,6 @@ make dev-iso            # build anodize-dev.iso (NixOS, dev features)
 make qemu-dev           # QEMU SDL — fake-usb.img (profile) + fake-disc-usb.img (disc)
 make qemu-dev-curses    # same but curses display
 ```
-
-## CLI
-
-```sh
-anodize --profile profile.toml init
-anodize --profile profile.toml sign-csr --csr int-ca.csr --root-cert root.crt \
-        --cert-out int-ca.crt --log audit.log --path-len 0 --validity-days 1825
-anodize --profile profile.toml issue-crl --root-cert root.crt \
-        --crl-out root.crl --log audit.log --next-update-days 30
-anodize --profile profile.toml verify-log audit.log
-```
-
-Every mutating command: loads profile → opens HSM → prompts PIN → performs op → appends signed audit record → prints fingerprint.
 
 ## Reproducible builds
 

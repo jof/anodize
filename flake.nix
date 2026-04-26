@@ -75,16 +75,10 @@
           cargoExtraArgs = "--package anodize-tui --features dev-usb-disc,dev-softhsm-usb";
         });
 
-        anodize = craneLib.buildPackage (commonArgs // {
-          inherit cargoArtifacts;
-          pname         = "anodize";
-          version       = "0.1.0";
-          cargoExtraArgs = "--package anodize-cli";
-        });
       in
       {
         packages = {
-          inherit anodize-ceremony anodize-ceremony-dev anodize;
+          inherit anodize-ceremony anodize-ceremony-dev;
           default = anodize-ceremony;
 
           # nix build .#iso  →  bootable ceremony ISO image (x86_64-linux only).

@@ -65,10 +65,12 @@ caller thread ──SyncSender<HsmRequest>──► hsm-actor thread (owns Pkcs1
 
 `C_Initialize` returns `CKR_CRYPTOKI_ALREADY_INITIALIZED` when called a second time in the same process. `Pkcs11Hsm::new` treats this as success — the library is already running and the new context can issue C-level calls normally. This allows unit tests and binaries that create more than one `Pkcs11Hsm` (e.g., opening two different tokens) to work without special handling.
 
-### Two binaries
+### Two binaries (one crate)
 
-- **`anodize-ceremony`** (`anodize-tui` crate): ratatui TUI, ships on the ISO. All operator actions are numbered menu items. No shell exposed.
-- **`anodize`** (`anodize-cli` crate): clap-based CLI for dev/CI only. Never included on the ISO.
+Both binaries live in the `anodize-tui` crate and ship on the ISO:
+
+- **`anodize-ceremony`**: ratatui TUI implementing the full ceremony state machine. All operator actions are numbered menu items. No shell exposed.
+- **`anodize-sentinel`**: terminal gatekeeper. Acquires an exclusive `flock` before exec-ing the ceremony binary; prevents concurrent ceremony runs on multiple TTYs. Offers power-off via `reboot(2)`.
 
 ### Disc before USB invariant
 
@@ -135,7 +137,7 @@ Every operation appends a record to `audit.log`:
 
 Format: JSONL (one JSON object per line). JSON is chosen over CBOR for grep-ability; the file is never large.
 
-`anodize verify-log` walks the file, recomputes hashes, and verifies that corrupting any single byte causes failure at exactly that record.
+The `verify_log` function (in `anodize-audit`) walks the file, recomputes hashes, and verifies that corrupting any single byte causes failure at exactly that record.
 
 ---
 
@@ -192,7 +194,6 @@ Pre-hashing in Rust rather than using `CKM_ECDSA_SHA384` is necessary because So
 | ECDSA | `p384 0.13` with `ecdsa`, `pkcs8` features | Verification in tests; VerifyingKey from SPKI DER for HsmSigner |
 | DER signature | `ecdsa` with `der` feature | `ecdsa::der::Signature<C>` for X.509 builder; `From<ecdsa::Signature<C>>` for P1363→DER |
 | CRL | `x509-cert::crl` | Same RustCrypto family |
-| CLI | `clap 4` derive | Standard |
 | Config | `serde` + `toml` | Standard |
 | Secrets | `secrecy 0.8` | `SecretString` for PINs, zeroizes on drop |
 | Audit hashing | `sha2 0.10` | SHA-256. More boring than BLAKE3 — that's good for a CA |
@@ -297,9 +298,8 @@ The operator interaction surface is entirely the numbered ratatui TUI menu.
 - `genesis_hash(root_cert_der)` = SHA-256(root cert DER) — ties genesis to the specific ceremony
 - Corruption test: single-byte flip detected at correct record index
 
-### Phase 4 — CLI + ceremony TUI (done)
-- `anodize-cli` (`anodize` binary): clap subcommands `init`, `sign-csr`, `issue-crl`, `verify-log`; resolves PIN from `PinSource` (prompt / env / file); prints SHA-256 fingerprint after each signing operation; appends an audit record on every CA operation
-- `anodize-tui` (`anodize-ceremony` binary): ratatui ceremony wizard with six screens (Welcome → EnterPin → KeyAction → CertPreview → DiscDone → Done); disc-before-USB invariant enforced structurally — `do_write_usb()` is only reachable from the `DiscDone` match arm; cert DER held in RAM until disc write succeeds
+### Phase 4 — Ceremony TUI (done)
+- `anodize-tui` (`anodize-ceremony` binary): ratatui ceremony wizard; disc-before-USB invariant enforced structurally — USB write step only reachable from `DiscDone` state; cert DER held in RAM until disc write succeeds
 - PIN input masked with random-length noise: display length ∈ [8, 20], independent of actual PIN length, refreshed on every keystroke. Prevents shoulder-surf length disclosure without requiring a CSPRNG — `SystemTime::now().subsec_nanos()` is sufficient for a human-visible display. Field shows 0 stars only when empty (confirms cleared), nonzero otherwise.
 - Runbooks (`docs/ceremony-init.md`, `docs/ceremony-sign.md`): deferred to Phase 5
 

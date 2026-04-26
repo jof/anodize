@@ -5,7 +5,6 @@ members = [
     "crates/anodize-audit",
     "crates/anodize-config",
     "crates/anodize-tui",
-    "crates/anodize-cli",
 ]
 resolver = "2"
 
@@ -16,7 +15,6 @@ cryptoki       = "0.7"
 x509-cert      = { version = "0.2", features = ["builder"] }
 der            = "0.7"
 spki           = "0.7"
-# CLI (dev binary only)
 clap           = { version = "4", features = ["derive"] }
 # TUI (ceremony binary)
 ratatui        = "0.29"
@@ -41,8 +39,6 @@ nix            = { version = "0.29", features = ["mount", "ioctl", "fs", "reboot
 # Logging
 tracing        = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-# PIN prompt (CLI only)
-rpassword      = "7"
 
 [workspace.package]
 version = "0.1.0"

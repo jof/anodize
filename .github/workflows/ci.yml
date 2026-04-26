@@ -80,9 +80,6 @@ jobs:
       - name: nix build anodize-ceremony
         run: nix build .#anodize-ceremony
 
-      - name: nix build anodize (CLI)
-        run: nix build .#anodize
-
       - name: nix flake check
         run: nix flake check --no-build
 

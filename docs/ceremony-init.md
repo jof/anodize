@@ -146,12 +146,11 @@ only reachable after the M-Disc write completes successfully.
 
 ### Step 9 — Verify audit log
 
-On a separate machine (can be the USB copy):
+On a separate machine (can be the USB copy), verify the audit log using the
+`verify_log` function from the `anodize-audit` library. Expected result: 1 record
+verified, hash chain intact.
 
-```sh
-anodize --profile profile.toml verify-log audit.log
-# Expected output: Log OK: 1 records verified
-```
+> **Note**: a standalone audit log verification tool via the TUI is not yet implemented.
 
 ### Step 10 — Finalise and store
 

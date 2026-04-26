@@ -12,6 +12,22 @@ make deny    # cargo deny check
 make ci      # full CI job locally via act + Docker
 ```
 
+```sh
+# Build ceremony binary with all dev features (never use in a real ceremony)
+make build-dev
+
+# ISO builds — Nix in Docker, first run 10–30 min, cached after
+make anodize.iso      # production ISO
+make anodize-dev.iso  # dev ISO (USB-as-disc via dev-usb-disc feature)
+
+# QEMU dev loop — requires dev ISO and fake USB images
+make fake-usb.img       # 64 MiB FAT profile USB, SoftHSM2 token, PIN: 123456
+make fake-disc-usb.img  # 64 MiB FAT disc-substitute USB (ANODIZE_DISC_ID marker)
+make qemu-dev-curses    # boot dev ISO in terminal curses mode (Ctrl-A X to quit)
+make qemu-dev-sdl       # same with SDL graphics window
+make qemu-curses        # boot production ISO in curses
+```
+
 `--test-threads=1` is used in `make test` as a safe default. It is required for `anodize-hsm` and `anodize-ca` integration tests because `init_test_token()` uses a shared `target/test-softhsm/` directory (rm-rf + recreate). Pure-logic crates (`anodize-config`, `anodize-audit`) do not need it.
 
 ### Running a single test
@@ -35,7 +51,7 @@ Each test calls `init_test_token(label)` which runs `softhsm2-util --init-token`
 
 ### Workspace structure
 
-Six crates plus two placeholder binaries (`anodize-tui`, `anodize-cli`).
+Five library crates plus one binary crate.
 
 | Crate | Role | Status |
 |---|---|---|
@@ -43,8 +59,7 @@ Six crates plus two placeholder binaries (`anodize-tui`, `anodize-cli`).
 | `anodize-ca` | X.509 cert/CRL/CSR | Implemented |
 | `anodize-audit` | Hash-chained JSONL log | Implemented |
 | `anodize-config` | TOML profile loader | Implemented |
-| `anodize-tui` | Ceremony binary (ratatui) | Placeholder |
-| `anodize-cli` | Dev binary (clap) | Placeholder |
+| `anodize-tui` | Ceremony binary (ratatui) | Implemented |
 
 ### HSM abstraction layer (`anodize-hsm`)
 
@@ -65,14 +80,54 @@ Two implementations:
 - No CRL builder exists in x509-cert 0.2; `issue_crl` manually constructs `TbsCertList`, signs its DER bytes, calls `to_bitstring()` on the `DerSignature`
 - `sign_intermediate_csr` verifies the CSR self-signature before reading any fields
 
+### Ceremony TUI (`anodize-tui`)
+
+Two binaries ship on the ISO:
+
+- **`anodize-ceremony`** (`src/main.rs`): ratatui TUI implementing the full 10-state ceremony state machine — `ClockCheck → WaitUsb → ProfileLoaded → EnterPin → WaitDisc → KeyAction → WritingIntent → CertPreview → BurningDisc → DiscDone → Done`. The disc-before-USB invariant is enforced structurally: the USB write step is only reachable from the `DiscDone` state.
+
+- **`anodize-sentinel`** (`src/sentinel.rs`): terminal gatekeeper. Acquires an exclusive `flock` on `/run/anodize/ceremony.lock` before exec-ing the ceremony binary. Prevents concurrent ceremony runs across multiple TTYs. Offers power-off via `reboot(2)` with `CAP_SYS_BOOT`.
+
+**Write-ahead log (WAL)**: before any HSM key operation, an intent session is committed to disc (`cert.root.intent` AUDIT.LOG entry anchored to SHA-256(profile.toml)). The HSM only signs after that disc commit succeeds. A half-burned session is detectable on resume; the ceremony must refuse to burn a second session to the same disc position.
+
+**Media layer** (`src/media/`): pure-Rust ISO 9660 Level 2 writer (`iso9660.rs`), typed MMC/SCSI disc commands over SG_IO ioctl (`mmc.rs`, `sgdev.rs`), USB partition scanning via sysfs and `nix::mount` (`mod.rs`).
+
+**Dev compile features** (never enable in a real ceremony):
+- `dev-usb-disc`: accepts a FAT USB containing an `ANODIZE_DISC_ID` marker file as disc substitute; reads/writes `ceremony.iso` on the USB instead of SG_IO SAO burns
+- `dev-softhsm-usb`: loads a SoftHSM2 token directory from the profile USB instead of the YubiHSM 2
+- Dev builds display a red "DEV BUILD" warning banner so production and dev environments are visually distinct
+
 ### Security invariants to preserve
 
-- **Disc before USB**: in `anodize-tui`, no cert or CRL may be written to USB until write-once optical disc commit succeeds. Enforce structurally in the TUI state machine — the data must not exist on any writable path before the disc write.
-- **Audit log genesis**: `prev_hash[0]` must be SHA-256(root_cert_DER). Do not allow a configurable or zero genesis hash.
+- **Disc before USB**: no cert or CRL may be written to USB until the write-once optical disc commit succeeds. Enforce structurally in the TUI state machine — `DiscDone` is the only predecessor state to the USB write step.
+- **Write-ahead log**: intent committed to disc before HSM key operation. A half-burned session is detectable on resume; the TUI must refuse to burn again at the same disc position.
+- **Audit log genesis**: `prev_hash[0]` must be SHA-256(profile.toml bytes) — established as a WAL prerequisite before any key operation. Do not allow a configurable or zero genesis hash.
 - **CSR policy**: verify the CSR signature before parsing any fields. Only copy a fixed extension allowlist (BasicConstraints, KeyUsage, SKID, AKID, CDP). Reject all others.
 - **PIN source warning**: `pin_source = env:` or `file:` must emit a runtime warning; `prompt` is the only safe ceremony value.
 
 ## Development workflow
+
+### QEMU dev loop
+
+All TUI feature testing happens through QEMU + the dev ISO + curses mode. `cargo test` covers library crate logic. There is no standalone CLI for ad-hoc HSM operations.
+
+**One-time setup** (delete files to regenerate):
+
+```sh
+make fake-usb.img       # profile USB with SoftHSM2 token (dev PIN: 123456)
+make fake-disc-usb.img  # disc-substitute USB
+make anodize-dev.iso    # dev ISO — first run is slow, cached after
+```
+
+**Each dev session**:
+
+```sh
+make qemu-dev-curses    # Ctrl-A X to quit
+# or
+make qemu-dev-sdl       # SDL window
+```
+
+The dev ISO runs `anodize-sentinel` on tty1 and ttyS0. Sentinel execs `anodize-ceremony` built with `dev-usb-disc,dev-softhsm-usb` features. The ceremony binary shows a red "DEV BUILD" banner.
 
 ### Tests as you go
 
