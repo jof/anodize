@@ -1,4 +1,4 @@
-.PHONY: ci nix-check qemu qemu-sdl qemu-curses clean test fmt lint deny
+.PHONY: ci nix-check qemu qemu-sdl qemu-curses qemu-dev qemu-dev-sdl qemu-dev-curses clean test fmt lint deny build-dev
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -8,12 +8,9 @@ ci:
 nix-check:
 	act push --job nix
 
-# Build the bootable ceremony ISO via Docker and copy it to ./anodize.iso.
-# Requires --privileged for squashfs/bootloader tooling.
-# This is a release-only step; it takes 10-30 minutes on first run.
-# A named volume (nix-store) persists the Nix store across runs so repeated
-# builds don't re-download everything and the container doesn't run out of space.
-anodize.iso:
+# Shared helper: runs a Nix build inside Docker and copies the ISO to a local path.
+# Usage: $(call nix-iso-build, <flake-output>, <dest-file>)
+define nix-iso-build
 	docker volume create nix-store 2>/dev/null || true
 	docker run --rm --privileged \
 		-v nix-store:/nix \
@@ -21,12 +18,32 @@ anodize.iso:
 		-w /src \
 		nixos/nix \
 		sh -c 'git config --global --add safe.directory /src && \
-		       nix --extra-experimental-features "nix-command flakes" build .#iso && \
-		       cp -L result/iso/anodize.iso /src/anodize.iso'
-	@echo "ISO ready: $(CURDIR)/anodize.iso"
+		       nix --extra-experimental-features "nix-command flakes" build .#$(1) && \
+		       cp -L result/iso/*.iso /src/$(2)'
+	@echo "ISO ready: $(CURDIR)/$(2)"
+endef
 
-# Create a 64 MiB FAT USB image pre-loaded with a SoftHSM2 profile for QEMU testing.
-# Requires mtools (mcopy).  Only built once — delete to recreate.
+# Production ceremony ISO (optical M-Disc write path).
+# This is a release-only step; first run takes 10-30 minutes.
+anodize.iso:
+	$(call nix-iso-build,iso,anodize.iso)
+
+# Development ISO with dev-usb-disc feature (USB stick as disc substitute).
+# Faster to iterate on than the production ISO; never use in a real ceremony.
+anodize-dev.iso:
+	$(call nix-iso-build,dev-iso,anodize-dev.iso)
+
+dev-iso: anodize-dev.iso
+
+# Create a 64 MiB FAT USB image pre-loaded with a SoftHSM2 profile and a
+# pre-initialized SoftHSM2 token for dev-softhsm-usb testing.
+# Requires: mtools (mcopy, mmd), softhsm2-util.
+# Only built once — delete to recreate.
+#
+# Dev credentials written into this image:
+#   token label : anodize-root-2026
+#   user PIN    : 123456
+#   SO PIN      : 12345678
 fake-usb.img:
 	truncate -s 64M $@
 	mkfs.vfat $@
@@ -43,7 +60,8 @@ fake-usb.img:
 	    'key_spec    = "ecdsa-p384"' \
 	    'pin_source  = "prompt"' \
 	    | mcopy -i $@ - ::profile.toml
-	@echo "$@ ready"
+	bash scripts/init-softhsm-usb.sh $@
+	@echo "$@ ready (dev PIN: 123456)"
 
 # Boot anodize.iso in QEMU via EFI (OVMF) with a fake USB stick.
 # EFI boot uses GRUB (timeout=0 → instant boot) rather than legacy BIOS/ISOLINUX
@@ -64,6 +82,13 @@ QEMU_BASE = qemu-system-x86_64 -enable-kvm -machine pc -cpu host -m 2G -smp 2 \
 	  -device usb-storage,drive=usb0,bus=ehci.0 \
 	  -serial stdio
 
+# QEMU base with a second USB stick for dev-usb-disc testing.
+# fake-usb.img  → profile USB (/dev/sda in guest)
+# fake-disc-usb.img → disc USB (/dev/sdb in guest)
+QEMU_DEV_BASE = $(QEMU_BASE) \
+	  -drive file=fake-disc-usb.img,format=raw,if=none,id=usb1 \
+	  -device usb-storage,drive=usb1,bus=ehci.0
+
 qemu: qemu-sdl
 
 # SDL graphical window.  Serial console output also appears in the terminal
@@ -79,8 +104,35 @@ qemu-curses: anodize.iso fake-usb.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_BASE) -display curses -vga std
 
+# Dev-mode QEMU targets: boot the dev ISO with both profile USB and disc USB attached.
+QEMU_DEV_BASE_ISO = $(subst -cdrom anodize.iso,-cdrom anodize-dev.iso,$(QEMU_DEV_BASE))
+
+qemu-dev: qemu-dev-sdl
+
+qemu-dev-sdl: anodize-dev.iso fake-usb.img fake-disc-usb.img
+	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
+	$(QEMU_DEV_BASE_ISO) -display sdl -vga std
+
+qemu-dev-curses: anodize-dev.iso fake-usb.img fake-disc-usb.img
+	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
+	$(QEMU_DEV_BASE_ISO) -display curses -vga std
+
+# 64 MiB FAT image pre-marked as a disc USB for dev-usb-disc testing.
+# Requires mtools (mcopy).  Only built once — delete to recreate.
+fake-disc-usb.img:
+	truncate -s 64M $@
+	mkfs.vfat $@
+	printf 'disc-usb-dev' | mcopy -i $@ - ::ANODIZE_DISC_ID
+	@echo "$@ ready"
+
+# Build anodize-ceremony with all dev features enabled (never use in ceremony).
+# dev-usb-disc:    USB stick as M-Disc substitute
+# dev-softhsm-usb: SoftHSM2 token directory on profile USB as HSM backend
+build-dev:
+	cargo build -p anodize-tui --features dev-usb-disc,dev-softhsm-usb
+
 clean:
-	rm -f anodize.iso fake-usb.img /tmp/anodize-ovmf-vars.fd
+	rm -f anodize.iso anodize-dev.iso fake-usb.img fake-disc-usb.img /tmp/anodize-ovmf-vars.fd
 
 # Inner-loop shortcuts (no Docker overhead)
 fmt:

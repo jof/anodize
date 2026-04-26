@@ -66,6 +66,15 @@
           cargoExtraArgs = "--package anodize-tui";
         });
 
+        # dev-usb-disc + dev-softhsm-usb: USB sticks for disc and HSM in dev/QEMU.
+        # For development and testing only — never ship in a real ceremony ISO.
+        anodize-ceremony-dev = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname         = "anodize-ceremony";
+          version       = "0.1.0";
+          cargoExtraArgs = "--package anodize-tui --features dev-usb-disc,dev-softhsm-usb";
+        });
+
         anodize = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname         = "anodize";
@@ -75,12 +84,16 @@
       in
       {
         packages = {
-          inherit anodize-ceremony anodize;
+          inherit anodize-ceremony anodize-ceremony-dev anodize;
           default = anodize-ceremony;
 
           # nix build .#iso  →  bootable ceremony ISO image (x86_64-linux only).
-          # Build this via Docker on any host: make nix-iso
+          # Build this via Docker on any host: make anodize.iso
           iso = self.nixosConfigurations.ceremony-iso.config.system.build.isoImage;
+
+          # nix build .#dev-iso  →  dev ISO with dev-usb-disc feature (USB as disc).
+          # Build this via Docker on any host: make anodize-dev.iso
+          dev-iso = self.nixosConfigurations.ceremony-dev-iso.config.system.build.isoImage;
         };
 
         # Development shell — Rust toolchain comes from rustup (rust-toolchain.toml).
@@ -111,6 +124,26 @@
         modules = [
           "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
           ./nix/iso.nix
+        ];
+      };
+
+      # Dev ISO: same NixOS configuration but with the dev-usb-disc binary.
+      # Uses USB sticks instead of M-Disc optical writes for development testing.
+      nixosConfigurations.ceremony-dev-iso = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+
+        specialArgs = {
+          anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony-dev;
+        };
+
+        modules = [
+          "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
+          ./nix/iso.nix
+          {
+            # Distinguish the dev ISO from the production ISO by name.
+            isoImage.isoName = nixpkgs.lib.mkForce "anodize-dev";
+            isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-DEV";
+          }
         ];
       };
     };
