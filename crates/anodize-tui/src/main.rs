@@ -13,8 +13,11 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::SystemTime;
 
 use anodize_audit::{genesis_hash, AuditLog};
-use anodize_ca::{build_root_cert, P384HsmSigner};
-use anodize_config::{load as load_profile, PinSource, Profile};
+use anodize_ca::{build_root_cert, issue_crl, sign_intermediate_csr, CaError, P384HsmSigner};
+use anodize_config::{
+    load as load_profile, parse_revocation_list, serialize_revocation_list, PinSource, Profile,
+    RevocationEntry,
+};
 use anodize_hsm::{Hsm, HsmActor, KeyHandle, KeySpec, Pkcs11Hsm};
 use anyhow::Result;
 use clap::Parser;
@@ -23,7 +26,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use der::Encode;
+use der::{Decode, Encode};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout},
@@ -39,6 +42,7 @@ use ratatui::{
 };
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
+use x509_cert::certificate::Certificate;
 
 use media::{IsoFile, SessionEntry};
 
@@ -46,7 +50,6 @@ use media::{IsoFile, SessionEntry};
 #[command(name = "anodize-ceremony", about = "Root CA key ceremony")]
 struct Cli {
     /// Mount point for USB stick (created if absent).
-    /// Default /tmp path works without tmpfiles setup; production ISO uses /run/anodize/usb.
     #[arg(long, default_value = "/tmp/anodize-usb")]
     usb_mount: PathBuf,
 
@@ -56,20 +59,43 @@ struct Cli {
     skip_disc: bool,
 }
 
+/// Which CA operation is being performed.
+#[derive(Debug, Clone, PartialEq)]
+enum Operation {
+    GenerateRootCa,
+    SignCsr,
+    RevokeCert,
+    IssueCrl,
+    MigrateDisc,
+}
+
 /// Ceremony state machine. Transitions are strictly forward (no back-tracking).
 #[derive(Debug, Clone, PartialEq)]
 enum AppState {
-    ClockCheck,    // First: confirm system clock is correct
-    WaitUsb,       // Scan for USB containing profile.toml (auto-advance)
-    ProfileLoaded, // Profile read; show CA info; [1] to continue
-    EnterPin,      // HSM PIN entry
-    WaitDisc,      // Wait for appendable write-once disc — BEFORE key operation
+    ClockCheck,      // Confirm system clock is correct
+    WaitUsb,         // Scan for USB containing profile.toml (auto-advance)
+    ProfileLoaded,   // Profile read; show CA info; [1] to continue
+    EnterPin,        // HSM PIN entry
+    WaitDisc,        // Wait for appendable write-once disc — BEFORE key operation
+    OperationSelect, // Choose which ceremony mode to run
+    // Mode 1: Generate Root CA
     KeyAction,     // Generate new key or find existing
     WritingIntent, // Background burn of intent session; HSM op follows on success
     CertPreview,   // Show cert + fingerprint; [1] to burn cert session
-    BurningDisc,   // Background burn of cert session in progress
+    BurningDisc,   // Background burn of cert/CRL/data session in progress
     DiscDone,      // Disc written; [1] to write USB; [q] to skip USB
-    Done,          // Complete
+    // Mode 2: Sign CSR
+    LoadCsr,    // CSR loaded from USB; select cert profile
+    CsrPreview, // Show CSR subject + selected profile; [1] to proceed
+    // Mode 3: Revoke Cert + Issue CRL
+    RevokeInput,   // Enter serial number + reason (phase 0=serial, 1=reason)
+    RevokePreview, // Show updated revocation list + CRL number; [1] to proceed
+    // Mode 4: Issue CRL refresh
+    CrlPreview, // Show current revocation list + CRL number; [1] to proceed
+    // Mode 5: Migrate Disc
+    MigrateConfirm,    // Show chain verification + RAM check; [1] to proceed
+    WaitMigrateTarget, // Wait for blank target disc
+    Done,              // Complete
 }
 
 struct App {
@@ -79,20 +105,47 @@ struct App {
     // USB
     usb_mountpoint: PathBuf,
     profile: Option<Profile>,
-    // Raw profile.toml bytes — used as genesis anchor for the audit log chain.
     profile_toml_bytes: Option<Vec<u8>>,
 
     // TUI state
     state: AppState,
     status: String,
 
+    // Active operation
+    current_op: Option<Operation>,
+
     // HSM session
     actor: Option<HsmActor>,
     root_key: Option<KeyHandle>,
 
-    // Cert held in RAM until disc write succeeds
+    // Cert held in RAM until disc write succeeds (Mode 1)
     cert_der: Option<Vec<u8>>,
     fingerprint: Option<String>,
+
+    // CRL held in RAM until disc write succeeds (Modes 1, 3, 4)
+    crl_der: Option<Vec<u8>>,
+
+    // Root cert DER loaded from disc for modes 2/3/4
+    root_cert_der: Option<Vec<u8>>,
+
+    // Mode 2: CSR signing
+    csr_der: Option<Vec<u8>>,
+    csr_subject_display: Option<String>,
+    selected_profile_idx: Option<usize>,
+
+    // Modes 3+4: revocation
+    revocation_list: Vec<RevocationEntry>,
+    crl_number: Option<u64>,
+
+    // Mode 3: revoke input state
+    revoke_serial_buf: String,
+    revoke_reason_buf: String,
+    revoke_phase: u8, // 0=serial entry, 1=reason entry
+
+    // Mode 5: migration
+    migrate_sessions: Vec<SessionEntry>,
+    migrate_chain_ok: bool,
+    migrate_total_bytes: u64,
 
     // PIN input — display length is randomised noise, never reveals actual length
     pin_buf: String,
@@ -104,8 +157,6 @@ struct App {
     burn_rx: Option<Receiver<Result<()>>>,
     #[cfg_attr(feature = "dev-usb-disc", allow(dead_code))]
     skip_disc: bool,
-    // Sessions remaining on disc (set in WaitDisc tick; None = not checked yet)
-    #[cfg_attr(feature = "dev-usb-disc", allow(dead_code))]
     sessions_remaining: Option<u16>,
 
     // WAL intent session written before HSM key operation
@@ -113,10 +164,9 @@ struct App {
     pending_key_action: Option<u8>, // 1=generate, 2=find-existing
     pending_intent_session: Option<SessionEntry>,
 
-    // Dev-mode disc USB (replaces optical when feature is enabled)
+    // Dev-mode disc USB
     #[cfg(feature = "dev-usb-disc")]
     disc_usb: Option<media::usb_disc::DiscUsb>,
-    // Device path of the profile USB — used to enforce separation from disc USB
     #[cfg(feature = "dev-usb-disc")]
     profile_dev: Option<PathBuf>,
 }
@@ -130,10 +180,24 @@ impl App {
             profile_toml_bytes: None,
             state: AppState::ClockCheck,
             status: String::new(),
+            current_op: None,
             actor: None,
             root_key: None,
             cert_der: None,
             fingerprint: None,
+            crl_der: None,
+            root_cert_der: None,
+            csr_der: None,
+            csr_subject_display: None,
+            selected_profile_idx: None,
+            revocation_list: Vec::new(),
+            crl_number: None,
+            revoke_serial_buf: String::new(),
+            revoke_reason_buf: String::new(),
+            revoke_phase: 0,
+            migrate_sessions: Vec::new(),
+            migrate_chain_ok: false,
+            migrate_total_bytes: 0,
             pin_buf: String::new(),
             pin_display_len: 0,
             optical_dev: None,
@@ -204,13 +268,51 @@ impl App {
                         || (self.optical_dev.is_some()
                             && self.sessions_remaining.map(|r| r >= 2).unwrap_or(false));
                     if ready {
-                        self.state = AppState::KeyAction;
-                        self.status = "[1] Generate new P-384 keypair (fresh)  \
-                             [2] Use existing key (resume)"
+                        self.state = AppState::OperationSelect;
+                        self.status = "[1] Generate Root CA  [2] Sign CSR  \
+                            [3] Revoke Cert  [4] Issue CRL  [5] Migrate Disc"
                             .into();
                     }
                 }
             }
+
+            AppState::OperationSelect => match code {
+                KeyCode::Char('1') => {
+                    self.current_op = Some(Operation::GenerateRootCa);
+                    self.state = AppState::KeyAction;
+                    self.status = "[1] Generate new P-384 keypair (fresh)  \
+                         [2] Use existing key (resume)"
+                        .into();
+                }
+                KeyCode::Char('2') => {
+                    self.current_op = Some(Operation::SignCsr);
+                    self.do_load_csr();
+                }
+                KeyCode::Char('3') => {
+                    self.current_op = Some(Operation::RevokeCert);
+                    self.do_load_revocation();
+                    if self.state == AppState::RevokeInput {
+                        self.revoke_phase = 0;
+                        self.revoke_serial_buf.clear();
+                        self.revoke_reason_buf.clear();
+                        self.status =
+                            "Enter certificate serial number (digits). Press Enter to continue."
+                                .into();
+                    }
+                }
+                KeyCode::Char('4') => {
+                    self.current_op = Some(Operation::IssueCrl);
+                    self.do_load_revocation();
+                    if self.state == AppState::CrlPreview {
+                        self.status = "Review CRL details. [1] to proceed, [q] to cancel.".into();
+                    }
+                }
+                KeyCode::Char('5') => {
+                    self.current_op = Some(Operation::MigrateDisc);
+                    self.do_migrate_confirm();
+                }
+                _ => {}
+            },
 
             AppState::KeyAction => match code {
                 KeyCode::Char('1') => {
@@ -226,6 +328,71 @@ impl App {
 
             AppState::WritingIntent => {} // auto-advance when intent burn completes
 
+            AppState::LoadCsr => {
+                // User selects a cert profile by number
+                if let KeyCode::Char(c) = code {
+                    if let Some(d) = c.to_digit(10) {
+                        let idx = d as usize;
+                        let n = self
+                            .profile
+                            .as_ref()
+                            .map(|p| p.cert_profiles.len())
+                            .unwrap_or(0);
+                        if idx >= 1 && idx <= n {
+                            self.selected_profile_idx = Some(idx - 1);
+                            self.state = AppState::CsrPreview;
+                            self.status =
+                                "Review CSR and profile. [1] to proceed, [q] to cancel.".into();
+                        }
+                    }
+                }
+            }
+
+            AppState::CsrPreview => {
+                if code == KeyCode::Char('1') {
+                    self.do_write_intent();
+                }
+            }
+
+            AppState::RevokeInput => match (self.revoke_phase, code) {
+                (0, KeyCode::Char(c)) if c.is_ascii_digit() => {
+                    self.revoke_serial_buf.push(c);
+                }
+                (0, KeyCode::Backspace) => {
+                    self.revoke_serial_buf.pop();
+                }
+                (0, KeyCode::Enter) if !self.revoke_serial_buf.is_empty() => {
+                    self.revoke_phase = 1;
+                    self.status = "Reason (optional, Enter to skip): e.g. key-compromise".into();
+                }
+                (1, KeyCode::Char(c)) => {
+                    self.revoke_reason_buf.push(c);
+                }
+                (1, KeyCode::Backspace) => {
+                    self.revoke_reason_buf.pop();
+                }
+                (1, KeyCode::Enter) => {
+                    self.do_add_revocation_entry();
+                }
+                (1, KeyCode::Esc) => {
+                    self.revoke_phase = 0;
+                    self.status = "Enter certificate serial number (digits). Press Enter.".into();
+                }
+                _ => {}
+            },
+
+            AppState::RevokePreview => {
+                if code == KeyCode::Char('1') {
+                    self.do_write_intent();
+                }
+            }
+
+            AppState::CrlPreview => {
+                if code == KeyCode::Char('1') {
+                    self.do_write_intent();
+                }
+            }
+
             AppState::CertPreview => {
                 if code == KeyCode::Char('1') {
                     self.do_start_burn();
@@ -234,10 +401,39 @@ impl App {
 
             AppState::BurningDisc => {} // auto-advance on burn completion
 
-            // USB write is only reachable from DiscDone — invariant enforced here.
             AppState::DiscDone => {
                 if code == KeyCode::Char('1') {
                     self.do_write_usb();
+                }
+            }
+
+            AppState::MigrateConfirm => {
+                if code == KeyCode::Char('1') {
+                    // Store sessions from old disc; reset disc tracking for new disc scan
+                    self.migrate_sessions = self.prior_sessions.clone();
+                    self.prior_sessions.clear();
+                    self.optical_dev = None;
+                    self.sessions_remaining = None;
+                    #[cfg(feature = "dev-usb-disc")]
+                    {
+                        self.disc_usb = None;
+                    }
+                    self.state = AppState::WaitMigrateTarget;
+                    self.status = "Eject old disc. Insert blank new disc.".into();
+                }
+            }
+
+            AppState::WaitMigrateTarget => {
+                if code == KeyCode::Char('1') {
+                    #[cfg(feature = "dev-usb-disc")]
+                    let ready = self.disc_usb.is_some();
+                    #[cfg(not(feature = "dev-usb-disc"))]
+                    let ready = self.skip_disc
+                        || (self.optical_dev.is_some()
+                            && self.sessions_remaining.map(|r| r >= 50).unwrap_or(false));
+                    if ready {
+                        self.do_start_burn();
+                    }
                 }
             }
 
@@ -269,7 +465,6 @@ impl App {
                             let _ = media::unmount(&self.usb_mountpoint);
                             return;
                         }
-                        // Read raw bytes before parsing — used as genesis anchor for audit chain.
                         let raw_bytes = std::fs::read(&profile_path).unwrap_or_default();
                         match load_profile(&profile_path) {
                             Ok(profile) => {
@@ -296,13 +491,12 @@ impl App {
                         );
                     }
                     Err(e) => {
-                        // Mount attempt failed — show why so the operator isn't left guessing
                         self.status = format!("Mount failed ({diagnostics}): {e}");
                     }
                 }
             }
 
-            AppState::WaitDisc => {
+            AppState::WaitDisc | AppState::WaitMigrateTarget => {
                 #[cfg(feature = "dev-usb-disc")]
                 {
                     let probe = std::path::Path::new("/tmp/anodize-disc-usb-probe");
@@ -319,43 +513,61 @@ impl App {
                                     media::usb_disc::read_disc_usb_sessions(&disc, probe);
                             }
                             let n = self.prior_sessions.len();
+                            let label = if self.state == AppState::WaitMigrateTarget {
+                                "target disc USB"
+                            } else {
+                                "disc USB"
+                            };
                             self.status = format!(
-                                "Disc USB ready ({}, {} prior session(s)). Press [1].",
-                                disc.uuid, n
+                                "{label} ready ({}, {n} session(s)). Press [1].",
+                                disc.uuid
                             );
                             self.disc_usb = Some(disc);
                         }
                         None => {
                             self.disc_usb = None;
-                            self.status = "No disc USB found. Insert USB with ANODIZE_DISC_ID \
-                                 (must be separate from profile USB)."
-                                .into();
+                            let label = if self.state == AppState::WaitMigrateTarget {
+                                "blank target disc USB"
+                            } else {
+                                "disc USB"
+                            };
+                            self.status =
+                                format!("No {label} found. Insert USB with ANODIZE_DISC_ID.");
                         }
                     }
                 }
                 #[cfg(not(feature = "dev-usb-disc"))]
                 {
                     if self.skip_disc {
-                        // In skip-disc mode treat staging dir as "disc ready"
                         self.optical_dev = Some(PathBuf::from("/run/anodize/staging"));
-                        self.status = "--skip-disc mode: disc artifacts will be written to \
-                             /run/anodize/staging. Press [1] to continue."
-                            .into();
+                        self.sessions_remaining = Some(100);
+                        let label = if self.state == AppState::WaitMigrateTarget {
+                            "--skip-disc mode: target disc ready. Press [1]."
+                        } else {
+                            "--skip-disc mode: disc ready. Press [1]."
+                        };
+                        self.status = label.into();
                         return;
                     }
 
                     let drives = media::scan_optical_drives();
                     let mut rw_rejection: Option<String> = None;
+                    let need_blank = self.state == AppState::WaitMigrateTarget;
                     for dev in &drives {
                         match media::disc_is_appendable(dev) {
                             Ok(()) => {
-                                // Read existing sessions if disc is incomplete
                                 let prior = media::read_disc_sessions(dev).unwrap_or_default();
                                 let n = prior.len();
-                                // Capacity check: WAL requires 2 sessions (intent + cert)
                                 let (cap_summary, remaining) = media::disc_capacity_summary(dev);
                                 self.sessions_remaining = Some(remaining);
-                                if remaining < 2 {
+                                if need_blank && n > 0 {
+                                    self.status = format!(
+                                        "Disc in {} has {n} session(s) — need a blank disc for migration.",
+                                        dev.display()
+                                    );
+                                    continue;
+                                }
+                                if !need_blank && remaining < 2 {
                                     self.status = format!(
                                         "Disc in {} is full ({cap_summary}). \
                                          Need 2 sessions for WAL. Insert a new disc.",
@@ -364,8 +576,15 @@ impl App {
                                     continue;
                                 }
                                 self.optical_dev = Some(dev.clone());
-                                self.prior_sessions = prior;
-                                self.status = if n == 0 {
+                                if !need_blank {
+                                    self.prior_sessions = prior;
+                                }
+                                self.status = if need_blank {
+                                    format!(
+                                        "Blank disc in {} ({cap_summary}). Press [1] to write.",
+                                        dev.display()
+                                    )
+                                } else if n == 0 {
                                     format!(
                                         "Blank disc in {} ({cap_summary}). Press [1] to continue.",
                                         dev.display()
@@ -385,7 +604,6 @@ impl App {
                             Err(_) => {}
                         }
                     }
-                    // No suitable disc found
                     self.optical_dev = None;
                     if let Some(msg) = rw_rejection {
                         self.status = msg;
@@ -414,17 +632,26 @@ impl App {
                                 }
                             }
                             Ok(()) => {
-                                // Commit intent session to prior_sessions before HSM operation
                                 if let Some(intent) = self.pending_intent_session.take() {
                                     self.intent_session_dir_name = Some(intent.dir_name.clone());
                                     self.prior_sessions.push(intent);
                                 }
-                                // Disc commit confirmed — HSM key operation is now safe
-                                match self.pending_key_action {
-                                    Some(1) => self.do_generate_and_build(),
-                                    Some(2) => self.do_find_and_build(),
+                                match self.current_op.clone() {
+                                    Some(Operation::GenerateRootCa) => {
+                                        match self.pending_key_action {
+                                            Some(1) => self.do_generate_and_build(),
+                                            Some(2) => self.do_find_and_build(),
+                                            _ => {
+                                                self.status = "Unknown key action".into();
+                                                self.state = AppState::WaitDisc;
+                                            }
+                                        }
+                                    }
+                                    Some(Operation::SignCsr) => self.do_sign_csr(),
+                                    Some(Operation::RevokeCert) => self.do_sign_crl_for_revoke(),
+                                    Some(Operation::IssueCrl) => self.do_sign_crl_refresh(),
                                     _ => {
-                                        self.status = "Unknown key action".into();
+                                        self.status = "Unknown operation after intent".into();
                                         self.state = AppState::WaitDisc;
                                     }
                                 }
@@ -453,7 +680,15 @@ impl App {
                                     .as_deref()
                                     .map(|p| p.display().to_string())
                                     .unwrap_or_else(|| "/run/anodize/staging".into());
-                                self.status = format!("Disc session written: {disc_label}");
+                                let op_label = match self.current_op {
+                                    Some(Operation::GenerateRootCa) => "Root CA + CRL",
+                                    Some(Operation::SignCsr) => "Intermediate cert",
+                                    Some(Operation::RevokeCert) => "Revocation + CRL",
+                                    Some(Operation::IssueCrl) => "CRL refresh",
+                                    Some(Operation::MigrateDisc) => "Disc migration",
+                                    None => "session",
+                                };
+                                self.status = format!("{op_label} written to disc: {disc_label}");
                             }
                             Err(e) => {
                                 self.status =
@@ -509,7 +744,160 @@ impl App {
         .into();
     }
 
-    // ── Key operations ─────────────────────────────────────────────────────────
+    // ── Mode 2: Load CSR ───────────────────────────────────────────────────────
+
+    fn do_load_csr(&mut self) {
+        let csr_path = self.usb_mountpoint.join("csr.der");
+        let csr_bytes = match std::fs::read(&csr_path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.status = format!("Cannot read csr.der from USB: {e}");
+                self.current_op = None;
+                return;
+            }
+        };
+
+        // Validate it's parseable as a CSR; extract subject for operator review
+        let csr_subject = match x509_cert::request::CertReq::from_der(&csr_bytes) {
+            Ok(csr) => csr.info.subject.to_string(),
+            Err(e) => {
+                self.status = format!("csr.der is not a valid DER-encoded CSR: {e}");
+                self.current_op = None;
+                return;
+            }
+        };
+        self.csr_subject_display = Some(csr_subject);
+
+        let profiles_len = self
+            .profile
+            .as_ref()
+            .map(|p| p.cert_profiles.len())
+            .unwrap_or(0);
+        if profiles_len == 0 {
+            self.status =
+                "No [[cert_profiles]] defined in profile.toml. Add at least one profile.".into();
+            self.current_op = None;
+            return;
+        }
+
+        self.csr_der = Some(csr_bytes);
+        self.state = AppState::LoadCsr;
+        self.status = format!("CSR loaded. Select profile [1]–[{profiles_len}].");
+    }
+
+    // ── Mode 3: Add revocation entry ──────────────────────────────────────────
+
+    fn do_add_revocation_entry(&mut self) {
+        let serial: u64 = match self.revoke_serial_buf.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                self.status = format!(
+                    "Invalid serial number: {:?}. Must be a u64.",
+                    self.revoke_serial_buf
+                );
+                return;
+            }
+        };
+
+        let reason = if self.revoke_reason_buf.is_empty() {
+            None
+        } else {
+            Some(self.revoke_reason_buf.clone())
+        };
+
+        // Use current time formatted as RFC 3339
+        let rev_time = {
+            use time::OffsetDateTime;
+            let odt = OffsetDateTime::now_utc();
+            format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                odt.year(),
+                odt.month() as u8,
+                odt.day(),
+                odt.hour(),
+                odt.minute(),
+                odt.second()
+            )
+        };
+
+        self.revocation_list.push(RevocationEntry {
+            serial,
+            revocation_time: rev_time,
+            reason,
+        });
+
+        // Determine CRL number
+        if self.crl_number.is_none() {
+            self.crl_number = Some(next_crl_number_from_sessions(&self.prior_sessions));
+        }
+
+        self.state = AppState::RevokePreview;
+        self.status = "Review revocation. [1] to commit to disc, [q] to cancel.".into();
+    }
+
+    // ── Modes 3+4: Load revocation list from disc ─────────────────────────────
+
+    fn do_load_revocation(&mut self) {
+        // Load root cert DER from disc (needed for signing)
+        self.root_cert_der = load_root_cert_der_from_sessions(&self.prior_sessions);
+        if self.root_cert_der.is_none() {
+            self.status = "No ROOT.CRT found on disc. Generate root CA first.".into();
+            self.current_op = None;
+            return;
+        }
+
+        // Load revocation list from disc (may be empty if no revocations yet)
+        self.revocation_list = load_revocation_from_sessions(&self.prior_sessions);
+
+        // Determine next CRL number
+        self.crl_number = Some(next_crl_number_from_sessions(&self.prior_sessions));
+
+        match self.current_op {
+            Some(Operation::RevokeCert) => {
+                self.state = AppState::RevokeInput;
+            }
+            Some(Operation::IssueCrl) => {
+                self.state = AppState::CrlPreview;
+            }
+            _ => {}
+        }
+    }
+
+    // ── Mode 5: Migrate confirm ───────────────────────────────────────────────
+
+    fn do_migrate_confirm(&mut self) {
+        // RAM check: sum all file data in prior_sessions
+        let total_bytes: u64 = self
+            .prior_sessions
+            .iter()
+            .flat_map(|s| s.files.iter())
+            .map(|f| f.data.len() as u64)
+            .sum();
+        self.migrate_total_bytes = total_bytes;
+
+        const RAM_WARN_THRESHOLD: u64 = 512 * 1024 * 1024; // 512 MiB
+        if total_bytes > RAM_WARN_THRESHOLD {
+            self.status = format!(
+                "WARNING: disc data ({} MiB) exceeds 512 MiB RAM threshold. \
+                 Proceed only if you have sufficient free memory.",
+                total_bytes / (1024 * 1024)
+            );
+        }
+
+        // Verify hash chain across all sessions
+        self.migrate_chain_ok = verify_audit_chain(&self.prior_sessions);
+
+        self.state = AppState::MigrateConfirm;
+        let chain_status = if self.migrate_chain_ok { "OK" } else { "FAIL" };
+        self.status = format!(
+            "Chain: {chain_status}  {} session(s)  {} bytes. \
+             [1] to proceed, [q] to abort.",
+            self.prior_sessions.len(),
+            total_bytes
+        );
+    }
+
+    // ── Key operations (Mode 1) ────────────────────────────────────────────────
 
     fn do_generate_and_build(&mut self) {
         let label = match &self.profile {
@@ -611,38 +999,245 @@ impl App {
                 return;
             }
         };
-        let der = match cert.to_der() {
+        let cert_der = match cert.to_der() {
             Ok(d) => d,
             Err(e) => {
                 self.status = format!("DER encode failed: {e}");
                 return;
             }
         };
-        let fp = sha256_fingerprint(&der);
+
+        // Issue initial CRL (#1, empty) alongside root cert
+        let next_update = SystemTime::now() + std::time::Duration::from_secs(365 * 24 * 3600);
+        let crl_der = match issue_crl(&signer, &cert, &[], next_update, 1) {
+            Ok(d) => d,
+            Err(e) => {
+                self.status = format!("Initial CRL build failed: {e}");
+                return;
+            }
+        };
+
+        let fp = sha256_fingerprint(&cert_der);
         self.fingerprint = Some(fp);
-        self.cert_der = Some(der);
+        self.cert_der = Some(cert_der);
+        self.crl_der = Some(crl_der);
         self.state = AppState::CertPreview;
         self.status = "Certificate built. Verify fingerprint before writing.".into();
     }
 
-    // ── WAL intent write ───────────────────────────────────────────────────────
+    // ── Mode 2: Sign CSR ──────────────────────────────────────────────────────
 
-    /// Write the intent session to disc BEFORE performing any HSM key operation.
-    /// The intent session contains an AUDIT.LOG with one `cert.root.intent` record,
-    /// anchored to SHA-256(profile.toml bytes). The HSM operation only runs after
-    /// the disc write succeeds (enforced in background_tick WritingIntent arm).
-    fn do_write_intent(&mut self) {
-        let (cn, org, country) = match self.profile.as_ref() {
-            Some(p) => (
-                p.ca.common_name.clone(),
-                p.ca.organization.clone(),
-                p.ca.country.clone(),
-            ),
+    fn do_sign_csr(&mut self) {
+        let label = match self.profile.as_ref().map(|p| p.hsm.key_label.clone()) {
+            Some(l) => l,
             None => {
-                self.status = "No profile loaded".into();
+                self.status = "No profile".into();
                 return;
             }
         };
+        let actor = match self.actor.clone() {
+            Some(a) => a,
+            None => {
+                self.status = "No HSM session".into();
+                return;
+            }
+        };
+        let root_key = match actor.find_key(&label) {
+            Ok(k) => k,
+            Err(e) => {
+                self.status = format!("Root key not found: {e}");
+                return;
+            }
+        };
+        let signer = match P384HsmSigner::new(actor, root_key) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("Signer error: {e}");
+                return;
+            }
+        };
+
+        let root_cert_der = match &self.root_cert_der {
+            Some(d) => d.clone(),
+            None => {
+                self.status = "Root cert not loaded from disc".into();
+                return;
+            }
+        };
+        let root_cert = match Certificate::from_der(&root_cert_der) {
+            Ok(c) => c,
+            Err(e) => {
+                self.status = format!("Root cert DER decode failed: {e}");
+                return;
+            }
+        };
+
+        let csr_der = match self.csr_der.as_ref() {
+            Some(d) => d.clone(),
+            None => {
+                self.status = "No CSR loaded".into();
+                return;
+            }
+        };
+
+        let (validity_days, path_len) = match self
+            .profile
+            .as_ref()
+            .and_then(|p| self.selected_profile_idx.map(|i| &p.cert_profiles[i]))
+        {
+            Some(prof) => (prof.validity_days, prof.path_len),
+            None => {
+                self.status = "No cert profile selected".into();
+                return;
+            }
+        };
+
+        let cdp_url = self.profile.as_ref().and_then(|p| p.ca.cdp_url.as_deref());
+
+        let cert = match sign_intermediate_csr(
+            &signer,
+            &root_cert,
+            &csr_der,
+            path_len,
+            validity_days,
+            cdp_url,
+        ) {
+            Ok(c) => c,
+            Err(CaError::CsrSignatureInvalid) => {
+                self.status = "CSR signature verification failed — CSR may be corrupt".into();
+                return;
+            }
+            Err(CaError::CsrExtensionRejected(oid)) => {
+                self.status = format!("CSR contains rejected extension OID: {oid}");
+                return;
+            }
+            Err(e) => {
+                self.status = format!("CSR signing failed: {e}");
+                return;
+            }
+        };
+
+        let cert_der = match cert.to_der() {
+            Ok(d) => d,
+            Err(e) => {
+                self.status = format!("DER encode failed: {e}");
+                return;
+            }
+        };
+
+        let fp = sha256_fingerprint(&cert_der);
+        self.fingerprint = Some(fp);
+        self.cert_der = Some(cert_der);
+        self.state = AppState::CertPreview;
+        self.status = "Intermediate cert signed. Verify fingerprint before writing.".into();
+    }
+
+    // ── Mode 3: Sign CRL for revocation ──────────────────────────────────────
+
+    fn do_sign_crl_for_revoke(&mut self) {
+        self.do_sign_crl_inner();
+    }
+
+    // ── Mode 4: Sign CRL refresh ──────────────────────────────────────────────
+
+    fn do_sign_crl_refresh(&mut self) {
+        self.do_sign_crl_inner();
+    }
+
+    fn do_sign_crl_inner(&mut self) {
+        let label = match self.profile.as_ref().map(|p| p.hsm.key_label.clone()) {
+            Some(l) => l,
+            None => {
+                self.status = "No profile".into();
+                return;
+            }
+        };
+        let actor = match self.actor.clone() {
+            Some(a) => a,
+            None => {
+                self.status = "No HSM session".into();
+                return;
+            }
+        };
+        let root_key = match actor.find_key(&label) {
+            Ok(k) => k,
+            Err(e) => {
+                self.status = format!("Root key not found: {e}");
+                return;
+            }
+        };
+        let signer = match P384HsmSigner::new(actor, root_key) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = format!("Signer error: {e}");
+                return;
+            }
+        };
+
+        let root_cert_der = match &self.root_cert_der {
+            Some(d) => d.clone(),
+            None => {
+                self.status = "Root cert not on disc".into();
+                return;
+            }
+        };
+        let root_cert = match Certificate::from_der(&root_cert_der) {
+            Ok(c) => c,
+            Err(e) => {
+                self.status = format!("Root cert DER decode: {e}");
+                return;
+            }
+        };
+
+        let crl_number = match self.crl_number {
+            Some(n) => n,
+            None => {
+                self.status = "CRL number not determined".into();
+                return;
+            }
+        };
+
+        // Convert RevocationEntry list to (serial, SystemTime) pairs
+        let revoked: Vec<(u64, SystemTime)> = self
+            .revocation_list
+            .iter()
+            .map(|e| {
+                let t = parse_rfc3339_to_system_time(&e.revocation_time)
+                    .unwrap_or_else(SystemTime::now);
+                (e.serial, t)
+            })
+            .collect();
+
+        let next_update = SystemTime::now() + std::time::Duration::from_secs(365 * 24 * 3600);
+
+        let crl_der = match issue_crl(&signer, &root_cert, &revoked, next_update, crl_number) {
+            Ok(d) => d,
+            Err(e) => {
+                self.status = format!("CRL signing failed: {e}");
+                return;
+            }
+        };
+
+        self.crl_der = Some(crl_der);
+        self.do_start_burn();
+    }
+
+    // ── WAL intent write ───────────────────────────────────────────────────────
+
+    fn do_write_intent(&mut self) {
+        // For Mode 2+, load root cert from disc before intent write
+        if matches!(
+            self.current_op,
+            Some(Operation::SignCsr) | Some(Operation::RevokeCert) | Some(Operation::IssueCrl)
+        ) && self.root_cert_der.is_none()
+        {
+            self.root_cert_der = load_root_cert_der_from_sessions(&self.prior_sessions);
+            if self.root_cert_der.is_none() {
+                self.status = "No ROOT.CRT found on disc. Generate root CA first.".into();
+                return;
+            }
+        }
+
         let raw_bytes = match self.profile_toml_bytes.clone() {
             Some(b) => b,
             None => {
@@ -651,22 +1246,15 @@ impl App {
             }
         };
 
-        // Defense-in-depth capacity check
         #[cfg(not(feature = "dev-usb-disc"))]
         if !self.skip_disc && self.sessions_remaining.map(|r| r < 2).unwrap_or(false) {
             self.status = "Disc full — cannot write intent session. Insert new disc.".into();
             return;
         }
 
-        let action_str = match self.pending_key_action {
-            Some(1) => "generate",
-            Some(2) => "find-existing",
-            _ => "unknown",
-        };
         let ts = self.confirmed_time.unwrap_or_else(SystemTime::now);
         let dir_name = media::session_dir_name(ts) + "-intent";
 
-        // Create staging dir and partial audit log anchored to profile.toml bytes
         #[cfg(not(feature = "dev-usb-disc"))]
         let staging = PathBuf::from("/run/anodize/staging");
         #[cfg(feature = "dev-usb-disc")]
@@ -685,25 +1273,14 @@ impl App {
                 return;
             }
         };
-        if let Err(e) = log.append(
-            "cert.root.intent",
-            serde_json::json!({
-                "operation": "sign-root-cert",
-                "key_action": action_str,
-                "cert_params": {
-                    "subject": {
-                        "common_name": cn,
-                        "organization": org,
-                        "country": country,
-                    },
-                    "validity_days": 7305,
-                    "key_algorithm": "ecdsa-p384",
-                    "key_usage": ["keyCertSign", "cRLSign"],
-                    "basic_constraints": { "ca": true, "path_len_constraint": null },
-                },
-                "profile_toml_sha256": genesis_hex,
-            }),
-        ) {
+
+        let intent_event = self.build_intent_audit_event(&genesis_hex);
+        let (event_name, event_data) = match intent_event {
+            Some(e) => e,
+            None => return, // error already set in status
+        };
+
+        if let Err(e) = log.append(&event_name, event_data) {
             self.status = format!("Audit intent append failed: {e}");
             return;
         }
@@ -774,82 +1351,126 @@ impl App {
         }
 
         self.state = AppState::WritingIntent;
-        self.status = "Writing intent to disc. HSM key operation will follow...".into();
+        self.status = "Writing intent to disc. Operation will follow…".into();
+    }
+
+    /// Build the intent audit event (name, data) for the current operation.
+    fn build_intent_audit_event(&self, genesis_hex: &str) -> Option<(String, serde_json::Value)> {
+        match &self.current_op {
+            Some(Operation::GenerateRootCa) => {
+                let (cn, org, country) = self
+                    .profile
+                    .as_ref()
+                    .map(|p| {
+                        (
+                            p.ca.common_name.clone(),
+                            p.ca.organization.clone(),
+                            p.ca.country.clone(),
+                        )
+                    })
+                    .unwrap_or_default();
+                let action_str = match self.pending_key_action {
+                    Some(1) => "generate",
+                    Some(2) => "find-existing",
+                    _ => "unknown",
+                };
+                Some((
+                    "cert.root.intent".into(),
+                    serde_json::json!({
+                        "operation": "sign-root-cert",
+                        "key_action": action_str,
+                        "cert_params": {
+                            "subject": {
+                                "common_name": cn,
+                                "organization": org,
+                                "country": country,
+                            },
+                            "validity_days": 7305,
+                            "key_algorithm": "ecdsa-p384",
+                        },
+                        "profile_toml_sha256": genesis_hex,
+                    }),
+                ))
+            }
+            Some(Operation::SignCsr) => {
+                let csr_hex = self
+                    .csr_der
+                    .as_ref()
+                    .map(|b| {
+                        b.iter()
+                            .map(|byte| format!("{byte:02x}"))
+                            .collect::<String>()
+                    })
+                    .unwrap_or_default();
+                let profile_name = self
+                    .profile
+                    .as_ref()
+                    .and_then(|p| {
+                        self.selected_profile_idx
+                            .map(|i| p.cert_profiles[i].name.clone())
+                    })
+                    .unwrap_or_default();
+                Some((
+                    "cert.csr.intent".into(),
+                    serde_json::json!({
+                        "operation": "sign-csr",
+                        "csr_der_hex": csr_hex,
+                        "profile_name": profile_name,
+                    }),
+                ))
+            }
+            Some(Operation::RevokeCert) => {
+                let serial: u64 = self.revoke_serial_buf.parse().unwrap_or(0);
+                let reason = if self.revoke_reason_buf.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(self.revoke_reason_buf.clone())
+                };
+                Some((
+                    "cert.revoke.intent".into(),
+                    serde_json::json!({
+                        "operation": "revoke-and-issue-crl",
+                        "serial": serial,
+                        "reason": reason,
+                        "crl_number": self.crl_number.unwrap_or(0),
+                        "revocation_count": self.revocation_list.len(),
+                    }),
+                ))
+            }
+            Some(Operation::IssueCrl) => Some((
+                "crl.intent".into(),
+                serde_json::json!({
+                    "operation": "issue-crl",
+                    "crl_number": self.crl_number.unwrap_or(0),
+                    "revocation_count": self.revocation_list.len(),
+                }),
+            )),
+            _ => None,
+        }
     }
 
     // ── Disc burn ──────────────────────────────────────────────────────────────
 
     fn do_start_burn(&mut self) {
-        let cert_der = match &self.cert_der {
-            Some(d) => d.clone(),
-            None => {
-                self.status = "No cert in memory".into();
-                return;
-            }
-        };
-
-        // Reopen the partial audit log written in do_write_intent() and append the cert record.
-        // The staging path must match the one used in do_write_intent().
         #[cfg(not(feature = "dev-usb-disc"))]
         let staging = PathBuf::from("/run/anodize/staging");
         #[cfg(feature = "dev-usb-disc")]
         let staging = PathBuf::from("/tmp/anodize-staging");
-        let log_path = staging.join("audit.log");
-        let mut log = match AuditLog::open(&log_path) {
-            Ok(l) => l,
-            Err(e) => {
-                self.status = format!("Audit log reopen failed: {e}");
-                return;
-            }
-        };
-        let fp = self.fingerprint.clone().unwrap_or_default();
-        let ca_name = self
-            .profile
-            .as_ref()
-            .map(|p| p.ca.common_name.clone())
-            .unwrap_or_default();
-        if let Err(e) = log.append(
-            "cert.root.issue",
-            serde_json::json!({
-                "subject": ca_name,
-                "fingerprint": fp,
-                "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
-            }),
-        ) {
-            self.status = format!("Audit log append failed: {e}");
-            return;
-        }
-        drop(log); // flush to disk
 
-        let audit_bytes = match std::fs::read(&log_path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.status = format!("Cannot read audit log: {e}");
-                return;
-            }
+        // Build session based on current operation
+        let new_session = match self.build_burn_session(&staging) {
+            Some(s) => s,
+            None => return, // error already in status
         };
 
-        // Build session record for this ceremony
-        let ts = self.confirmed_time.unwrap_or_else(SystemTime::now);
-        let dir_name = media::session_dir_name(ts);
-        let new_session = SessionEntry {
-            dir_name,
-            timestamp: ts,
-            files: vec![
-                IsoFile {
-                    name: "ROOT.CRT".into(),
-                    data: cert_der,
-                },
-                IsoFile {
-                    name: "AUDIT.LOG".into(),
-                    data: audit_bytes,
-                },
-            ],
+        let all_sessions = if self.current_op == Some(Operation::MigrateDisc) {
+            // Migration: write stored sessions verbatim (no new session)
+            self.migrate_sessions.clone()
+        } else {
+            let mut sessions = self.prior_sessions.clone();
+            sessions.push(new_session);
+            sessions
         };
-
-        // All sessions: prior (from disc) + new
-        let mut all_sessions = self.prior_sessions.clone();
-        all_sessions.push(new_session);
 
         let (tx, rx) = mpsc::channel();
         self.burn_rx = Some(rx);
@@ -876,7 +1497,6 @@ impl App {
         #[cfg(not(feature = "dev-usb-disc"))]
         {
             if self.skip_disc {
-                // Write ISO to staging path instead of burning
                 let iso = media::iso9660::build_iso(&all_sessions);
                 let iso_path = staging.join("ceremony.iso");
                 match std::fs::write(&iso_path, &iso) {
@@ -900,35 +1520,346 @@ impl App {
         }
     }
 
+    /// Build the SessionEntry for the current operation's disc burn.
+    fn build_burn_session(&mut self, staging: &std::path::Path) -> Option<SessionEntry> {
+        let ts = self.confirmed_time.unwrap_or_else(SystemTime::now);
+        let dir_name = media::session_dir_name(ts);
+
+        match self.current_op.clone() {
+            Some(Operation::GenerateRootCa) => {
+                let cert_der = self.cert_der.clone()?;
+                let crl_der = self.crl_der.clone()?;
+
+                // Append cert.root.issue + crl.issue to audit log
+                let log_path = staging.join("audit.log");
+                let mut log = match AuditLog::open(&log_path) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.status = format!("Audit log reopen failed: {e}");
+                        return None;
+                    }
+                };
+                let fp = self.fingerprint.clone().unwrap_or_default();
+                let ca_name = self
+                    .profile
+                    .as_ref()
+                    .map(|p| p.ca.common_name.clone())
+                    .unwrap_or_default();
+                if let Err(e) = log.append(
+                    "cert.root.issue",
+                    serde_json::json!({
+                        "subject": ca_name,
+                        "fingerprint": fp,
+                        "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+                    }),
+                ) {
+                    self.status = format!("Audit log append failed: {e}");
+                    return None;
+                }
+                if let Err(e) = log.append(
+                    "crl.issue",
+                    serde_json::json!({
+                        "crl_number": 1,
+                        "revocation_count": 0,
+                        "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+                    }),
+                ) {
+                    self.status = format!("CRL audit append failed: {e}");
+                    return None;
+                }
+                drop(log);
+
+                let audit_bytes = match std::fs::read(&log_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.status = format!("Cannot read audit log: {e}");
+                        return None;
+                    }
+                };
+
+                Some(SessionEntry {
+                    dir_name,
+                    timestamp: ts,
+                    files: vec![
+                        IsoFile {
+                            name: "ROOT.CRT".into(),
+                            data: cert_der,
+                        },
+                        IsoFile {
+                            name: "ROOT.CRL".into(),
+                            data: crl_der,
+                        },
+                        IsoFile {
+                            name: "AUDIT.LOG".into(),
+                            data: audit_bytes,
+                        },
+                    ],
+                })
+            }
+
+            Some(Operation::SignCsr) => {
+                let cert_der = self.cert_der.clone()?;
+
+                let log_path = staging.join("audit.log");
+                let mut log = match AuditLog::open(&log_path) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.status = format!("Audit log reopen failed: {e}");
+                        return None;
+                    }
+                };
+                let fp = self.fingerprint.clone().unwrap_or_default();
+                let profile_name = self
+                    .profile
+                    .as_ref()
+                    .and_then(|p| {
+                        self.selected_profile_idx
+                            .map(|i| p.cert_profiles[i].name.clone())
+                    })
+                    .unwrap_or_default();
+                if let Err(e) = log.append(
+                    "cert.intermediate.issue",
+                    serde_json::json!({
+                        "fingerprint": fp,
+                        "profile": profile_name,
+                        "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+                    }),
+                ) {
+                    self.status = format!("Audit log append failed: {e}");
+                    return None;
+                }
+                drop(log);
+
+                let audit_bytes = match std::fs::read(&log_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.status = format!("Cannot read audit log: {e}");
+                        return None;
+                    }
+                };
+
+                Some(SessionEntry {
+                    dir_name,
+                    timestamp: ts,
+                    files: vec![
+                        IsoFile {
+                            name: "INTERMEDIATE.CRT".into(),
+                            data: cert_der,
+                        },
+                        IsoFile {
+                            name: "AUDIT.LOG".into(),
+                            data: audit_bytes,
+                        },
+                    ],
+                })
+            }
+
+            Some(Operation::RevokeCert) => {
+                let crl_der = self.crl_der.clone()?;
+                let revoked_toml = serialize_revocation_list(&self.revocation_list).into_bytes();
+                let crl_number = self.crl_number.unwrap_or(0);
+
+                let log_path = staging.join("audit.log");
+                let mut log = match AuditLog::open(&log_path) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.status = format!("Audit log reopen failed: {e}");
+                        return None;
+                    }
+                };
+                let serial: u64 = self.revoke_serial_buf.parse().unwrap_or(0);
+                let reason = if self.revoke_reason_buf.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(self.revoke_reason_buf.clone())
+                };
+                if let Err(e) = log.append(
+                    "cert.revoke",
+                    serde_json::json!({
+                        "serial": serial,
+                        "reason": reason,
+                        "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+                    }),
+                ) {
+                    self.status = format!("Audit log append failed: {e}");
+                    return None;
+                }
+                if let Err(e) = log.append(
+                    "crl.issue",
+                    serde_json::json!({
+                        "crl_number": crl_number,
+                        "revocation_count": self.revocation_list.len(),
+                        "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+                    }),
+                ) {
+                    self.status = format!("CRL audit append failed: {e}");
+                    return None;
+                }
+                drop(log);
+
+                let audit_bytes = match std::fs::read(&log_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.status = format!("Cannot read audit log: {e}");
+                        return None;
+                    }
+                };
+
+                Some(SessionEntry {
+                    dir_name,
+                    timestamp: ts,
+                    files: vec![
+                        IsoFile {
+                            name: "REVOKED.TOML".into(),
+                            data: revoked_toml,
+                        },
+                        IsoFile {
+                            name: "ROOT.CRL".into(),
+                            data: crl_der,
+                        },
+                        IsoFile {
+                            name: "AUDIT.LOG".into(),
+                            data: audit_bytes,
+                        },
+                    ],
+                })
+            }
+
+            Some(Operation::IssueCrl) => {
+                let crl_der = self.crl_der.clone()?;
+                let crl_number = self.crl_number.unwrap_or(0);
+
+                let log_path = staging.join("audit.log");
+                let mut log = match AuditLog::open(&log_path) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.status = format!("Audit log reopen failed: {e}");
+                        return None;
+                    }
+                };
+                if let Err(e) = log.append(
+                    "crl.issue",
+                    serde_json::json!({
+                        "crl_number": crl_number,
+                        "revocation_count": self.revocation_list.len(),
+                        "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+                    }),
+                ) {
+                    self.status = format!("Audit log append failed: {e}");
+                    return None;
+                }
+                drop(log);
+
+                let audit_bytes = match std::fs::read(&log_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.status = format!("Cannot read audit log: {e}");
+                        return None;
+                    }
+                };
+
+                Some(SessionEntry {
+                    dir_name,
+                    timestamp: ts,
+                    files: vec![
+                        IsoFile {
+                            name: "ROOT.CRL".into(),
+                            data: crl_der,
+                        },
+                        IsoFile {
+                            name: "AUDIT.LOG".into(),
+                            data: audit_bytes,
+                        },
+                    ],
+                })
+            }
+
+            Some(Operation::MigrateDisc) => {
+                // Migration doesn't add a new session; all_sessions = migrate_sessions
+                // Return a dummy session that won't be used
+                Some(SessionEntry {
+                    dir_name,
+                    timestamp: ts,
+                    files: vec![],
+                })
+            }
+
+            None => {
+                self.status = "No operation set".into();
+                None
+            }
+        }
+    }
+
     // ── USB write ──────────────────────────────────────────────────────────────
 
     fn do_write_usb(&mut self) {
-        // Guard: only reachable from DiscDone
         assert_eq!(
             self.state,
             AppState::DiscDone,
             "USB write reached without disc write"
         );
 
-        let cert_der = match &self.cert_der {
-            Some(d) => d.clone(),
-            None => {
-                self.status = "No cert in memory".into();
-                return;
-            }
-        };
-        let usb = &self.usb_mountpoint;
-
-        // The USB is already mounted from WaitUsb; just write files into it
-        if let Err(e) = std::fs::write(usb.join("root.crt"), &cert_der) {
-            self.status = format!("USB write failed (root.crt): {e}");
-            return;
-        }
+        let usb = self.usb_mountpoint.clone();
 
         #[cfg(not(feature = "dev-usb-disc"))]
         let staging_log = PathBuf::from("/run/anodize/staging/audit.log");
         #[cfg(feature = "dev-usb-disc")]
         let staging_log = PathBuf::from("/tmp/anodize-staging/audit.log");
+
+        match self.current_op.clone() {
+            Some(Operation::GenerateRootCa) => {
+                if let Some(cert_der) = &self.cert_der {
+                    if let Err(e) = std::fs::write(usb.join("root.crt"), cert_der) {
+                        self.status = format!("USB write failed (root.crt): {e}");
+                        return;
+                    }
+                }
+                if let Some(crl_der) = &self.crl_der {
+                    if let Err(e) = std::fs::write(usb.join("root.crl"), crl_der) {
+                        self.status = format!("USB write failed (root.crl): {e}");
+                        return;
+                    }
+                }
+            }
+            Some(Operation::SignCsr) => {
+                if let Some(cert_der) = &self.cert_der {
+                    if let Err(e) = std::fs::write(usb.join("intermediate.crt"), cert_der) {
+                        self.status = format!("USB write failed (intermediate.crt): {e}");
+                        return;
+                    }
+                }
+            }
+            Some(Operation::RevokeCert) => {
+                let revoked_toml = serialize_revocation_list(&self.revocation_list);
+                if let Err(e) = std::fs::write(usb.join("revoked.toml"), &revoked_toml) {
+                    self.status = format!("USB write failed (revoked.toml): {e}");
+                    return;
+                }
+                if let Some(crl_der) = &self.crl_der {
+                    if let Err(e) = std::fs::write(usb.join("root.crl"), crl_der) {
+                        self.status = format!("USB write failed (root.crl): {e}");
+                        return;
+                    }
+                }
+            }
+            Some(Operation::IssueCrl) => {
+                if let Some(crl_der) = &self.crl_der {
+                    if let Err(e) = std::fs::write(usb.join("root.crl"), crl_der) {
+                        self.status = format!("USB write failed (root.crl): {e}");
+                        return;
+                    }
+                }
+            }
+            Some(Operation::MigrateDisc) | None => {
+                // No USB export for migration
+                self.state = AppState::Done;
+                self.status = "Migration complete.".into();
+                return;
+            }
+        }
+
+        // Copy audit log to USB for all non-migration operations
         let usb_log = usb.join("audit.log");
         if let Err(e) = std::fs::copy(&staging_log, &usb_log) {
             self.status = format!("Audit log copy to USB failed: {e}");
@@ -942,8 +1873,6 @@ impl App {
 
 // ── Noise PIN masking ─────────────────────────────────────────────────────────
 
-/// Returns a random display length in [8, 20] using subsecond nanos as noise.
-/// Never reveals the actual PIN length — prevents shoulder-surf length disclosure.
 fn noise_display_len() -> usize {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
@@ -966,12 +1895,104 @@ fn sha256_fingerprint(der: &[u8]) -> String {
         .join(":")
 }
 
+// ── Disc session helpers ──────────────────────────────────────────────────────
+
+/// Load ROOT.CRT DER bytes from the first session on disc that contains it.
+fn load_root_cert_der_from_sessions(sessions: &[SessionEntry]) -> Option<Vec<u8>> {
+    sessions.iter().find_map(|s| {
+        s.files
+            .iter()
+            .find(|f| f.name == "ROOT.CRT")
+            .map(|f| f.data.clone())
+    })
+}
+
+/// Load the most recent REVOKED.TOML from disc sessions.
+fn load_revocation_from_sessions(sessions: &[SessionEntry]) -> Vec<RevocationEntry> {
+    for session in sessions.iter().rev() {
+        if let Some(file) = session.files.iter().find(|f| f.name == "REVOKED.TOML") {
+            if let Ok(entries) = parse_revocation_list(&file.data) {
+                return entries;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Determine the next CRL number by scanning audit logs in disc sessions.
+/// Returns last issued crl_number + 1, or 2 if no prior CRL issue found
+/// (1 is reserved for the initial CRL from root CA generation).
+fn next_crl_number_from_sessions(sessions: &[SessionEntry]) -> u64 {
+    let mut last = 0u64;
+    for session in sessions.iter() {
+        if let Some(file) = session.files.iter().find(|f| f.name == "AUDIT.LOG") {
+            for line in file.data.split(|&b| b == b'\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) {
+                    if record.get("event").and_then(|v| v.as_str()) == Some("crl.issue") {
+                        if let Some(n) = record
+                            .get("op_data")
+                            .and_then(|d| d.get("crl_number"))
+                            .and_then(|v| v.as_u64())
+                        {
+                            if n > last {
+                                last = n;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    last + 1
+}
+
+/// Verify the audit hash chain across all sessions. Returns true if chain is intact.
+fn verify_audit_chain(sessions: &[SessionEntry]) -> bool {
+    let mut prev_hash: Option<String> = None;
+    for session in sessions.iter() {
+        if let Some(file) = session.files.iter().find(|f| f.name == "AUDIT.LOG") {
+            for line in file.data.split(|&b| b == b'\n') {
+                if line.is_empty() {
+                    continue;
+                }
+                if let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) {
+                    // Each record must have prev_hash matching the last entry_hash
+                    if let Some(ph) = prev_hash.as_deref() {
+                        if record.get("prev_hash").and_then(|v| v.as_str()) != Some(ph) {
+                            return false;
+                        }
+                    }
+                    prev_hash = record
+                        .get("entry_hash")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_owned());
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Parse an RFC 3339 timestamp string to SystemTime. Falls back to UNIX_EPOCH on error.
+fn parse_rfc3339_to_system_time(s: &str) -> Option<SystemTime> {
+    use time::format_description::well_known::Rfc3339;
+    use time::OffsetDateTime;
+    let odt = OffsetDateTime::parse(s, &Rfc3339).ok()?;
+    let unix_secs = odt.unix_timestamp();
+    let unix_nanos = odt.unix_timestamp_nanos();
+    let nanos = (unix_nanos - (unix_secs as i128) * 1_000_000_000) as u32;
+    if unix_secs >= 0 {
+        Some(SystemTime::UNIX_EPOCH + std::time::Duration::new(unix_secs as u64, nanos))
+    } else {
+        None
+    }
+}
+
 // ── SoftHSM2 USB backend (dev-softhsm-usb feature) ───────────────────────────
 
-/// Write a SoftHSM2 conf file pointing at the token directory on the profile USB
-/// and set SOFTHSM2_CONF so the PKCS#11 module finds it on C_Initialize.
-///
-/// No-ops if `<usb>/softhsm2/tokens/` does not exist.
 #[cfg(feature = "dev-softhsm-usb")]
 fn configure_softhsm_from_usb(usb_mountpoint: &std::path::Path) -> Result<()> {
     let token_dir = usb_mountpoint.join("softhsm2/tokens");
@@ -984,8 +2005,6 @@ fn configure_softhsm_from_usb(usb_mountpoint: &std::path::Path) -> Result<()> {
         token_dir.display()
     );
     std::fs::write(&conf_path, conf)?;
-    // Safety: called from the main event loop before any PKCS#11 module is loaded.
-    // No HSM threads exist at this point, so no concurrent env reads occur.
     unsafe { std::env::set_var("SOFTHSM2_CONF", &conf_path) };
     Ok(())
 }
@@ -996,7 +2015,7 @@ fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
     #[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
-    let header_height = 4u16; // 2 content lines + 2 border lines
+    let header_height = 4u16;
     #[cfg(not(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb")))]
     let header_height = 3u16;
 
@@ -1046,14 +2065,20 @@ fn render(frame: &mut Frame, app: &App) {
                 "Insert Disc"
             }
         }
+        AppState::OperationSelect => "Select Operation",
         AppState::KeyAction => "Key Management",
-        AppState::WritingIntent => "Committing Intent to Disc...",
+        AppState::WritingIntent => "Committing Intent to Disc\u{2026}",
+        AppState::LoadCsr => "Select Certificate Profile",
+        AppState::CsrPreview => "CSR Review \u{2014} VERIFY BEFORE SIGNING",
         AppState::CertPreview => "Certificate Preview \u{2014} VERIFY FINGERPRINT",
+        AppState::RevokeInput => "Revoke Certificate",
+        AppState::RevokePreview => "Revocation Preview \u{2014} VERIFY BEFORE COMMITTING",
+        AppState::CrlPreview => "CRL Issuance Preview",
         AppState::BurningDisc => {
             if cfg!(feature = "dev-usb-disc") {
-                "Writing Cert Session to Disc USB\u{2026}"
+                "Writing Session to Disc USB\u{2026}"
             } else {
-                "Writing Cert Session\u{2026}"
+                "Writing Session\u{2026}"
             }
         }
         AppState::DiscDone => {
@@ -1063,6 +2088,8 @@ fn render(frame: &mut Frame, app: &App) {
                 "Disc Session Written"
             }
         }
+        AppState::MigrateConfirm => "Disc Migration \u{2014} Verify Chain",
+        AppState::WaitMigrateTarget => "Insert Blank Target Disc",
         AppState::Done => "Ceremony Complete",
     };
     let main_block = Block::default().borders(Borders::ALL).title(screen_title);
@@ -1144,14 +2171,13 @@ fn build_body(app: &App) -> Text<'static> {
                     disc.uuid,
                     app.prior_sessions.len()
                 ),
-                None => "  No disc USB found. Insert USB with ANODIZE_DISC_ID \
-                          (must be separate from profile USB)."
-                    .into(),
+                None => "  No disc USB found. Insert USB with ANODIZE_DISC_ID.".into(),
             };
             #[cfg(not(feature = "dev-usb-disc"))]
             let disc_info = match &app.optical_dev {
                 Some(dev) => {
-                    let cap = app.sessions_remaining
+                    let cap = app
+                        .sessions_remaining
                         .map(|r| format!(", {r} sessions remaining"))
                         .unwrap_or_default();
                     format!(
@@ -1160,14 +2186,35 @@ fn build_body(app: &App) -> Text<'static> {
                         app.prior_sessions.len()
                     )
                 }
-                None => "  No appendable disc detected. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc).".into(),
+                None => "  No appendable disc detected. Insert write-once disc.".into(),
             };
             vec![
                 String::new(),
                 disc_info,
                 String::new(),
-                "  [1]  Confirm disc and proceed to key management".into(),
+                "  [1]  Confirm disc and select operation".into(),
                 "  [q]  Abort".into(),
+            ]
+        }
+
+        AppState::OperationSelect => {
+            let n_sessions = app.prior_sessions.len();
+            let disc_label = if n_sessions == 0 {
+                "  Blank disc — no prior sessions.".into()
+            } else {
+                format!("  Disc: {n_sessions} prior session(s).")
+            };
+            vec![
+                String::new(),
+                disc_label,
+                String::new(),
+                "  [1]  Generate new root CA (fresh or resume key)".into(),
+                "  [2]  Sign intermediate CSR  (requires csr.der on USB)".into(),
+                "  [3]  Revoke a certificate   (adds entry + issues new CRL)".into(),
+                "  [4]  Issue CRL refresh      (re-signs current revocation list)".into(),
+                "  [5]  Migrate disc           (copy all sessions to new disc)".into(),
+                String::new(),
+                "  [q]  Quit".into(),
             ]
         }
 
@@ -1196,6 +2243,59 @@ fn build_body(app: &App) -> Text<'static> {
             "  Do not remove the disc or power off.".into(),
         ],
 
+        AppState::LoadCsr => {
+            let profiles = app
+                .profile
+                .as_ref()
+                .map(|p| p.cert_profiles.as_slice())
+                .unwrap_or(&[]);
+            let mut lines = vec![
+                String::new(),
+                "  CSR loaded from USB (csr.der).".into(),
+                String::new(),
+                "  Select certificate profile:".into(),
+                String::new(),
+            ];
+            for (i, prof) in profiles.iter().enumerate() {
+                let path_str = prof
+                    .path_len
+                    .map(|n| format!("  path_len={n}"))
+                    .unwrap_or_default();
+                lines.push(format!(
+                    "  [{}]  {}  (validity={} days{})",
+                    i + 1,
+                    prof.name,
+                    prof.validity_days,
+                    path_str
+                ));
+            }
+            lines.push(String::new());
+            lines.push("  [q]  Cancel".into());
+            lines
+        }
+
+        AppState::CsrPreview => {
+            let subject = app.csr_subject_display.as_deref().unwrap_or("(unknown)");
+            let profile_name = app
+                .profile
+                .as_ref()
+                .and_then(|p| {
+                    app.selected_profile_idx
+                        .map(|i| p.cert_profiles[i].name.as_str())
+                })
+                .unwrap_or("?");
+            vec![
+                String::new(),
+                format!("  CSR Subject : {subject}"),
+                format!("  Profile     : {profile_name}"),
+                String::new(),
+                "  The CSR DER bytes are recorded in the intent audit log.".into(),
+                String::new(),
+                "  [1]  Sign CSR and write to disc".into(),
+                "  [q]  Cancel".into(),
+            ]
+        }
+
         AppState::CertPreview => {
             let fp = app.fingerprint.as_deref().unwrap_or("(none)");
             let ca = app.profile.as_ref().map(|p| &p.ca);
@@ -1208,19 +2308,92 @@ fn build_body(app: &App) -> Text<'static> {
                     )
                 })
                 .unwrap_or(("?", "?", "?"));
-            vec![
+            let has_crl = app.crl_der.is_some();
+            let mut lines = vec![
                 String::new(),
                 format!("  Subject  : CN={cn}, O={org}, C={country}"),
                 "  Validity : 7305 days (20 years)".into(),
                 String::new(),
                 "  SHA-256 Fingerprint:".into(),
                 format!("  {fp}"),
+            ];
+            if has_crl {
+                lines.push(String::new());
+                lines.push("  Initial CRL #1 (empty) will be included in this session.".into());
+            }
+            lines.push(String::new());
+            lines.push("  Compare this fingerprint against your paper checklist.".into());
+            lines.push(String::new());
+            lines.push("  [1]  Proceed to disc write".into());
+            lines.push("  [q]  Abort".into());
+            lines
+        }
+
+        AppState::RevokeInput => {
+            let phase_hint = if app.revoke_phase == 0 {
+                "Enter serial number (digits only):"
+            } else {
+                "Enter reason (optional, press Enter to skip):"
+            };
+            vec![
                 String::new(),
-                "  Compare this fingerprint against your paper checklist.".into(),
+                format!("  {} revoked cert(s) on record.", app.revocation_list.len()),
                 String::new(),
-                "  [1]  Proceed to disc write".into(),
-                "  [q]  Abort".into(),
+                format!("  {phase_hint}"),
+                String::new(),
+                format!("  Serial : {}", app.revoke_serial_buf),
+                format!("  Reason : {}", app.revoke_reason_buf),
+                String::new(),
+                "  Enter to confirm each field. Esc (on reason) to go back.".into(),
             ]
+        }
+
+        AppState::RevokePreview => {
+            let crl_num = app.crl_number.unwrap_or(0);
+            let mut lines = vec![
+                String::new(),
+                format!("  New CRL number: {crl_num}"),
+                String::new(),
+                "  Updated revocation list:".into(),
+                String::new(),
+            ];
+            for entry in &app.revocation_list {
+                let reason = entry.reason.as_deref().unwrap_or("(no reason)");
+                lines.push(format!(
+                    "    serial={:>20}  time={}  reason={}",
+                    entry.serial, entry.revocation_time, reason
+                ));
+            }
+            lines.push(String::new());
+            lines.push("  [1]  Sign CRL and write to disc".into());
+            lines.push("  [q]  Cancel".into());
+            lines
+        }
+
+        AppState::CrlPreview => {
+            let crl_num = app.crl_number.unwrap_or(0);
+            let count = app.revocation_list.len();
+            let mut lines = vec![
+                String::new(),
+                format!("  CRL number      : {crl_num}"),
+                format!("  Revoked entries : {count}"),
+                String::new(),
+            ];
+            if count == 0 {
+                lines.push("  (No certificates have been revoked.)".into());
+            } else {
+                for entry in &app.revocation_list {
+                    let reason = entry.reason.as_deref().unwrap_or("(no reason)");
+                    lines.push(format!(
+                        "    serial={:>20}  time={}  reason={}",
+                        entry.serial, entry.revocation_time, reason
+                    ));
+                }
+            }
+            lines.push(String::new());
+            lines.push("  [1]  Sign CRL and write to disc".into());
+            lines.push("  [q]  Cancel".into());
+            lines
         }
 
         AppState::BurningDisc => vec![
@@ -1236,20 +2409,79 @@ fn build_body(app: &App) -> Text<'static> {
         ],
 
         AppState::DiscDone => {
+            let op_label = match app.current_op {
+                Some(Operation::GenerateRootCa) => "Root CA cert + initial CRL",
+                Some(Operation::SignCsr) => "Intermediate certificate",
+                Some(Operation::RevokeCert) => "Revocation record + CRL",
+                Some(Operation::IssueCrl) => "CRL refresh",
+                Some(Operation::MigrateDisc) => "Disc migration",
+                None => "Session",
+            };
             let fp = app.fingerprint.as_deref().unwrap_or("(none)");
+            let mut lines = vec![
+                String::new(),
+                format!("  {op_label} written to disc successfully."),
+            ];
+            if app.fingerprint.is_some() {
+                lines.push(String::new());
+                lines.push(format!("  Fingerprint: {fp}"));
+            }
+            lines.push(String::new());
+            match app.current_op {
+                Some(Operation::MigrateDisc) => {
+                    lines.push("  [q]  Quit (migration complete; no USB export)".into());
+                }
+                _ => {
+                    lines.push("  [1]  Copy artifacts to USB".into());
+                    lines.push("  [q]  Quit without USB copy (disc is the primary record)".into());
+                }
+            }
+            lines
+        }
+
+        AppState::MigrateConfirm => {
+            let chain_str = if app.migrate_chain_ok {
+                "OK \u{2714}"
+            } else {
+                "FAIL \u{2718}"
+            };
+            let mb = app.migrate_total_bytes / (1024 * 1024);
             vec![
                 String::new(),
-                if cfg!(feature = "dev-usb-disc") {
-                    "  Disc USB written successfully."
-                } else {
-                    "  Disc session written successfully."
-                }
-                .into(),
+                format!("  Sessions  : {}", app.prior_sessions.len()),
+                format!("  Audit chain: {chain_str}"),
+                format!(
+                    "  Total data: {} MiB ({} bytes)",
+                    mb, app.migrate_total_bytes
+                ),
                 String::new(),
-                format!("  Fingerprint: {fp}"),
+                "  Verify chain is OK before proceeding.".into(),
                 String::new(),
-                "  [1]  Copy artifacts to USB".into(),
-                "  [q]  Quit without USB copy (disc is the primary record)".into(),
+                "  [1]  Eject old disc, insert blank new disc".into(),
+                "  [q]  Abort".into(),
+            ]
+        }
+
+        AppState::WaitMigrateTarget => {
+            let session_count = app.migrate_sessions.len();
+            #[cfg(feature = "dev-usb-disc")]
+            let disc_info = match &app.disc_usb {
+                Some(disc) => format!("  Blank disc USB ready ({}). Press [1].", disc.uuid),
+                None => "  Waiting for blank disc USB…".into(),
+            };
+            #[cfg(not(feature = "dev-usb-disc"))]
+            let disc_info = match &app.optical_dev {
+                Some(dev) => format!("  Blank disc in {}. Press [1].", dev.display()),
+                None => "  Waiting for blank write-once disc…".into(),
+            };
+            vec![
+                String::new(),
+                format!("  Ready to copy {session_count} session(s) to new disc."),
+                String::new(),
+                disc_info,
+                String::new(),
+                "  [1]  Write all sessions to new disc".into(),
+                "  [q]  Abort".into(),
             ]
         }
 
@@ -1257,7 +2489,12 @@ fn build_body(app: &App) -> Text<'static> {
             String::new(),
             "  Ceremony complete.".into(),
             String::new(),
-            format!("  USB  : {}  \u{2713}", app.usb_mountpoint.display()),
+            match app.current_op {
+                Some(Operation::MigrateDisc) => {
+                    "  Disc migration finished. Store new disc and archive old disc.".into()
+                }
+                _ => format!("  USB  : {}  \u{2713}", app.usb_mountpoint.display()),
+            },
             String::new(),
             if cfg!(feature = "dev-usb-disc") {
                 "  Remove and store both disc USB and profile USB separately."
@@ -1291,14 +2528,16 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App
                     continue;
                 }
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Char('Q') if app.state != AppState::EnterPin => {
+                    KeyCode::Char('q') | KeyCode::Char('Q')
+                        if app.state != AppState::EnterPin
+                            && app.state != AppState::RevokeInput =>
+                    {
                         break;
                     }
                     other => app.handle_key(other),
                 }
             }
         } else {
-            // 100 ms tick — background scanning
             app.background_tick();
         }
     }
@@ -1307,9 +2546,6 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App
 
 // ── Dev build serial warning ──────────────────────────────────────────────────
 
-/// Print a plaintext warning to the serial console (/dev/ttyS0) before the TUI
-/// takes over the framebuffer.  Silently no-ops if the device is absent or
-/// unwritable (e.g. production hardware with no serial port).
 #[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
 fn warn_dev_serial() {
     use std::io::Write;
@@ -1349,7 +2585,6 @@ fn main() -> Result<()> {
     )?;
     terminal.show_cursor()?;
 
-    // Best-effort USB unmount on exit
     let _ = media::unmount(&app.usb_mountpoint);
 
     result
