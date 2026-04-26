@@ -3,6 +3,8 @@
 //! Provides three command-sending methods (cdb_in, cdb_out, cdb_none) and a
 //! CDROM_DRIVE_STATUS ioctl wrapper.  All operations are direct syscalls —
 //! no subprocess spawning.
+// Entire module is unused in dev-usb-disc builds; suppress dead_code lint.
+#![cfg_attr(feature = "dev-usb-disc", allow(dead_code))]
 
 use std::fs::OpenOptions;
 use std::os::unix::io::AsRawFd;

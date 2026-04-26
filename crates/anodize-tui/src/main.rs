@@ -2,7 +2,7 @@
 //!
 //! Key invariants (enforced structurally):
 //! - `UsbWrite` is only reachable from `DiscDone`.
-//! - `DiscDone` is only set after a successful M-Disc session burn (or --skip-disc).
+//! - `DiscDone` is only set after a successful optical disc session burn (or --skip-disc).
 //! - USB write is therefore impossible without a committed disc write.
 
 mod media;
@@ -41,10 +41,11 @@ use media::{IsoFile, SessionEntry};
 #[command(name = "anodize-ceremony", about = "Root CA key ceremony")]
 struct Cli {
     /// Mount point for USB stick (created if absent).
-    #[arg(long, default_value = "/run/anodize/usb")]
+    /// Default /tmp path works without tmpfiles setup; production ISO uses /run/anodize/usb.
+    #[arg(long, default_value = "/tmp/anodize-usb")]
     usb_mount: PathBuf,
 
-    /// Skip M-Disc burn; write disc artifacts to /run/anodize/staging instead.
+    /// Skip optical disc burn; write disc artifacts to /tmp/anodize-staging instead.
     /// For development and testing only — never use in a real ceremony.
     #[arg(long)]
     skip_disc: bool,
@@ -59,7 +60,7 @@ enum AppState {
     EnterPin,      // HSM PIN entry
     KeyAction,     // Generate new key or find existing
     CertPreview,   // Show cert + fingerprint; [1] to proceed to disc
-    WaitDisc,      // Wait for appendable M-Disc (or staging in skip_disc mode)
+    WaitDisc,      // Wait for appendable write-once disc (or staging in skip_disc mode)
     BurningDisc,   // Background burn in progress
     DiscDone,      // Disc written; [1] to write USB; [q] to skip USB
     Done,          // Complete
@@ -93,7 +94,15 @@ struct App {
     optical_dev: Option<PathBuf>,
     prior_sessions: Vec<SessionEntry>,
     burn_rx: Option<Receiver<Result<()>>>,
+    #[cfg_attr(feature = "dev-usb-disc", allow(dead_code))]
     skip_disc: bool,
+
+    // Dev-mode disc USB (replaces optical when feature is enabled)
+    #[cfg(feature = "dev-usb-disc")]
+    disc_usb: Option<media::usb_disc::DiscUsb>,
+    // Device path of the profile USB — used to enforce separation from disc USB
+    #[cfg(feature = "dev-usb-disc")]
+    profile_dev: Option<PathBuf>,
 }
 
 impl App {
@@ -114,6 +123,10 @@ impl App {
             prior_sessions: Vec::new(),
             burn_rx: None,
             skip_disc,
+            #[cfg(feature = "dev-usb-disc")]
+            disc_usb: None,
+            #[cfg(feature = "dev-usb-disc")]
+            profile_dev: None,
         }
     }
 
@@ -167,15 +180,23 @@ impl App {
             AppState::CertPreview => {
                 if code == KeyCode::Char('1') {
                     self.state = AppState::WaitDisc;
-                    self.status = "Insert blank M-Disc into optical drive…".into();
+                    self.status = if cfg!(feature = "dev-usb-disc") {
+                        "Insert disc USB with ANODIZE_DISC_ID (separate from profile USB)…"
+                    } else {
+                        "Insert write-once disc into optical drive…"
+                    }.into();
                 }
             }
 
             AppState::WaitDisc => {
-                if code == KeyCode::Char('1')
-                    && (self.skip_disc || self.optical_dev.is_some())
-                {
-                    self.do_start_burn();
+                if code == KeyCode::Char('1') {
+                    #[cfg(feature = "dev-usb-disc")]
+                    let ready = self.disc_usb.is_some();
+                    #[cfg(not(feature = "dev-usb-disc"))]
+                    let ready = self.skip_disc || self.optical_dev.is_some();
+                    if ready {
+                        self.do_start_burn();
+                    }
                 }
             }
 
@@ -203,7 +224,17 @@ impl App {
                     return;
                 }
                 match media::find_profile_usb(&candidates, &self.usb_mountpoint) {
-                    Ok(Some(profile_path)) => {
+                    Ok(Some((profile_path, dev_path))) => {
+                        #[cfg(feature = "dev-usb-disc")]
+                        { self.profile_dev = Some(dev_path); }
+                        #[cfg(not(feature = "dev-usb-disc"))]
+                        let _ = dev_path;
+                        #[cfg(feature = "dev-softhsm-usb")]
+                        if let Err(e) = configure_softhsm_from_usb(&self.usb_mountpoint) {
+                            self.status = format!("SoftHSM2 USB setup failed: {e}");
+                            let _ = media::unmount(&self.usb_mountpoint);
+                            return;
+                        }
                         match load_profile(&profile_path) {
                             Ok(profile) => {
                                 if profile.hsm.pin_source != PinSource::Prompt {
@@ -235,45 +266,86 @@ impl App {
             }
 
             AppState::WaitDisc => {
-                if self.skip_disc {
-                    // In skip-disc mode treat staging dir as "disc ready"
-                    self.optical_dev = Some(PathBuf::from("/run/anodize/staging"));
-                    self.status =
-                        "--skip-disc mode: disc artifacts will be written to \
-                         /run/anodize/staging. Press [1] to continue.".into();
-                    return;
-                }
-
-                let drives = media::scan_optical_drives();
-                for dev in &drives {
-                    if media::disc_is_appendable(dev) {
-                        // Read existing sessions if disc is incomplete
-                        let prior = media::read_disc_sessions(dev).unwrap_or_default();
-                        let n = prior.len();
-                        self.optical_dev = Some(dev.clone());
-                        self.prior_sessions = prior;
-                        self.status = if n == 0 {
-                            format!(
-                                "Blank disc in {}. Press [1] to burn session.",
-                                dev.display()
-                            )
-                        } else {
-                            format!(
-                                "Disc in {} has {n} prior session(s). \
-                                 Press [1] to append new session.",
-                                dev.display()
-                            )
-                        };
-                        return;
+                #[cfg(feature = "dev-usb-disc")]
+                {
+                    let probe = std::path::Path::new("/tmp/anodize-disc-usb-probe");
+                    let profile_dev = self.profile_dev.as_deref();
+                    match media::usb_disc::find_disc_usb(profile_dev, probe) {
+                        Some(disc) => {
+                            let same_uuid = self.disc_usb.as_ref()
+                                .map(|d| d.uuid == disc.uuid)
+                                .unwrap_or(false);
+                            if !same_uuid {
+                                self.prior_sessions =
+                                    media::usb_disc::read_disc_usb_sessions(&disc, probe);
+                            }
+                            let n = self.prior_sessions.len();
+                            self.status = format!(
+                                "Disc USB ready ({}, {} prior session(s)). Press [1].",
+                                disc.uuid, n
+                            );
+                            self.disc_usb = Some(disc);
+                        }
+                        None => {
+                            self.disc_usb = None;
+                            self.status =
+                                "No disc USB found. Insert USB with ANODIZE_DISC_ID \
+                                 (must be separate from profile USB).".into();
+                        }
                     }
                 }
-                // No suitable disc found
-                self.optical_dev = None;
-                if drives.is_empty() {
-                    self.status = "No optical drive detected. Insert drive and disc.".into();
-                } else {
-                    self.status =
-                        "No blank/appendable disc found. Insert blank M-Disc.".into();
+                #[cfg(not(feature = "dev-usb-disc"))]
+                {
+                    if self.skip_disc {
+                        // In skip-disc mode treat staging dir as "disc ready"
+                        self.optical_dev = Some(PathBuf::from("/run/anodize/staging"));
+                        self.status =
+                            "--skip-disc mode: disc artifacts will be written to \
+                             /run/anodize/staging. Press [1] to continue.".into();
+                        return;
+                    }
+
+                    let drives = media::scan_optical_drives();
+                    let mut rw_rejection: Option<String> = None;
+                    for dev in &drives {
+                        match media::disc_is_appendable(dev) {
+                            Ok(()) => {
+                                // Read existing sessions if disc is incomplete
+                                let prior = media::read_disc_sessions(dev).unwrap_or_default();
+                                let n = prior.len();
+                                self.optical_dev = Some(dev.clone());
+                                self.prior_sessions = prior;
+                                self.status = if n == 0 {
+                                    format!(
+                                        "Blank disc in {}. Press [1] to burn session.",
+                                        dev.display()
+                                    )
+                                } else {
+                                    format!(
+                                        "Disc in {} has {n} prior session(s). \
+                                         Press [1] to append new session.",
+                                        dev.display()
+                                    )
+                                };
+                                return;
+                            }
+                            Err(ref e) if e.contains("rewritable") => {
+                                rw_rejection = Some(e.clone());
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                    // No suitable disc found
+                    self.optical_dev = None;
+                    if let Some(msg) = rw_rejection {
+                        self.status = msg;
+                    } else if drives.is_empty() {
+                        self.status = "No optical drive detected. Insert drive and disc.".into();
+                    } else {
+                        self.status =
+                            "No blank/appendable disc found. Insert write-once disc \
+                             (BD-R, DVD-R, CD-R, or M-Disc).".into();
+                    }
                 }
             }
 
@@ -284,18 +356,24 @@ impl App {
                         match result {
                             Ok(()) => {
                                 self.state = AppState::DiscDone;
+                                #[cfg(feature = "dev-usb-disc")]
+                                let disc_label = self.disc_usb.as_ref()
+                                    .map(|d| d.uuid.clone())
+                                    .unwrap_or_else(|| "disc USB".into());
+                                #[cfg(not(feature = "dev-usb-disc"))]
                                 let disc_label = self
                                     .optical_dev
                                     .as_deref()
                                     .map(|p| p.display().to_string())
                                     .unwrap_or_else(|| "/run/anodize/staging".into());
-                                self.status =
-                                    format!("M-Disc session written: {disc_label}");
+                                self.status = format!("Disc session written: {disc_label}");
                             }
                             Err(e) => {
                                 self.status = format!("Burn failed: {e} — reinsert disc and retry.");
                                 self.state = AppState::WaitDisc;
                                 self.optical_dev = None;
+                                #[cfg(feature = "dev-usb-disc")]
+                                { self.disc_usb = None; }
                             }
                         }
                     }
@@ -413,7 +491,10 @@ impl App {
         };
 
         // Build audit log in staging dir
+        #[cfg(not(feature = "dev-usb-disc"))]
         let staging = PathBuf::from("/run/anodize/staging");
+        #[cfg(feature = "dev-usb-disc")]
+        let staging = PathBuf::from("/tmp/anodize-staging");
         if let Err(e) = std::fs::create_dir_all(&staging) {
             self.status = format!("Cannot create staging dir: {e}");
             return;
@@ -459,24 +540,45 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.burn_rx = Some(rx);
 
-        if self.skip_disc {
-            // Write ISO to staging path instead of burning
+        #[cfg(feature = "dev-usb-disc")]
+        {
+            let disc = match self.disc_usb.clone() {
+                Some(d) => d,
+                None => {
+                    self.status = "No disc USB — cannot write".into();
+                    self.burn_rx = None;
+                    return;
+                }
+            };
             let iso = media::iso9660::build_iso(&all_sessions);
-            let iso_path = staging.join("ceremony.iso");
-            match std::fs::write(&iso_path, &iso) {
-                Ok(()) => { tx.send(Ok(())).ok(); }
-                Err(e) => { tx.send(Err(anyhow::anyhow!("write staging ISO: {e}"))).ok(); }
-            }
-        } else if let Some(dev) = &self.optical_dev {
-            media::write_session(dev, all_sessions, false, tx);
-        } else {
-            self.status = "No optical device — cannot burn".into();
-            self.burn_rx = None;
-            return;
+            std::thread::spawn(move || {
+                tx.send(media::usb_disc::write_iso_to_disc_usb(&disc, &iso)).ok();
+            });
+            self.state = AppState::BurningDisc;
+            self.status = "Writing ISO to disc USB…".into();
         }
 
-        self.state = AppState::BurningDisc;
-        self.status = "Burning M-Disc session… (this may take a few minutes)".into();
+        #[cfg(not(feature = "dev-usb-disc"))]
+        {
+            if self.skip_disc {
+                // Write ISO to staging path instead of burning
+                let iso = media::iso9660::build_iso(&all_sessions);
+                let iso_path = staging.join("ceremony.iso");
+                match std::fs::write(&iso_path, &iso) {
+                    Ok(()) => { tx.send(Ok(())).ok(); }
+                    Err(e) => { tx.send(Err(anyhow::anyhow!("write staging ISO: {e}"))).ok(); }
+                }
+            } else if let Some(dev) = &self.optical_dev {
+                media::write_session(dev, all_sessions, false, tx);
+            } else {
+                self.status = "No optical device — cannot burn".into();
+                self.burn_rx = None;
+                return;
+            }
+
+            self.state = AppState::BurningDisc;
+            self.status = "Burning disc session… (this may take a few minutes)".into();
+        }
     }
 
     // ── USB write ──────────────────────────────────────────────────────────────
@@ -497,7 +599,10 @@ impl App {
             return;
         }
 
+        #[cfg(not(feature = "dev-usb-disc"))]
         let staging_log = PathBuf::from("/run/anodize/staging/audit.log");
+        #[cfg(feature = "dev-usb-disc")]
+        let staging_log = PathBuf::from("/tmp/anodize-staging/audit.log");
         let usb_log = usb.join("audit.log");
         if let Err(e) = std::fs::copy(&staging_log, &usb_log) {
             self.status = format!("Audit log copy to USB failed: {e}");
@@ -535,6 +640,30 @@ fn sha256_fingerprint(der: &[u8]) -> String {
         .join(":")
 }
 
+// ── SoftHSM2 USB backend (dev-softhsm-usb feature) ───────────────────────────
+
+/// Write a SoftHSM2 conf file pointing at the token directory on the profile USB
+/// and set SOFTHSM2_CONF so the PKCS#11 module finds it on C_Initialize.
+///
+/// No-ops if `<usb>/softhsm2/tokens/` does not exist.
+#[cfg(feature = "dev-softhsm-usb")]
+fn configure_softhsm_from_usb(usb_mountpoint: &std::path::Path) -> Result<()> {
+    let token_dir = usb_mountpoint.join("softhsm2/tokens");
+    if !token_dir.exists() {
+        return Ok(());
+    }
+    let conf_path = std::path::PathBuf::from("/tmp/anodize-softhsm2.conf");
+    let conf = format!(
+        "directories.tokendir = {}\nobjectstore.backend = file\nlog.level = ERROR\nslots.removable = false\n",
+        token_dir.display()
+    );
+    std::fs::write(&conf_path, conf)?;
+    // Safety: called from the main event loop before any PKCS#11 module is loaded.
+    // No HSM threads exist at this point, so no concurrent env reads occur.
+    unsafe { std::env::set_var("SOFTHSM2_CONF", &conf_path) };
+    Ok(())
+}
+
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 fn render(frame: &mut Frame, app: &App) {
@@ -556,9 +685,21 @@ fn render(frame: &mut Frame, app: &App) {
         AppState::EnterPin      => "HSM Authentication",
         AppState::KeyAction     => "Key Management",
         AppState::CertPreview   => "Certificate Preview — VERIFY FINGERPRINT",
-        AppState::WaitDisc      => "Insert M-Disc",
-        AppState::BurningDisc   => "Writing M-Disc Session…",
-        AppState::DiscDone      => "M-Disc Session Written",
+        AppState::WaitDisc => if cfg!(feature = "dev-usb-disc") {
+            "Insert Disc USB"
+        } else {
+            "Insert Disc"
+        },
+        AppState::BurningDisc => if cfg!(feature = "dev-usb-disc") {
+            "Writing to Disc USB\u{2026}"
+        } else {
+            "Writing Disc Session\u{2026}"
+        },
+        AppState::DiscDone => if cfg!(feature = "dev-usb-disc") {
+            "Disc USB Written"
+        } else {
+            "Disc Session Written"
+        },
         AppState::Done          => "Ceremony Complete",
     };
     let main_block = Block::default().borders(Borders::ALL).title(screen_title);
@@ -589,7 +730,7 @@ fn build_body(app: &App) -> Text<'static> {
                 ),
                 String::new(),
                 "  Timestamps derived from this value appear permanently in the".into(),
-                "  M-Disc archive and audit log. Verify against a reference clock.".into(),
+                "  optical disc archive and audit log. Verify against a reference clock.".into(),
                 String::new(),
                 "  [1]  Time is correct — continue".into(),
                 "  [q]  Exit to correct clock, then relaunch".into(),
@@ -655,19 +796,30 @@ fn build_body(app: &App) -> Text<'static> {
                 String::new(),
                 "  Compare this fingerprint against your paper checklist.".into(),
                 String::new(),
-                "  [1]  Proceed to M-Disc write".into(),
+                "  [1]  Proceed to disc write".into(),
                 "  [q]  Abort".into(),
             ]
         }
 
         AppState::WaitDisc => {
+            #[cfg(feature = "dev-usb-disc")]
+            let disc_info = match &app.disc_usb {
+                Some(disc) => format!(
+                    "  Disc USB ready ({})  ({} prior session(s))",
+                    disc.uuid,
+                    app.prior_sessions.len()
+                ),
+                None => "  No disc USB found. Insert USB with ANODIZE_DISC_ID \
+                          (must be separate from profile USB).".into(),
+            };
+            #[cfg(not(feature = "dev-usb-disc"))]
             let disc_info = match &app.optical_dev {
                 Some(dev) => format!(
                     "  Disc ready in {}  ({} prior session(s))",
                     dev.display(),
                     app.prior_sessions.len()
                 ),
-                None => "  No appendable disc detected. Insert blank M-Disc.".into(),
+                None => "  No appendable disc detected. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc).".into(),
             };
             vec![
                 String::new(),
@@ -680,7 +832,11 @@ fn build_body(app: &App) -> Text<'static> {
 
         AppState::BurningDisc => vec![
             String::new(),
-            "  Writing ISO 9660 session to M-Disc…".into(),
+            if cfg!(feature = "dev-usb-disc") {
+                "  Writing ISO 9660 session to disc USB\u{2026}"
+            } else {
+                "  Writing ISO 9660 session to optical disc\u{2026}"
+            }.into(),
             String::new(),
             "  Please wait. Do not remove the disc or USB.".into(),
         ],
@@ -689,7 +845,11 @@ fn build_body(app: &App) -> Text<'static> {
             let fp = app.fingerprint.as_deref().unwrap_or("(none)");
             vec![
                 String::new(),
-                "  M-Disc session written successfully.".into(),
+                if cfg!(feature = "dev-usb-disc") {
+                    "  Disc USB written successfully."
+                } else {
+                    "  Disc session written successfully."
+                }.into(),
                 String::new(),
                 format!("  Fingerprint: {fp}"),
                 String::new(),
@@ -704,7 +864,11 @@ fn build_body(app: &App) -> Text<'static> {
             String::new(),
             format!("  USB  : {}  \u{2713}", app.usb_mountpoint.display()),
             String::new(),
-            "  Remove and store both M-Disc and USB separately.".into(),
+            if cfg!(feature = "dev-usb-disc") {
+                "  Remove and store both disc USB and profile USB separately."
+            } else {
+                "  Remove and store both disc and USB separately."
+            }.into(),
             "  The HSM holds the private key; no key material was written to disk.".into(),
             String::new(),
             "  [q]  Quit".into(),

@@ -2,6 +2,8 @@
 //!
 //! References: MMC-6 (INCITS 505), ECMA-365.
 //! Timeouts are generous — write operations on BD-R can be slow.
+// Entire module is unused in dev-usb-disc builds; suppress dead_code lint.
+#![cfg_attr(feature = "dev-usb-disc", allow(dead_code))]
 
 use anyhow::{bail, Context, Result};
 
@@ -274,4 +276,30 @@ pub fn close_track_session(dev: &SgDev, target: CloseTarget) -> Result<()> {
     dev.cdb_none(&cdb, 180_000)
         .with_context(|| format!("CLOSE TRACK SESSION ({target:?})"))?;
     Ok(())
+}
+
+// ── Media type detection ──────────────────────────────────────────────────────
+
+/// GET CONFIGURATION (0x46) — returns the MMC Current Profile for the loaded disc.
+/// The Current Profile is a 16-bit code that identifies the media type (BD-R, CD-RW, etc.).
+/// RT=0x02 requests only the Feature Header (8 bytes), which always contains the profile.
+pub fn get_current_profile(dev: &SgDev) -> Result<u16> {
+    let cdb: [u8; 10] = [0x46, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, 0x00];
+    let mut buf = [0u8; 8];
+    dev.cdb_in(&cdb, &mut buf, 5_000)?;
+    Ok(u16::from_be_bytes([buf[6], buf[7]]))
+}
+
+const REWRITABLE_PROFILES: &[u16] = &[
+    0x000A, // CD-RW
+    0x0012, // DVD-RAM
+    0x0013, // DVD-RW Restricted Overwrite
+    0x0014, // DVD-RW Sequential Recording
+    0x0017, // DVD-RW Dual Layer
+    0x001A, // DVD+RW
+    0x0043, // BD-RE (Blu-ray Rewritable)
+];
+
+pub fn profile_is_rewritable(profile: u16) -> bool {
+    REWRITABLE_PROFILES.contains(&profile)
 }

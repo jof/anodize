@@ -4,6 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Substitute a USB stick for optical disc writes during development.
+# NEVER enable in a real ceremony — dev testing only.
+dev-usb-disc = []
+# Use a SoftHSM2 token directory on the profile USB as the HSM backend.
+# Writes SOFTHSM2_CONF pointing at <usb>/softhsm2/tokens/ before HSM init.
+# NEVER enable in a real ceremony — dev testing only.
+dev-softhsm-usb = []
+
 [[bin]]
 name = "anodize-ceremony"
 path = "src/main.rs"

@@ -1,12 +1,16 @@
-//! Ceremony device management — USB mounting and M-Disc session lifecycle.
+//! Ceremony device management — USB mounting and optical disc session lifecycle.
 //!
 //! USB mounting uses nix::mount::mount(2) directly (requires CAP_SYS_ADMIN).
 //! Disc operations use SG_IO MMC commands via the sgdev/mmc modules.
 //! No external tool subprocesses.
+// Optical drive functions are unused in dev-usb-disc builds.
+#![cfg_attr(feature = "dev-usb-disc", allow(dead_code, unused_imports))]
 
 pub mod iso9660;
 pub mod mmc;
 pub mod sgdev;
+#[cfg(feature = "dev-usb-disc")]
+pub mod usb_disc;
 
 pub use iso9660::{IsoFile, SessionEntry};
 
@@ -18,9 +22,9 @@ use anyhow::{Context, Result};
 use nix::mount::{mount, umount2, MntFlags, MsFlags};
 
 use mmc::{
-    close_track_session, read_disc_info, read_sectors, read_track_info, reserve_track, send_opc,
-    set_write_parameters, synchronize_cache, write_sectors, CloseTarget, DiscStatus, MultiSession,
-    WriteParams, WriteType,
+    close_track_session, get_current_profile, profile_is_rewritable, read_disc_info, read_sectors,
+    read_track_info, reserve_track, send_opc, set_write_parameters, synchronize_cache,
+    write_sectors, CloseTarget, DiscStatus, MultiSession, WriteParams, WriteType,
 };
 use sgdev::{SgDev, CDS_DISC_OK};
 
@@ -137,19 +141,38 @@ pub fn unmount(mountpoint: &Path) -> Result<()> {
 }
 
 /// Try mounting each candidate partition in turn.
-/// Returns the path to `profile.toml` on the first partition that contains one.
+/// Returns `(profile_path, dev_path)` on the first partition that contains a profile.toml.
 /// Unmounts all partitions that did not contain a profile.
 /// The winning partition is left mounted at `mountpoint`.
-pub fn find_profile_usb(candidates: &[PathBuf], mountpoint: &Path) -> Result<Option<PathBuf>> {
+///
+/// Returns `Err` if every candidate failed to mount (mount errors surface this way).
+/// Returns `Ok(None)` if at least one candidate mounted successfully but none had `profile.toml`.
+pub fn find_profile_usb(
+    candidates: &[PathBuf],
+    mountpoint: &Path,
+) -> Result<Option<(PathBuf, PathBuf)>> {
+    let mut any_mounted = false;
+    let mut mount_errors: Vec<String> = Vec::new();
+
     for dev in candidates {
-        if mount_usb(dev, mountpoint).is_err() {
-            continue;
+        match mount_usb(dev, mountpoint) {
+            Err(e) => {
+                mount_errors.push(format!("{}: {e}", dev.display()));
+                continue;
+            }
+            Ok(()) => {
+                any_mounted = true;
+            }
         }
         let profile = mountpoint.join("profile.toml");
         if profile.exists() {
-            return Ok(Some(profile));
+            return Ok(Some((profile, dev.clone())));
         }
         let _ = unmount(mountpoint);
+    }
+
+    if !any_mounted && !mount_errors.is_empty() {
+        anyhow::bail!("{}", mount_errors.join("; "));
     }
     Ok(None)
 }
@@ -172,20 +195,30 @@ pub fn scan_optical_drives() -> Vec<PathBuf> {
     result
 }
 
-/// Return true if an appendable (blank or incomplete) disc is present in `dev`.
-pub fn disc_is_appendable(dev: &Path) -> bool {
-    let Ok(sg) = SgDev::open(dev) else {
-        return false;
-    };
+/// Return `Ok(())` if an appendable (blank or incomplete) write-once disc is present in `dev`.
+/// Returns `Err(reason)` with a human-readable explanation when a disc is present but rejected.
+pub fn disc_is_appendable(dev: &Path) -> Result<(), String> {
+    let sg = SgDev::open(dev)
+        .map_err(|e| format!("cannot open {}: {e}", dev.display()))?;
     // Quick drive-status check first
     match sg.drive_status() {
-        Ok(s) if s != CDS_DISC_OK => return false,
-        Err(_) => return false,
+        Ok(s) if s != CDS_DISC_OK => return Err("no disc present".into()),
+        Err(e) => return Err(format!("drive status error: {e}")),
         _ => {}
     }
+    // Reject rewritable media — erasable discs undermine the immutable-archive guarantee
+    if let Ok(profile) = get_current_profile(&sg) {
+        if profile_is_rewritable(profile) {
+            return Err(format!(
+                "rewritable media (profile {profile:#06x}) not allowed — \
+                 use write-once disc (BD-R, DVD-R, CD-R, or M-Disc)"
+            ));
+        }
+    }
     match read_disc_info(&sg) {
-        Ok(info) => info.status.is_appendable(),
-        Err(_) => false,
+        Ok(info) if info.status.is_appendable() => Ok(()),
+        Ok(_) => Err("disc is finalized — insert a blank or appendable write-once disc".into()),
+        Err(e) => Err(format!("cannot read disc info: {e}")),
     }
 }
 
@@ -257,6 +290,13 @@ pub fn write_session(
 fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) -> Result<()> {
     let sg = SgDev::open(dev)
         .with_context(|| format!("open optical device {}", dev.display()))?;
+
+    // Defense in depth: refuse to write to rewritable media even if caller already checked
+    if let Ok(profile) = get_current_profile(&sg) {
+        if profile_is_rewritable(profile) {
+            anyhow::bail!("refusing to write to rewritable media (profile {profile:#06x})");
+        }
+    }
 
     // Verify disc is appendable
     let info = read_disc_info(&sg).context("READ DISC INFORMATION")?;
