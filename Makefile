@@ -55,24 +55,26 @@ fake-usb.img:
 # console rather than the EFI framebuffer (efifb breaks SDL VGA capture).
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
-QEMU_BASE = qemu-system-x86_64 -enable-kvm -machine q35 -cpu host -m 2G -smp 2 \
+QEMU_BASE = qemu-system-x86_64 -enable-kvm -machine pc -cpu host -m 2G -smp 2 \
 	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 	  -drive if=pflash,format=raw,file=/tmp/anodize-ovmf-vars.fd \
 	  -cdrom anodize.iso -no-reboot \
 	  -drive file=fake-usb.img,format=raw,if=none,id=usb0 \
 	  -device usb-ehci,id=ehci \
-	  -device usb-storage,drive=usb0,bus=ehci.0
+	  -device usb-storage,drive=usb0,bus=ehci.0 \
+	  -serial stdio
 
 qemu: qemu-sdl
 
-# SDL graphical window — requires a display.  The TUI renders via the VGA text
-# console (video=efifb:off in kernel params) which SDL captures through VGA.
+# SDL graphical window.  Serial console output also appears in the terminal
+# that launched make (via -serial stdio) — useful when SDL shows nothing.
 qemu-sdl: anodize.iso fake-usb.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_BASE) -display sdl -vga std
 
-# Curses mode — renders the VT directly in the current terminal.  No window
-# needed; good for headless/SSH environments.  Press Ctrl-A X to quit QEMU.
+# Curses mode — renders VGA text content in the terminal.  Press Ctrl-A X to
+# quit QEMU.  Only shows VGA text-mode output; framebuffer content is invisible
+# here — compare with SDL or serial stdio output to check boot progress.
 qemu-curses: anodize.iso fake-usb.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_BASE) -display curses -vga std

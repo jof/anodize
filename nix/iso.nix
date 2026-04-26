@@ -61,14 +61,10 @@ in
 
   # ── Boot ──────────────────────────────────────────────────────────────────
 
-  # nomodeset: disables KMS/DRM drivers.
-  # video=efifb:off: disables the EFI framebuffer so the kernel falls back to
-  # the basic VGA text console.  GRUB's EFI boot path switches to the EFI text
-  # console before handing off to Linux ("efifb sometimes has difficulties"),
-  # which breaks SDL VGA capture in QEMU.  With efifb disabled, Linux stays on
-  # the VGA adapter that QEMU's SDL display (and real VGA hardware) can render.
-  # Verbose boot is intentional; the TUI clears the screen (ESC-c) on launch.
-  boot.kernelParams = [ "nomodeset" "video=efifb:off" ];
+  # nomodeset: disables KMS/DRM so the kernel uses the basic efifb/vesa
+  # framebuffer.  Verbose boot is intentional; the TUI clears the screen
+  # (ESC-c in ceremony-shell) when it takes over.
+  boot.kernelParams = [ "nomodeset" ];
 
   # Disable the graphical Plymouth boot splash — irrelevant for an appliance
   # and would require a framebuffer driver that nomodeset prevents loading.
