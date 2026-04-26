@@ -9,9 +9,10 @@ Anodize is a small, auditable root-CA tool written in Rust. It runs air-gapped f
 
 - Signs intermediate CA certificates from CSRs
 - Issues CRLs
-- Maintains a hash-chained audit log tied to the specific ceremony (genesis hash = SHA-256 of root cert DER)
+- Maintains a hash-chained audit log tied to the specific ceremony (genesis hash = SHA-256 of profile.toml bytes, established before the HSM key operation)
 - Records each CA operation as a timestamped session on a write-once optical disc (BD-R, DVD-R, or M-Disc)
 - Runs offline — no network stack compiled into the ISO
+- Gates each physical terminal via `anodize-sentinel` — only one terminal can run the ceremony at a time; a second terminal shows an error and waits
 
 ## What it does not do
 
@@ -31,23 +32,28 @@ The `Hsm` trait abstracts both HSM backends. The binary has no compile-time know
 ## Security invariants
 
 - **Disc before USB**: no certificate or CRL artifact reaches USB until it has been committed to a write-once optical disc (a full SG_IO SAO session burn). Enforced structurally in the TUI state machine — `DiscDone` is the only predecessor state to the USB write step.
-- **Log genesis**: audit log `prev_hash[0]` = SHA-256(root_cert_DER) — ties the log to the specific root ceremony
+- **Write-ahead log**: before any HSM key operation, an intent session (AUDIT.LOG with a `cert.root.intent` record anchored to SHA-256(profile.toml)) is committed to disc. The HSM only signs after that disc commit confirms. A signed cert cannot exist without a disc record of intent.
+- **Log genesis**: audit log `prev_hash[0]` = SHA-256(profile.toml bytes) — established before the HSM key operation (WAL prerequisite); any stable operator-chosen byte sequence works as an anchor
 - **CSR validation**: signature verified before any field is parsed
 - **PIN source**: `pin_source = "prompt"` is the only safe value in ceremony; `env:` and `file:` variants emit a runtime warning
 - **Clock check**: the TUI's first screen requires the operator to confirm the UTC system clock before any timestamped session is written to disc
+- **Single-ceremony terminal**: `anodize-sentinel` acquires an exclusive flock before exec-ing the ceremony process; a second terminal cannot start a ceremony while one is already running
 
 ## Optical disc archive format
 
-Each CA operation appends one SAO session to the optical disc. Sessions accumulate — the disc stays open between ceremonies. Every session's ISO 9660 image contains timestamped subdirectories for all prior and current sessions (copy-in), so the last session is always the complete, browsable view from a standard OS mount:
+Each CA operation appends **two** SAO sessions to the optical disc: an intent session (written before the HSM key operation) followed by a cert session (written after). Sessions accumulate — the disc stays open between ceremonies. Every session's ISO 9660 image contains timestamped subdirectories for all prior and current sessions (copy-in), so the last session is always the complete, browsable view from a standard OS mount:
 
 ```
-Session 3 ISO (last written — what `mount` shows):
-  /20260425T143000Z/    ← session 1: ROOT.CRT + AUDIT.LOG (1 entry)
-  /20260426T091500Z/    ← session 2: ROOT.CRT + INTCA1.CRT + AUDIT.LOG (2 entries)
-  /20260510T110000Z/    ← session 3: ROOT.CRT + INTCA2.CRT + AUDIT.LOG (3 entries)
+Session 4 ISO (last written — what `mount` shows):
+  /20260425T143000Z-intent/    ← session 1: AUDIT.LOG (cert.root.intent, 1 entry)
+  /20260425T143122Z/           ← session 2: ROOT.CRT + AUDIT.LOG (2-entry chain, references intent)
+  /20260426T091500Z-intent/    ← session 3: AUDIT.LOG (signing intent for INTCA1)
+  /20260426T091645Z/           ← session 4: ROOT.CRT + INTCA1.CRT + AUDIT.LOG (4-entry chain)
 ```
 
-All disc operations use SG_IO MMC ioctls — no external tools, no subprocesses.
+The disc capacity guard requires at least 2 sessions remaining before any key operation begins. Maximum sessions per media: CD-R = 99, DVD-R = 254, BD-R/M-Disc = 255.
+
+All disc operations use SG_IO MMC ioctls — no external tools, no subprocesses. Rewritable media (CD-RW, DVD-RW, BD-RE) is rejected at insert time.
 
 ## Workspace layout
 
@@ -63,7 +69,7 @@ anodize/
 │   ├── anodize-ca/               # X.509 cert/CRL generation, CSR validation
 │   ├── anodize-audit/            # hash-chained JSONL audit log
 │   ├── anodize-config/           # TOML profile loader (profile.toml)
-│   ├── anodize-tui/              # ceremony binary: ratatui TUI, ships on ISO
+│   ├── anodize-tui/              # ceremony binary (anodize-ceremony) + terminal gatekeeper (anodize-sentinel), ship on ISO
 │   │   └── src/media/            # ISO 9660 writer, SG_IO MMC, USB/optical discovery
 │   └── anodize-cli/              # dev binary: clap subcommands, never on ISO
 ├── nix/
@@ -90,6 +96,28 @@ cargo test -p anodize-hsm
 
 # ISO 9660 unit tests (no hardware required):
 cargo test -p anodize-tui iso9660
+```
+
+### Dev features (never enable in a real ceremony)
+
+Two compile-time features enable full end-to-end testing without optical hardware:
+
+| Feature | Replaces |
+|---|---|
+| `dev-usb-disc` | Optical disc: scans for a FAT USB partition marked with `ANODIZE_DISC_ID`, reads/writes `ceremony.iso` in place of SG_IO SAO burns |
+| `dev-softhsm-usb` | YubiHSM: reads a SoftHSM2 token directory from the profile USB partition |
+
+```sh
+# Set up a fake profile USB with an embedded SoftHSM2 token:
+scripts/init-softhsm-usb.sh
+
+make build-dev          # cargo build --features dev-usb-disc,dev-softhsm-usb
+make fake-disc-usb.img  # 64 MiB FAT image pre-marked with ANODIZE_DISC_ID
+
+# Boot the dev ISO in QEMU with both fake USB images attached:
+make dev-iso            # build anodize-dev.iso (NixOS, dev features)
+make qemu-dev           # QEMU SDL — fake-usb.img (profile) + fake-disc-usb.img (disc)
+make qemu-dev-curses    # same but curses display
 ```
 
 ## CLI
@@ -127,4 +155,4 @@ make nix-iso        # nix build .#iso               (nixos/nix image, --privileg
 | 4 | CLI + ceremony TUI | Done |
 | 5 | Live ISO (Nix flake, reproducible build) | Done |
 | 6 | Self-managed disc lifecycle: SG_IO SAO, ISO 9660, internal USB mount | Done |
-| 7 | Production hardening, threat model, runbooks | Ongoing |
+| 7 | Production hardening: WAL, sentinel, disc capacity guard, dev ISO | Ongoing |
