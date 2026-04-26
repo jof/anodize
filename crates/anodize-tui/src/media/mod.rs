@@ -24,8 +24,8 @@ use nix::mount::{mount, umount2, MntFlags, MsFlags};
 use mmc::{
     close_track_session, get_current_profile, max_sessions_for_profile, profile_is_rewritable,
     profile_name, read_disc_info, read_sectors, read_track_info, reserve_track, send_opc,
-    set_write_parameters, synchronize_cache, write_sectors, CloseTarget, DiscStatus,
-    MultiSession, WriteParams, WriteType,
+    set_write_parameters, synchronize_cache, write_sectors, CloseTarget, DiscStatus, MultiSession,
+    WriteParams, WriteType,
 };
 use sgdev::{SgDev, CDS_DISC_OK};
 
@@ -221,8 +221,7 @@ pub fn scan_optical_drives() -> Vec<PathBuf> {
 /// Return `Ok(())` if an appendable (blank or incomplete) write-once disc is present in `dev`.
 /// Returns `Err(reason)` with a human-readable explanation when a disc is present but rejected.
 pub fn disc_is_appendable(dev: &Path) -> Result<(), String> {
-    let sg = SgDev::open(dev)
-        .map_err(|e| format!("cannot open {}: {e}", dev.display()))?;
+    let sg = SgDev::open(dev).map_err(|e| format!("cannot open {}: {e}", dev.display()))?;
     // Quick drive-status check first
     match sg.drive_status() {
         Ok(s) if s != CDS_DISC_OK => return Err("no disc present".into()),
@@ -250,8 +249,7 @@ pub fn disc_is_appendable(dev: &Path) -> Result<(), String> {
 /// Read all existing sessions from a disc and return them in chronological order.
 /// Returns an empty Vec for a blank disc.
 pub fn read_disc_sessions(dev: &Path) -> Result<Vec<SessionEntry>> {
-    let sg = SgDev::open(dev)
-        .with_context(|| format!("open {}", dev.display()))?;
+    let sg = SgDev::open(dev).with_context(|| format!("open {}", dev.display()))?;
 
     let info = read_disc_info(&sg).context("READ DISC INFORMATION")?;
     if info.status == DiscStatus::Blank || info.sessions == 0 {
@@ -311,8 +309,7 @@ pub fn write_session(
 }
 
 fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) -> Result<()> {
-    let sg = SgDev::open(dev)
-        .with_context(|| format!("open optical device {}", dev.display()))?;
+    let sg = SgDev::open(dev).with_context(|| format!("open optical device {}", dev.display()))?;
 
     // Defense in depth: refuse to write to rewritable media even if caller already checked
     if let Ok(profile) = get_current_profile(&sg) {
@@ -373,10 +370,7 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
             chunk.to_vec()
         } else {
             let mut p = chunk.to_vec();
-            p.resize(
-                p.len().div_ceil(iso9660::SECTOR) * iso9660::SECTOR,
-                0,
-            );
+            p.resize(p.len().div_ceil(iso9660::SECTOR) * iso9660::SECTOR, 0);
             p
         };
         let lba = nwa + written_sectors;

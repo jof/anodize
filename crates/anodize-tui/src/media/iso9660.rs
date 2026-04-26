@@ -90,7 +90,11 @@ fn dt17(ts: SystemTime) -> [u8; 17] {
 fn dir_rec(is_dir: bool, id: &[u8], lba: u32, data_len: u32, ts: SystemTime) -> Vec<u8> {
     let id_len = id.len();
     let base = 33 + id_len;
-    let total = if base.is_multiple_of(2) { base } else { base + 1 };
+    let total = if base.is_multiple_of(2) {
+        base
+    } else {
+        base + 1
+    };
     let mut r = vec![0u8; total];
     r[0] = total as u8; // length of directory record
     r[1] = 0; // extended attribute length
@@ -98,8 +102,8 @@ fn dir_rec(is_dir: bool, id: &[u8], lba: u32, data_len: u32, ts: SystemTime) -> 
     w32(&mut r, 10, data_len); // data length (both-endian)
     r[18..25].copy_from_slice(&dt7(ts));
     r[25] = if is_dir { 0x02 } else { 0x00 }; // file flags
-    // r[26] file unit size = 0
-    // r[27] interleave gap = 0
+                                              // r[26] file unit size = 0
+                                              // r[27] interleave gap = 0
     w16(&mut r, 28, 1); // volume sequence number (both-endian)
     r[32] = id_len as u8; // length of file identifier
     r[33..33 + id_len].copy_from_slice(id);
@@ -110,7 +114,11 @@ fn dir_rec(is_dir: bool, id: &[u8], lba: u32, data_len: u32, ts: SystemTime) -> 
 fn path_entry(dir_id: &[u8], lba: u32, parent: u16, le: bool) -> Vec<u8> {
     let id_len = dir_id.len();
     let base = 8 + id_len;
-    let total = if base.is_multiple_of(2) { base } else { base + 1 };
+    let total = if base.is_multiple_of(2) {
+        base
+    } else {
+        base + 1
+    };
     let mut e = vec![0u8; total];
     e[0] = id_len as u8;
     e[1] = 0; // extended attribute length
@@ -159,8 +167,8 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
         s[0] = 0x01; // volume descriptor type: primary
         s[1..6].copy_from_slice(b"CD001"); // standard identifier
         s[6] = 0x01; // version
-        // s[7] unused
-        // System identifier (bytes 8–39): spaces
+                     // s[7] unused
+                     // System identifier (bytes 8–39): spaces
         for b in &mut s[8..40] {
             *b = b' ';
         }
@@ -194,7 +202,13 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
 
         // Directory record for root (bytes 156–189, 34 bytes)
         let root_size = root_dir_size(n);
-        let root_rec = dir_rec(true, &[0x00], root_dir_lba, root_size as u32, SystemTime::now());
+        let root_rec = dir_rec(
+            true,
+            &[0x00],
+            root_dir_lba,
+            root_size as u32,
+            SystemTime::now(),
+        );
         assert_eq!(root_rec.len(), 34);
         s[156..190].copy_from_slice(&root_rec);
 
@@ -270,17 +284,28 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
 
     // ── Root directory records (sector 20) ────────────────────────────────────
     {
-        let root = &mut image
-            [root_dir_lba as usize * SECTOR..(root_dir_lba as usize + 1) * SECTOR];
+        let root = &mut image[root_dir_lba as usize * SECTOR..(root_dir_lba as usize + 1) * SECTOR];
         let root_data_len = root_dir_size(n) as u32;
         let mut off = 0;
 
         // "." self-reference
-        let dot = dir_rec(true, &[0x00], root_dir_lba, root_data_len, SystemTime::now());
+        let dot = dir_rec(
+            true,
+            &[0x00],
+            root_dir_lba,
+            root_data_len,
+            SystemTime::now(),
+        );
         root[off..off + dot.len()].copy_from_slice(&dot);
         off += dot.len();
         // ".." parent = root itself for root dir
-        let dotdot = dir_rec(true, &[0x01], root_dir_lba, root_data_len, SystemTime::now());
+        let dotdot = dir_rec(
+            true,
+            &[0x01],
+            root_dir_lba,
+            root_data_len,
+            SystemTime::now(),
+        );
         root[off..off + dotdot.len()].copy_from_slice(&dotdot);
         off += dotdot.len();
         // Session subdirectories
@@ -305,8 +330,7 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
         let dir_data_len = session_dir_size(&sess.files) as u32;
         let root_data_len = root_dir_size(n) as u32;
 
-        let sec =
-            &mut image[dir_lba as usize * SECTOR..(dir_lba as usize + 1) * SECTOR];
+        let sec = &mut image[dir_lba as usize * SECTOR..(dir_lba as usize + 1) * SECTOR];
         let mut off = 0;
 
         // "."
@@ -364,7 +388,11 @@ fn session_dir_size(files: &[IsoFile]) -> usize {
     let mut sz = 68usize;
     for f in files {
         let base = 33 + f.name.len();
-        sz += if base.is_multiple_of(2) { base } else { base + 1 };
+        sz += if base.is_multiple_of(2) {
+            base
+        } else {
+            base + 1
+        };
     }
     sz
 }
@@ -584,7 +612,10 @@ mod tests {
             make_session(
                 "20260425T143000Z",
                 1_000_000,
-                &[("ROOT.CRT", b"cert-der-bytes"), ("AUDIT.LOG", b"log-line-1\n")],
+                &[
+                    ("ROOT.CRT", b"cert-der-bytes"),
+                    ("AUDIT.LOG", b"log-line-1\n"),
+                ],
             ),
             make_session(
                 "20260426T091500Z",

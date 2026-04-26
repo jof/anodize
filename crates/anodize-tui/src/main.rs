@@ -33,7 +33,10 @@ use ratatui::{
     Frame, Terminal,
 };
 #[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
-use ratatui::{style::Modifier, text::{Line, Span}};
+use ratatui::{
+    style::Modifier,
+    text::{Line, Span},
+};
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
 
@@ -107,7 +110,7 @@ struct App {
 
     // WAL intent session written before HSM key operation
     intent_session_dir_name: Option<String>,
-    pending_key_action: Option<u8>,          // 1=generate, 2=find-existing
+    pending_key_action: Option<u8>, // 1=generate, 2=find-existing
     pending_intent_session: Option<SessionEntry>,
 
     // Dev-mode disc USB (replaces optical when feature is enabled)
@@ -176,8 +179,11 @@ impl App {
                 }
                 KeyCode::Backspace => {
                     self.pin_buf.pop();
-                    self.pin_display_len =
-                        if self.pin_buf.is_empty() { 0 } else { noise_display_len() };
+                    self.pin_display_len = if self.pin_buf.is_empty() {
+                        0
+                    } else {
+                        noise_display_len()
+                    };
                 }
                 KeyCode::Enter => self.do_login(),
                 KeyCode::Esc => {
@@ -199,16 +205,22 @@ impl App {
                             && self.sessions_remaining.map(|r| r >= 2).unwrap_or(false));
                     if ready {
                         self.state = AppState::KeyAction;
-                        self.status =
-                            "[1] Generate new P-384 keypair (fresh)  \
-                             [2] Use existing key (resume)".into();
+                        self.status = "[1] Generate new P-384 keypair (fresh)  \
+                             [2] Use existing key (resume)"
+                            .into();
                     }
                 }
             }
 
             AppState::KeyAction => match code {
-                KeyCode::Char('1') => { self.pending_key_action = Some(1); self.do_write_intent(); }
-                KeyCode::Char('2') => { self.pending_key_action = Some(2); self.do_write_intent(); }
+                KeyCode::Char('1') => {
+                    self.pending_key_action = Some(1);
+                    self.do_write_intent();
+                }
+                KeyCode::Char('2') => {
+                    self.pending_key_action = Some(2);
+                    self.do_write_intent();
+                }
                 _ => {}
             },
 
@@ -246,7 +258,9 @@ impl App {
                 match media::find_profile_usb(&candidates, &self.usb_mountpoint) {
                     Ok(Some((profile_path, dev_path))) => {
                         #[cfg(feature = "dev-usb-disc")]
-                        { self.profile_dev = Some(dev_path); }
+                        {
+                            self.profile_dev = Some(dev_path);
+                        }
                         #[cfg(not(feature = "dev-usb-disc"))]
                         let _ = dev_path;
                         #[cfg(feature = "dev-softhsm-usb")]
@@ -260,9 +274,9 @@ impl App {
                         match load_profile(&profile_path) {
                             Ok(profile) => {
                                 if profile.hsm.pin_source != PinSource::Prompt {
-                                    self.status =
-                                        "WARNING: pin_source is not 'prompt' — \
-                                         unsuitable for ceremony".into();
+                                    self.status = "WARNING: pin_source is not 'prompt' — \
+                                         unsuitable for ceremony"
+                                        .into();
                                 }
                                 self.profile = Some(profile);
                                 self.profile_toml_bytes = Some(raw_bytes);
@@ -295,7 +309,9 @@ impl App {
                     let profile_dev = self.profile_dev.as_deref();
                     match media::usb_disc::find_disc_usb(profile_dev, probe) {
                         Some(disc) => {
-                            let same_uuid = self.disc_usb.as_ref()
+                            let same_uuid = self
+                                .disc_usb
+                                .as_ref()
                                 .map(|d| d.uuid == disc.uuid)
                                 .unwrap_or(false);
                             if !same_uuid {
@@ -311,9 +327,9 @@ impl App {
                         }
                         None => {
                             self.disc_usb = None;
-                            self.status =
-                                "No disc USB found. Insert USB with ANODIZE_DISC_ID \
-                                 (must be separate from profile USB).".into();
+                            self.status = "No disc USB found. Insert USB with ANODIZE_DISC_ID \
+                                 (must be separate from profile USB)."
+                                .into();
                         }
                     }
                 }
@@ -322,9 +338,9 @@ impl App {
                     if self.skip_disc {
                         // In skip-disc mode treat staging dir as "disc ready"
                         self.optical_dev = Some(PathBuf::from("/run/anodize/staging"));
-                        self.status =
-                            "--skip-disc mode: disc artifacts will be written to \
-                             /run/anodize/staging. Press [1] to continue.".into();
+                        self.status = "--skip-disc mode: disc artifacts will be written to \
+                             /run/anodize/staging. Press [1] to continue."
+                            .into();
                         return;
                     }
 
@@ -376,9 +392,9 @@ impl App {
                     } else if drives.is_empty() {
                         self.status = "No optical drive detected. Insert drive and disc.".into();
                     } else {
-                        self.status =
-                            "No blank/appendable disc found. Insert write-once disc \
-                             (BD-R, DVD-R, CD-R, or M-Disc).".into();
+                        self.status = "No blank/appendable disc found. Insert write-once disc \
+                             (BD-R, DVD-R, CD-R, or M-Disc)."
+                            .into();
                     }
                 }
             }
@@ -393,7 +409,9 @@ impl App {
                                 self.state = AppState::WaitDisc;
                                 self.optical_dev = None;
                                 #[cfg(feature = "dev-usb-disc")]
-                                { self.disc_usb = None; }
+                                {
+                                    self.disc_usb = None;
+                                }
                             }
                             Ok(()) => {
                                 // Commit intent session to prior_sessions before HSM operation
@@ -424,7 +442,9 @@ impl App {
                             Ok(()) => {
                                 self.state = AppState::DiscDone;
                                 #[cfg(feature = "dev-usb-disc")]
-                                let disc_label = self.disc_usb.as_ref()
+                                let disc_label = self
+                                    .disc_usb
+                                    .as_ref()
                                     .map(|d| d.uuid.clone())
                                     .unwrap_or_else(|| "disc USB".into());
                                 #[cfg(not(feature = "dev-usb-disc"))]
@@ -436,11 +456,14 @@ impl App {
                                 self.status = format!("Disc session written: {disc_label}");
                             }
                             Err(e) => {
-                                self.status = format!("Burn failed: {e} — reinsert disc and retry.");
+                                self.status =
+                                    format!("Burn failed: {e} — reinsert disc and retry.");
                                 self.state = AppState::WaitDisc;
                                 self.optical_dev = None;
                                 #[cfg(feature = "dev-usb-disc")]
-                                { self.disc_usb = None; }
+                                {
+                                    self.disc_usb = None;
+                                }
                             }
                         }
                     }
@@ -458,12 +481,18 @@ impl App {
         let pin = SecretString::new(pin);
         let cfg = match &self.profile {
             Some(p) => &p.hsm,
-            None => { self.status = "No profile loaded".into(); return; }
+            None => {
+                self.status = "No profile loaded".into();
+                return;
+            }
         };
 
         let hsm = match Pkcs11Hsm::new(&cfg.module_path, &cfg.token_label) {
             Ok(h) => h,
-            Err(e) => { self.status = format!("HSM open failed: {e}"); return; }
+            Err(e) => {
+                self.status = format!("HSM open failed: {e}");
+                return;
+            }
         };
         let mut actor = HsmActor::spawn(hsm);
         if let Err(e) = actor.login(&pin) {
@@ -476,7 +505,8 @@ impl App {
             "Logged in. Insert disc USB with ANODIZE_DISC_ID (separate from profile USB)."
         } else {
             "Logged in. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc) and press [1]."
-        }.into();
+        }
+        .into();
     }
 
     // ── Key operations ─────────────────────────────────────────────────────────
@@ -484,16 +514,25 @@ impl App {
     fn do_generate_and_build(&mut self) {
         let label = match &self.profile {
             Some(p) => p.hsm.key_label.clone(),
-            None => { self.status = "No profile".into(); return; }
+            None => {
+                self.status = "No profile".into();
+                return;
+            }
         };
         let key = {
             let actor = match self.actor.as_mut() {
                 Some(a) => a,
-                None => { self.status = "No HSM session".into(); return; }
+                None => {
+                    self.status = "No HSM session".into();
+                    return;
+                }
             };
             match actor.generate_keypair(&label, KeySpec::EcdsaP384) {
                 Ok(k) => k,
-                Err(e) => { self.status = format!("Key generation failed: {e}"); return; }
+                Err(e) => {
+                    self.status = format!("Key generation failed: {e}");
+                    return;
+                }
             }
         };
         self.root_key = Some(key);
@@ -504,16 +543,25 @@ impl App {
     fn do_find_and_build(&mut self) {
         let label = match &self.profile {
             Some(p) => p.hsm.key_label.clone(),
-            None => { self.status = "No profile".into(); return; }
+            None => {
+                self.status = "No profile".into();
+                return;
+            }
         };
         let key = {
             let actor = match self.actor.as_ref() {
                 Some(a) => a,
-                None => { self.status = "No HSM session".into(); return; }
+                None => {
+                    self.status = "No HSM session".into();
+                    return;
+                }
             };
             match actor.find_key(&label) {
                 Ok(k) => k,
-                Err(e) => { self.status = format!("Key not found: {e}"); return; }
+                Err(e) => {
+                    self.status = format!("Key not found: {e}");
+                    return;
+                }
             }
         };
         self.root_key = Some(key);
@@ -524,27 +572,51 @@ impl App {
     fn do_build_cert(&mut self) {
         let actor = match self.actor.clone() {
             Some(a) => a,
-            None => { self.status = "No HSM session".into(); return; }
+            None => {
+                self.status = "No HSM session".into();
+                return;
+            }
         };
         let key = match self.root_key {
             Some(k) => k,
-            None => { self.status = "No key handle".into(); return; }
+            None => {
+                self.status = "No key handle".into();
+                return;
+            }
         };
         let signer = match P384HsmSigner::new(actor, key) {
             Ok(s) => s,
-            Err(e) => { self.status = format!("Signer error: {e}"); return; }
+            Err(e) => {
+                self.status = format!("Signer error: {e}");
+                return;
+            }
         };
         let ca = match &self.profile {
             Some(p) => &p.ca,
-            None => { self.status = "No profile".into(); return; }
+            None => {
+                self.status = "No profile".into();
+                return;
+            }
         };
-        let cert = match build_root_cert(&signer, &ca.common_name, &ca.organization, &ca.country, 7305) {
+        let cert = match build_root_cert(
+            &signer,
+            &ca.common_name,
+            &ca.organization,
+            &ca.country,
+            7305,
+        ) {
             Ok(c) => c,
-            Err(e) => { self.status = format!("Cert build failed: {e}"); return; }
+            Err(e) => {
+                self.status = format!("Cert build failed: {e}");
+                return;
+            }
         };
         let der = match cert.to_der() {
             Ok(d) => d,
-            Err(e) => { self.status = format!("DER encode failed: {e}"); return; }
+            Err(e) => {
+                self.status = format!("DER encode failed: {e}");
+                return;
+            }
         };
         let fp = sha256_fingerprint(&der);
         self.fingerprint = Some(fp);
@@ -561,12 +633,22 @@ impl App {
     /// the disc write succeeds (enforced in background_tick WritingIntent arm).
     fn do_write_intent(&mut self) {
         let (cn, org, country) = match self.profile.as_ref() {
-            Some(p) => (p.ca.common_name.clone(), p.ca.organization.clone(), p.ca.country.clone()),
-            None => { self.status = "No profile loaded".into(); return; }
+            Some(p) => (
+                p.ca.common_name.clone(),
+                p.ca.organization.clone(),
+                p.ca.country.clone(),
+            ),
+            None => {
+                self.status = "No profile loaded".into();
+                return;
+            }
         };
         let raw_bytes = match self.profile_toml_bytes.clone() {
             Some(b) => b,
-            None => { self.status = "Profile bytes missing".into(); return; }
+            None => {
+                self.status = "Profile bytes missing".into();
+                return;
+            }
         };
 
         // Defense-in-depth capacity check
@@ -598,24 +680,30 @@ impl App {
         let genesis_hex: String = genesis.iter().map(|b| format!("{b:02x}")).collect();
         let mut log = match AuditLog::create(&log_path, &genesis) {
             Ok(l) => l,
-            Err(e) => { self.status = format!("Audit log create failed: {e}"); return; }
+            Err(e) => {
+                self.status = format!("Audit log create failed: {e}");
+                return;
+            }
         };
-        if let Err(e) = log.append("cert.root.intent", serde_json::json!({
-            "operation": "sign-root-cert",
-            "key_action": action_str,
-            "cert_params": {
-                "subject": {
-                    "common_name": cn,
-                    "organization": org,
-                    "country": country,
+        if let Err(e) = log.append(
+            "cert.root.intent",
+            serde_json::json!({
+                "operation": "sign-root-cert",
+                "key_action": action_str,
+                "cert_params": {
+                    "subject": {
+                        "common_name": cn,
+                        "organization": org,
+                        "country": country,
+                    },
+                    "validity_days": 7305,
+                    "key_algorithm": "ecdsa-p384",
+                    "key_usage": ["keyCertSign", "cRLSign"],
+                    "basic_constraints": { "ca": true, "path_len_constraint": null },
                 },
-                "validity_days": 7305,
-                "key_algorithm": "ecdsa-p384",
-                "key_usage": ["keyCertSign", "cRLSign"],
-                "basic_constraints": { "ca": true, "path_len_constraint": null },
-            },
-            "profile_toml_sha256": genesis_hex,
-        })) {
+                "profile_toml_sha256": genesis_hex,
+            }),
+        ) {
             self.status = format!("Audit intent append failed: {e}");
             return;
         }
@@ -623,13 +711,19 @@ impl App {
 
         let partial_log_bytes = match std::fs::read(&log_path) {
             Ok(b) => b,
-            Err(e) => { self.status = format!("Cannot read intent audit log: {e}"); return; }
+            Err(e) => {
+                self.status = format!("Cannot read intent audit log: {e}");
+                return;
+            }
         };
 
         let intent_session = SessionEntry {
             dir_name: dir_name.clone(),
             timestamp: ts,
-            files: vec![IsoFile { name: "AUDIT.LOG".into(), data: partial_log_bytes }],
+            files: vec![IsoFile {
+                name: "AUDIT.LOG".into(),
+                data: partial_log_bytes,
+            }],
         };
         let mut all_sessions = self.prior_sessions.clone();
         all_sessions.push(intent_session.clone());
@@ -651,7 +745,8 @@ impl App {
             };
             let iso = media::iso9660::build_iso(&all_sessions);
             std::thread::spawn(move || {
-                tx.send(media::usb_disc::write_iso_to_disc_usb(&disc, &iso)).ok();
+                tx.send(media::usb_disc::write_iso_to_disc_usb(&disc, &iso))
+                    .ok();
             });
         }
 
@@ -661,8 +756,12 @@ impl App {
                 let iso = media::iso9660::build_iso(&all_sessions);
                 let iso_path = staging.join("ceremony.iso");
                 match std::fs::write(&iso_path, &iso) {
-                    Ok(()) => { tx.send(Ok(())).ok(); }
-                    Err(e) => { tx.send(Err(anyhow::anyhow!("write intent ISO: {e}"))).ok(); }
+                    Ok(()) => {
+                        tx.send(Ok(())).ok();
+                    }
+                    Err(e) => {
+                        tx.send(Err(anyhow::anyhow!("write intent ISO: {e}"))).ok();
+                    }
                 }
             } else if let Some(dev) = self.optical_dev.clone() {
                 media::write_session(&dev, all_sessions, false, tx);
@@ -683,7 +782,10 @@ impl App {
     fn do_start_burn(&mut self) {
         let cert_der = match &self.cert_der {
             Some(d) => d.clone(),
-            None => { self.status = "No cert in memory".into(); return; }
+            None => {
+                self.status = "No cert in memory".into();
+                return;
+            }
         };
 
         // Reopen the partial audit log written in do_write_intent() and append the cert record.
@@ -695,10 +797,17 @@ impl App {
         let log_path = staging.join("audit.log");
         let mut log = match AuditLog::open(&log_path) {
             Ok(l) => l,
-            Err(e) => { self.status = format!("Audit log reopen failed: {e}"); return; }
+            Err(e) => {
+                self.status = format!("Audit log reopen failed: {e}");
+                return;
+            }
         };
         let fp = self.fingerprint.clone().unwrap_or_default();
-        let ca_name = self.profile.as_ref().map(|p| p.ca.common_name.clone()).unwrap_or_default();
+        let ca_name = self
+            .profile
+            .as_ref()
+            .map(|p| p.ca.common_name.clone())
+            .unwrap_or_default();
         if let Err(e) = log.append(
             "cert.root.issue",
             serde_json::json!({
@@ -714,7 +823,10 @@ impl App {
 
         let audit_bytes = match std::fs::read(&log_path) {
             Ok(b) => b,
-            Err(e) => { self.status = format!("Cannot read audit log: {e}"); return; }
+            Err(e) => {
+                self.status = format!("Cannot read audit log: {e}");
+                return;
+            }
         };
 
         // Build session record for this ceremony
@@ -724,8 +836,14 @@ impl App {
             dir_name,
             timestamp: ts,
             files: vec![
-                IsoFile { name: "ROOT.CRT".into(),  data: cert_der },
-                IsoFile { name: "AUDIT.LOG".into(), data: audit_bytes },
+                IsoFile {
+                    name: "ROOT.CRT".into(),
+                    data: cert_der,
+                },
+                IsoFile {
+                    name: "AUDIT.LOG".into(),
+                    data: audit_bytes,
+                },
             ],
         };
 
@@ -748,7 +866,8 @@ impl App {
             };
             let iso = media::iso9660::build_iso(&all_sessions);
             std::thread::spawn(move || {
-                tx.send(media::usb_disc::write_iso_to_disc_usb(&disc, &iso)).ok();
+                tx.send(media::usb_disc::write_iso_to_disc_usb(&disc, &iso))
+                    .ok();
             });
             self.state = AppState::BurningDisc;
             self.status = "Writing ISO to disc USB…".into();
@@ -761,8 +880,12 @@ impl App {
                 let iso = media::iso9660::build_iso(&all_sessions);
                 let iso_path = staging.join("ceremony.iso");
                 match std::fs::write(&iso_path, &iso) {
-                    Ok(()) => { tx.send(Ok(())).ok(); }
-                    Err(e) => { tx.send(Err(anyhow::anyhow!("write staging ISO: {e}"))).ok(); }
+                    Ok(()) => {
+                        tx.send(Ok(())).ok();
+                    }
+                    Err(e) => {
+                        tx.send(Err(anyhow::anyhow!("write staging ISO: {e}"))).ok();
+                    }
                 }
             } else if let Some(dev) = &self.optical_dev {
                 media::write_session(dev, all_sessions, false, tx);
@@ -781,11 +904,18 @@ impl App {
 
     fn do_write_usb(&mut self) {
         // Guard: only reachable from DiscDone
-        assert_eq!(self.state, AppState::DiscDone, "USB write reached without disc write");
+        assert_eq!(
+            self.state,
+            AppState::DiscDone,
+            "USB write reached without disc write"
+        );
 
         let cert_der = match &self.cert_der {
             Some(d) => d.clone(),
-            None => { self.status = "No cert in memory".into(); return; }
+            None => {
+                self.status = "No cert in memory".into();
+                return;
+            }
         };
         let usb = &self.usb_mountpoint;
 
@@ -872,7 +1002,11 @@ fn render(frame: &mut Frame, app: &App) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(header_height), Constraint::Min(10), Constraint::Length(3)])
+        .constraints([
+            Constraint::Length(header_height),
+            Constraint::Min(10),
+            Constraint::Length(3),
+        ])
         .split(area);
 
     #[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
@@ -901,29 +1035,35 @@ fn render(frame: &mut Frame, app: &App) {
     }
 
     let screen_title = match app.state {
-        AppState::ClockCheck    => "Clock Verification",
-        AppState::WaitUsb       => "Waiting for USB",
+        AppState::ClockCheck => "Clock Verification",
+        AppState::WaitUsb => "Waiting for USB",
         AppState::ProfileLoaded => "Profile Loaded",
-        AppState::EnterPin      => "HSM Authentication",
-        AppState::WaitDisc => if cfg!(feature = "dev-usb-disc") {
-            "Insert Disc USB"
-        } else {
-            "Insert Disc"
-        },
-        AppState::KeyAction     => "Key Management",
+        AppState::EnterPin => "HSM Authentication",
+        AppState::WaitDisc => {
+            if cfg!(feature = "dev-usb-disc") {
+                "Insert Disc USB"
+            } else {
+                "Insert Disc"
+            }
+        }
+        AppState::KeyAction => "Key Management",
         AppState::WritingIntent => "Committing Intent to Disc...",
-        AppState::CertPreview   => "Certificate Preview \u{2014} VERIFY FINGERPRINT",
-        AppState::BurningDisc => if cfg!(feature = "dev-usb-disc") {
-            "Writing Cert Session to Disc USB\u{2026}"
-        } else {
-            "Writing Cert Session\u{2026}"
-        },
-        AppState::DiscDone => if cfg!(feature = "dev-usb-disc") {
-            "Disc USB Written"
-        } else {
-            "Disc Session Written"
-        },
-        AppState::Done          => "Ceremony Complete",
+        AppState::CertPreview => "Certificate Preview \u{2014} VERIFY FINGERPRINT",
+        AppState::BurningDisc => {
+            if cfg!(feature = "dev-usb-disc") {
+                "Writing Cert Session to Disc USB\u{2026}"
+            } else {
+                "Writing Cert Session\u{2026}"
+            }
+        }
+        AppState::DiscDone => {
+            if cfg!(feature = "dev-usb-disc") {
+                "Disc USB Written"
+            } else {
+                "Disc Session Written"
+            }
+        }
+        AppState::Done => "Ceremony Complete",
     };
     let main_block = Block::default().borders(Borders::ALL).title(screen_title);
     let inner = main_block.inner(chunks[1]);
@@ -948,8 +1088,12 @@ fn build_body(app: &App) -> Text<'static> {
                 String::new(),
                 format!(
                     "  System clock (UTC):  {:04}-{:02}-{:02}  {:02}:{:02}:{:02}",
-                    odt.year(), odt.month() as u8, odt.day(),
-                    odt.hour(), odt.minute(), odt.second()
+                    odt.year(),
+                    odt.month() as u8,
+                    odt.day(),
+                    odt.hour(),
+                    odt.minute(),
+                    odt.second()
                 ),
                 String::new(),
                 "  Timestamps derived from this value appear permanently in the".into(),
@@ -1001,7 +1145,8 @@ fn build_body(app: &App) -> Text<'static> {
                     app.prior_sessions.len()
                 ),
                 None => "  No disc USB found. Insert USB with ANODIZE_DISC_ID \
-                          (must be separate from profile USB).".into(),
+                          (must be separate from profile USB)."
+                    .into(),
             };
             #[cfg(not(feature = "dev-usb-disc"))]
             let disc_info = match &app.optical_dev {
@@ -1027,7 +1172,11 @@ fn build_body(app: &App) -> Text<'static> {
         }
 
         AppState::KeyAction => {
-            let label = app.profile.as_ref().map(|p| p.hsm.key_label.as_str()).unwrap_or("?");
+            let label = app
+                .profile
+                .as_ref()
+                .map(|p| p.hsm.key_label.as_str())
+                .unwrap_or("?");
             vec![
                 String::new(),
                 format!("  Key label: {label:?}"),
@@ -1051,7 +1200,13 @@ fn build_body(app: &App) -> Text<'static> {
             let fp = app.fingerprint.as_deref().unwrap_or("(none)");
             let ca = app.profile.as_ref().map(|p| &p.ca);
             let (cn, org, country) = ca
-                .map(|c| (c.common_name.as_str(), c.organization.as_str(), c.country.as_str()))
+                .map(|c| {
+                    (
+                        c.common_name.as_str(),
+                        c.organization.as_str(),
+                        c.country.as_str(),
+                    )
+                })
                 .unwrap_or(("?", "?", "?"));
             vec![
                 String::new(),
@@ -1074,7 +1229,8 @@ fn build_body(app: &App) -> Text<'static> {
                 "  Writing ISO 9660 session to disc USB\u{2026}"
             } else {
                 "  Writing ISO 9660 session to optical disc\u{2026}"
-            }.into(),
+            }
+            .into(),
             String::new(),
             "  Please wait. Do not remove the disc or USB.".into(),
         ],
@@ -1087,7 +1243,8 @@ fn build_body(app: &App) -> Text<'static> {
                     "  Disc USB written successfully."
                 } else {
                     "  Disc session written successfully."
-                }.into(),
+                }
+                .into(),
                 String::new(),
                 format!("  Fingerprint: {fp}"),
                 String::new(),
@@ -1106,7 +1263,8 @@ fn build_body(app: &App) -> Text<'static> {
                 "  Remove and store both disc USB and profile USB separately."
             } else {
                 "  Remove and store both disc and USB separately."
-            }.into(),
+            }
+            .into(),
             "  The HSM holds the private key; no key material was written to disk.".into(),
             String::new(),
             "  [q]  Quit".into(),
@@ -1133,9 +1291,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App
                     continue;
                 }
                 match key.code {
-                    KeyCode::Char('q') | KeyCode::Char('Q')
-                        if app.state != AppState::EnterPin =>
-                    {
+                    KeyCode::Char('q') | KeyCode::Char('Q') if app.state != AppState::EnterPin => {
                         break;
                     }
                     other => app.handle_key(other),
@@ -1160,7 +1316,10 @@ fn warn_dev_serial() {
     if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/ttyS0") {
         let _ = writeln!(tty);
         let _ = writeln!(tty, "*** ANODIZE DEV BUILD — NOT FOR PRODUCTION USE ***");
-        let _ = writeln!(tty, "*** dev-usb-disc and/or dev-softhsm-usb features enabled  ***");
+        let _ = writeln!(
+            tty,
+            "*** dev-usb-disc and/or dev-softhsm-usb features enabled  ***"
+        );
         let _ = writeln!(tty);
     }
 }
@@ -1183,7 +1342,11 @@ fn main() -> Result<()> {
     let result = run(&mut terminal, &mut app);
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
     terminal.show_cursor()?;
 
     // Best-effort USB unmount on exit

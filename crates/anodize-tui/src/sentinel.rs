@@ -23,12 +23,15 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use nix::fcntl::{fcntl, Flock, FcntlArg, FdFlag, FlockArg};
+use nix::fcntl::{fcntl, FcntlArg, FdFlag, Flock, FlockArg};
 use nix::sys::reboot::{reboot, RebootMode};
 use nix::unistd::{close, sync};
 
 #[derive(Parser)]
-#[command(name = "anodize-sentinel", about = "Terminal gatekeeper for the ceremony")]
+#[command(
+    name = "anodize-sentinel",
+    about = "Terminal gatekeeper for the ceremony"
+)]
 struct Cli {
     /// Exclusive lock file path.  /tmp is a shared tmpfs (1777) in the ISO
     /// and on every development machine, so the default works everywhere
@@ -53,7 +56,9 @@ fn main() -> Result<()> {
         let key = match key {
             Ok(k) => k,
             Err(e) => {
-                if show_and_wait(&format!("  keyboard error: {e}")) { break; }
+                if show_and_wait(&format!("  keyboard error: {e}")) {
+                    break;
+                }
                 continue;
             }
         };
@@ -83,7 +88,9 @@ fn main() -> Result<()> {
                     "  cannot open lock file {}:\n  {e}",
                     cli.lock_file.display()
                 );
-                if show_and_wait(&msg) { break; }
+                if show_and_wait(&msg) {
+                    break;
+                }
                 continue;
             }
         };
@@ -96,7 +103,9 @@ fn main() -> Result<()> {
                 // Clear FD_CLOEXEC before leaking so the fd survives exec.
                 if let Err(e) = fcntl(raw_fd, FcntlArg::F_SETFD(FdFlag::empty())) {
                     // locked drops here → flock released
-                    if show_and_wait(&format!("  F_SETFD: {e}")) { break; }
+                    if show_and_wait(&format!("  F_SETFD: {e}")) {
+                        break;
+                    }
                     continue;
                 }
 
@@ -126,7 +135,9 @@ fn main() -> Result<()> {
             }
 
             Err((_, e)) => {
-                if show_and_wait(&format!("  flock: {e}")) { break; }
+                if show_and_wait(&format!("  flock: {e}")) {
+                    break;
+                }
             }
         }
     }
