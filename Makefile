@@ -1,4 +1,4 @@
-.PHONY: ci nix-check nix-iso iso qemu test fmt lint deny
+.PHONY: ci nix-check qemu test fmt lint deny
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -13,7 +13,7 @@ nix-check:
 # This is a release-only step; it takes 10-30 minutes on first run.
 # A named volume (nix-store) persists the Nix store across runs so repeated
 # builds don't re-download everything and the container doesn't run out of space.
-nix-iso:
+anodize.iso:
 	docker volume create nix-store 2>/dev/null || true
 	docker run --rm --privileged \
 		-v nix-store:/nix \
@@ -25,16 +25,31 @@ nix-iso:
 		       cp -L result/iso/anodize.iso /src/anodize.iso'
 	@echo "ISO ready: $(CURDIR)/anodize.iso"
 
-# Alias — same as nix-iso but reads more naturally in CI/CD contexts
-iso: nix-iso
+# Create a 64 MiB FAT USB image pre-loaded with a SoftHSM2 profile for QEMU testing.
+# Requires mtools (mcopy).  Only built once — delete to recreate.
+fake-usb.img:
+	truncate -s 64M $@
+	mkfs.vfat $@
+	printf '%s\n' \
+	    '[ca]' \
+	    'common_name  = "Example Root CA"' \
+	    'organization = "Example Corp"' \
+	    'country      = "US"' \
+	    '' \
+	    '[hsm]' \
+	    'module_path = "/run/current-system/sw/lib/softhsm/libsofthsm2.so"' \
+	    'token_label = "anodize-root-2026"' \
+	    'key_label   = "root-key"' \
+	    'key_spec    = "ecdsa-p384"' \
+	    'pin_source  = "prompt"' \
+	    | mcopy -i $@ - ::profile.toml
+	@echo "$@ ready"
 
 # Boot anodize.iso in QEMU via EFI (OVMF) with a fake USB stick.
-# Requires: anodize.iso, fake-usb.img (see below), and ovmf package.
-# Create fake USB:
-#   truncate -s 64M fake-usb.img && mkfs.vfat fake-usb.img
-#   mcopy -i fake-usb.img /etc/anodize/profile.example.toml ::/profile.toml
-# OVMF vars are copied to a temp file so UEFI boot entries are not persisted.
-# The ISO uses EFI GRUB (timeout=0 → instant boot, no splash).
+# EFI boot uses GRUB (timeout=0 → instant, no splash) rather than legacy
+# BIOS/ISOLINUX where TIMEOUT 0 means "wait forever".
+# Requires: ovmf package (OVMF_CODE_4M.fd), mtools (for fake-usb.img).
+# OVMF vars are copied to a temp file so boot entries are not persisted.
 OVMF_CODE ?= /usr/share/OVMF/OVMF_CODE_4M.fd
 OVMF_VARS ?= /usr/share/OVMF/OVMF_VARS_4M.fd
 qemu: anodize.iso fake-usb.img

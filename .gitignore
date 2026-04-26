@@ -4,5 +4,6 @@ target/
 # Nix build result symlinks
 result
 result-*
-# ISO build artifact (produced by make iso / make nix-iso)
+# Build artifacts (produced by make targets)
 anodize.iso
+fake-usb.img
