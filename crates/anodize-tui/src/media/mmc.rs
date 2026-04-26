@@ -303,3 +303,37 @@ const REWRITABLE_PROFILES: &[u16] = &[
 pub fn profile_is_rewritable(profile: u16) -> bool {
     REWRITABLE_PROFILES.contains(&profile)
 }
+
+/// Maximum number of SAO sessions for a given MMC profile code.
+/// Defaults to 99 (CD-R limit) for unknown/unrecognised profiles.
+pub fn max_sessions_for_profile(profile: u16) -> u16 {
+    match profile {
+        0x09 | 0x0A => 99,  // CD-R / CD-RW
+        0x11 | 0x13 => 254, // DVD-R / DVD-RW SL
+        0x15 | 0x16 => 254, // DVD-R DL / DVD-RW DL
+        0x1B | 0x1C => 254, // DVD+R / DVD+RW SL
+        0x2B        => 254, // DVD+R DL
+        0x41 | 0x42 => 255, // BD-R SL / DL (includes M-Disc BD variant)
+        0x51        => 254, // HD DVD-R
+        _           => 99,  // Unknown: use CD-R limit as conservative fallback
+    }
+}
+
+/// Human-readable name for common MMC profile codes.
+pub fn profile_name(profile: u16) -> &'static str {
+    match profile {
+        0x09 => "CD-R",
+        0x0A => "CD-RW",
+        0x11 => "DVD-R",
+        0x13 => "DVD-RW",
+        0x1B => "DVD+R",
+        0x1C => "DVD+RW",
+        0x2B => "DVD+R DL",
+        0x41 => "BD-R",
+        0x42 => "BD-R DL",
+        0x43 => "BD-RE",
+        0x51 => "HD DVD-R",
+        0x00 => "no disc",
+        _    => "unknown media",
+    }
+}

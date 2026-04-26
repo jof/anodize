@@ -22,9 +22,10 @@ use anyhow::{Context, Result};
 use nix::mount::{mount, umount2, MntFlags, MsFlags};
 
 use mmc::{
-    close_track_session, get_current_profile, profile_is_rewritable, read_disc_info, read_sectors,
-    read_track_info, reserve_track, send_opc, set_write_parameters, synchronize_cache,
-    write_sectors, CloseTarget, DiscStatus, MultiSession, WriteParams, WriteType,
+    close_track_session, get_current_profile, max_sessions_for_profile, profile_is_rewritable,
+    profile_name, read_disc_info, read_sectors, read_track_info, reserve_track, send_opc,
+    set_write_parameters, synchronize_cache, write_sectors, CloseTarget, DiscStatus,
+    MultiSession, WriteParams, WriteType,
 };
 use sgdev::{SgDev, CDS_DISC_OK};
 
@@ -175,6 +176,28 @@ pub fn find_profile_usb(
         anyhow::bail!("{}", mount_errors.join("; "));
     }
     Ok(None)
+}
+
+/// Returns a human-readable disc capacity summary and the number of sessions still writable.
+/// Opens the device, reads disc info and MMC profile, then closes.
+/// On any error returns a conservative summary assuming CD-R limits.
+/// Not gated on dev-usb-disc — only called from non-dev WaitDisc tick.
+pub fn disc_capacity_summary(dev: &Path) -> (String, u16) {
+    let sg = match SgDev::open(dev) {
+        Ok(s) => s,
+        Err(_) => return ("capacity unknown".into(), 99),
+    };
+    let info = match read_disc_info(&sg) {
+        Ok(i) => i,
+        Err(_) => return ("capacity unknown".into(), 99),
+    };
+    let profile = get_current_profile(&sg).unwrap_or(0);
+    let max = max_sessions_for_profile(profile);
+    let used = info.sessions as u16;
+    let remaining = max.saturating_sub(used);
+    let name = profile_name(profile);
+    let summary = format!("{name}: {used} used, {remaining} remaining (max {max})");
+    (summary, remaining)
 }
 
 // ── Optical disc discovery ────────────────────────────────────────────────────
