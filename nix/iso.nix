@@ -18,7 +18,11 @@ let
   # The ceremony user's login shell: exec the wrapper binary directly.
   # Using getty (not a raw systemd service) is important: it creates a real
   # logind user session.  The binary handles all device discovery internally.
+  #
+  # ESC-c (RIS) resets the Linux VT to a clean state before the TUI starts,
+  # wiping any getty/login residue that would bleed through into the TUI.
   ceremonyShell = (pkgs.writeShellScriptBin "ceremony-shell" ''
+    printf '\033c'
     exec /run/wrappers/bin/anodize-ceremony
   '') // { shellPath = "/bin/ceremony-shell"; };
 
@@ -134,6 +138,13 @@ in
 
   # Getty on tty1 auto-logs in as ceremony → exec's ceremonyShell immediately.
   services.getty.autologinUser = "ceremony";
+
+  # Suppress the "Run 'nixos-help' for the NixOS manual." line that getty
+  # prints before the login prompt — it bleeds into the TUI on Linux VTs.
+  services.getty.helpLine = lib.mkForce "";
+
+  # Clear /etc/issue so getty prints no banner before auto-login.
+  environment.etc."issue".text = "";
 
   # NAutoVTs=0: prevent logind from dynamically spawning gettys when the
   # operator presses Alt+F2..F6.  The static autovt@tty1 entry in

@@ -715,8 +715,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App
 
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-                    break;
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    match key.code {
+                        KeyCode::Char('c') => break,
+                        KeyCode::Char('l') => terminal.clear()?,
+                        _ => {}
+                    }
+                    continue;
                 }
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Char('Q')
