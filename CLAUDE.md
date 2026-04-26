@@ -67,7 +67,7 @@ Two implementations:
 
 ### Security invariants to preserve
 
-- **Disc before USB**: in `anodize-tui`, no cert or CRL may be written to USB until M-Disc commit succeeds. Enforce structurally in the TUI state machine — the data must not exist on any writable path before the disc write.
+- **Disc before USB**: in `anodize-tui`, no cert or CRL may be written to USB until write-once optical disc commit succeeds. Enforce structurally in the TUI state machine — the data must not exist on any writable path before the disc write.
 - **Audit log genesis**: `prev_hash[0]` must be SHA-256(root_cert_DER). Do not allow a configurable or zero genesis hash.
 - **CSR policy**: verify the CSR signature before parsing any fields. Only copy a fixed extension allowlist (BasicConstraints, KeyUsage, SKID, AKID, CDP). Reject all others.
 - **PIN source warning**: `pin_source = env:` or `file:` must emit a runtime warning; `prompt` is the only safe ceremony value.

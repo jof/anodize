@@ -10,7 +10,7 @@ Anodize is a small, auditable root-CA tool written in Rust. It runs air-gapped f
 - Signs intermediate CA certificates from CSRs
 - Issues CRLs
 - Maintains a hash-chained audit log tied to the specific ceremony (genesis hash = SHA-256 of root cert DER)
-- Records each CA operation as a timestamped session on an M-Disc (BD-R/DVD-R) optical archive
+- Records each CA operation as a timestamped session on a write-once optical disc (BD-R, DVD-R, or M-Disc)
 - Runs offline — no network stack compiled into the ISO
 
 ## What it does not do
@@ -30,15 +30,15 @@ The `Hsm` trait abstracts both HSM backends. The binary has no compile-time know
 
 ## Security invariants
 
-- **Disc before USB**: no certificate or CRL artifact reaches USB until it has been committed to M-Disc (a full SG_IO SAO session burn). Enforced structurally in the TUI state machine — `DiscDone` is the only predecessor state to the USB write step.
+- **Disc before USB**: no certificate or CRL artifact reaches USB until it has been committed to a write-once optical disc (a full SG_IO SAO session burn). Enforced structurally in the TUI state machine — `DiscDone` is the only predecessor state to the USB write step.
 - **Log genesis**: audit log `prev_hash[0]` = SHA-256(root_cert_DER) — ties the log to the specific root ceremony
 - **CSR validation**: signature verified before any field is parsed
 - **PIN source**: `pin_source = "prompt"` is the only safe value in ceremony; `env:` and `file:` variants emit a runtime warning
 - **Clock check**: the TUI's first screen requires the operator to confirm the UTC system clock before any timestamped session is written to disc
 
-## M-Disc archive format
+## Optical disc archive format
 
-Each CA operation appends one SAO session to the M-Disc. Sessions accumulate — the disc stays open between ceremonies. Every session's ISO 9660 image contains timestamped subdirectories for all prior and current sessions (copy-in), so the last session is always the complete, browsable view from a standard OS mount:
+Each CA operation appends one SAO session to the optical disc. Sessions accumulate — the disc stays open between ceremonies. Every session's ISO 9660 image contains timestamped subdirectories for all prior and current sessions (copy-in), so the last session is always the complete, browsable view from a standard OS mount:
 
 ```
 Session 3 ISO (last written — what `mount` shows):

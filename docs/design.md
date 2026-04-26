@@ -72,11 +72,11 @@ caller thread ──SyncSender<HsmRequest>──► hsm-actor thread (owns Pkcs1
 
 ### Disc before USB invariant
 
-Every signed artifact (cert, CRL) is held in RAM after signing. The TUI commits the artifact to M-Disc (write-once archival optical) before writing to USB. The USB write step is only reachable in the TUI state machine after the disc write completes — a full SG_IO SAO session burn to an M-Disc, not a file write to a pre-mounted path. This is enforced structurally: the data does not exist on any writable path until after the disc session closes successfully.
+Every signed artifact (cert, CRL) is held in RAM after signing. The TUI commits the artifact to a write-once optical disc (BD-R, DVD-R, or M-Disc) before writing to USB. The USB write step is only reachable in the TUI state machine after the disc write completes — a full SG_IO SAO session burn, not a file write to a pre-mounted path. This is enforced structurally: the data does not exist on any writable path until after the disc session closes successfully.
 
 ### Ceremony disc: multi-session SAO archive
 
-The ceremony M-Disc (BD-R or DVD-R) is a permanent, accumulating archive. Each CA operation appends one Session At Once (SAO) session. The disc is left open after each session so future operations can append further sessions; finalization is a deliberate final act.
+The ceremony disc (BD-R, DVD-R, or any write-once optical media) is a permanent, accumulating archive. Each CA operation appends one Session At Once (SAO) session. The disc is left open after each session so future operations can append further sessions; finalization is a deliberate final act.
 
 Every session's ISO 9660 image contains timestamped subdirectories for **all** prior and current sessions (copy-in). The last session is always the complete, browsable view from a standard OS mount. Each session directory contains a full snapshot of the audit log at that point, independently verifiable without reading earlier sessions.
 
@@ -100,6 +100,7 @@ Directory naming: `YYYYMMDDTHHMMSSZ` (16 chars, UTC). ISO 9660 Level 2 (31-char 
 All disc operations use SG_IO ioctl MMC commands — no external tools, no subprocesses. Key commands:
 
 - `CDROM_DRIVE_STATUS` (0x5326): disc presence check
+- `GET CONFIGURATION` (0x46): media type detection — rejects rewritable profiles (CD-RW, DVD-RW, BD-RE, etc.)
 - `READ DISC INFORMATION` (0x51): disc status (blank / incomplete / complete), session count, NWA
 - `READ TRACK INFORMATION` (0x52): per-track LBA and size for reading prior sessions
 - `READ(10)` (0x28): read sectors to reconstruct prior session ISO images
