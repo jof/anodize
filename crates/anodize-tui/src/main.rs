@@ -105,6 +105,9 @@ struct App {
     // TUI state
     state: AppState,
     status: String,
+    log_lines: Vec<String>,
+    log_view: bool,
+    log_scroll: u16,
 
     // Active operation
     current_op: Option<Operation>,
@@ -175,6 +178,9 @@ impl App {
             profile_toml_bytes: None,
             state: AppState::ClockCheck,
             status: String::new(),
+            log_lines: Vec::new(),
+            log_view: false,
+            log_scroll: 0,
             current_op: None,
             actor: None,
             root_key: None,
@@ -210,13 +216,21 @@ impl App {
         }
     }
 
+    fn set_status(&mut self, msg: impl Into<String>) {
+        let s: String = msg.into();
+        if self.log_lines.last().map(|l| l.as_str()) != Some(s.as_str()) {
+            self.log_lines.push(s.clone());
+        }
+        self.status = s;
+    }
+
     fn handle_key(&mut self, code: KeyCode) {
         match self.state.clone() {
             AppState::ClockCheck => {
                 if code == KeyCode::Char('1') {
                     self.confirmed_time = Some(SystemTime::now());
                     self.state = AppState::WaitUsb;
-                    self.status = "Scanning for USB stick with profile.toml…".into();
+                    self.set_status("Scanning for USB stick with profile.toml…");
                 }
             }
 
@@ -227,7 +241,7 @@ impl App {
                     self.pin_buf.clear();
                     self.pin_display_len = 0;
                     self.state = AppState::EnterPin;
-                    self.status = "Enter HSM PIN and press Enter. Esc to cancel.".into();
+                    self.set_status("Enter HSM PIN and press Enter. Esc to cancel.");
                 }
             }
 
@@ -264,9 +278,8 @@ impl App {
                             && self.sessions_remaining.map(|r| r >= 2).unwrap_or(false));
                     if ready {
                         self.state = AppState::OperationSelect;
-                        self.status = "[1] Generate Root CA  [2] Sign CSR  \
-                            [3] Revoke Cert  [4] Issue CRL  [5] Migrate Disc"
-                            .into();
+                        self.set_status("[1] Generate Root CA  [2] Sign CSR  \
+                            [3] Revoke Cert  [4] Issue CRL  [5] Migrate Disc");
                     }
                 }
             }
@@ -275,9 +288,8 @@ impl App {
                 KeyCode::Char('1') => {
                     self.current_op = Some(Operation::GenerateRootCa);
                     self.state = AppState::KeyAction;
-                    self.status = "[1] Generate new P-384 keypair (fresh)  \
-                         [2] Use existing key (resume)"
-                        .into();
+                    self.set_status("[1] Generate new P-384 keypair (fresh)  \
+                         [2] Use existing key (resume)");
                 }
                 KeyCode::Char('2') => {
                     self.current_op = Some(Operation::SignCsr);
@@ -290,16 +302,14 @@ impl App {
                         self.revoke_phase = 0;
                         self.revoke_serial_buf.clear();
                         self.revoke_reason_buf.clear();
-                        self.status =
-                            "Enter certificate serial number (digits). Press Enter to continue."
-                                .into();
+                        self.set_status("Enter certificate serial number (digits). Press Enter to continue.");
                     }
                 }
                 KeyCode::Char('4') => {
                     self.current_op = Some(Operation::IssueCrl);
                     self.do_load_revocation();
                     if self.state == AppState::CrlPreview {
-                        self.status = "Review CRL details. [1] to proceed, [q] to cancel.".into();
+                        self.set_status("Review CRL details. [1] to proceed, [q] to cancel.");
                     }
                 }
                 KeyCode::Char('5') => {
@@ -336,8 +346,7 @@ impl App {
                         if idx >= 1 && idx <= n {
                             self.selected_profile_idx = Some(idx - 1);
                             self.state = AppState::CsrPreview;
-                            self.status =
-                                "Review CSR and profile. [1] to proceed, [q] to cancel.".into();
+                            self.set_status("Review CSR and profile. [1] to proceed, [q] to cancel.");
                         }
                     }
                 }
@@ -358,7 +367,7 @@ impl App {
                 }
                 (0, KeyCode::Enter) if !self.revoke_serial_buf.is_empty() => {
                     self.revoke_phase = 1;
-                    self.status = "Reason (optional, Enter to skip): e.g. key-compromise".into();
+                    self.set_status("Reason (optional, Enter to skip): e.g. key-compromise");
                 }
                 (1, KeyCode::Char(c)) => {
                     self.revoke_reason_buf.push(c);
@@ -371,7 +380,7 @@ impl App {
                 }
                 (1, KeyCode::Esc) => {
                     self.revoke_phase = 0;
-                    self.status = "Enter certificate serial number (digits). Press Enter.".into();
+                    self.set_status("Enter certificate serial number (digits). Press Enter.");
                 }
                 _ => {}
             },
@@ -414,7 +423,7 @@ impl App {
                         self.disc_usb = None;
                     }
                     self.state = AppState::WaitMigrateTarget;
-                    self.status = "Eject old disc. Insert blank new disc.".into();
+                    self.set_status("Eject old disc. Insert blank new disc.");
                 }
             }
 
@@ -443,7 +452,7 @@ impl App {
                 let diagnostics = media::usb_scan_diagnostics();
                 let candidates = media::scan_usb_partitions();
                 if candidates.is_empty() {
-                    self.status = format!("Scanning… {diagnostics}");
+                    self.set_status(format!("Scanning… {diagnostics}"));
                     return;
                 }
                 match media::find_profile_usb(&candidates, &self.usb_mountpoint) {
@@ -456,7 +465,7 @@ impl App {
                         let _ = dev_path;
                         #[cfg(feature = "dev-softhsm-usb")]
                         if let Err(e) = configure_softhsm_from_usb(&self.usb_mountpoint) {
-                            self.status = format!("SoftHSM2 USB setup failed: {e}");
+                            self.set_status(format!("SoftHSM2 USB setup failed: {e}"));
                             let _ = media::unmount(&self.usb_mountpoint);
                             return;
                         }
@@ -465,37 +474,35 @@ impl App {
                             Ok(profile) => {
                                 if profile.hsm.pin_source != PinSource::Prompt {
                                     profile.hsm.pin_source.warn_if_unsafe();
-                                    self.status =
-                                        "ERROR: pin_source is not 'prompt' — unsuitable for \
-                                         ceremony. Fix profile.toml and re-insert USB."
-                                            .into();
+                                    self.set_status("ERROR: pin_source is not 'prompt' — unsuitable for \
+                                         ceremony. Fix profile.toml and re-insert USB.");
                                     let _ = media::unmount(&self.usb_mountpoint);
                                     return;
                                 }
                                 if let Err(e) = profile.hsm.check_module_allowed() {
-                                    self.status = format!("PKCS#11 module not allowed: {e}");
+                                    self.set_status(format!("PKCS#11 module not allowed: {e}"));
                                     let _ = media::unmount(&self.usb_mountpoint);
                                     return;
                                 }
                                 self.profile = Some(profile);
                                 self.profile_toml_bytes = Some(raw_bytes);
                                 self.state = AppState::ProfileLoaded;
-                                self.status = "Profile loaded from USB.".into();
+                                self.set_status("Profile loaded from USB.");
                             }
                             Err(e) => {
-                                self.status = format!("Profile parse error: {e}");
+                                self.set_status(format!("Profile parse error: {e}"));
                                 let _ = media::unmount(&self.usb_mountpoint);
                             }
                         }
                     }
                     Ok(None) => {
-                        self.status = format!(
+                        self.set_status(format!(
                             "No profile.toml found ({diagnostics}) — \
                              insert USB with profile.toml."
-                        );
+                        ));
                     }
                     Err(e) => {
-                        self.status = format!("Mount failed ({diagnostics}): {e}");
+                        self.set_status(format!("Mount failed ({diagnostics}): {e}"));
                     }
                 }
             }
@@ -522,10 +529,10 @@ impl App {
                             } else {
                                 "disc USB"
                             };
-                            self.status = format!(
+                            self.set_status(format!(
                                 "{label} ready ({}, {n} session(s)). Press [1].",
                                 disc.uuid
-                            );
+                            ));
                             self.disc_usb = Some(disc);
                         }
                         None => {
@@ -535,8 +542,7 @@ impl App {
                             } else {
                                 "disc USB"
                             };
-                            self.status =
-                                format!("No {label} found. Insert USB with ANODIZE_DISC_ID.");
+                            self.set_status(format!("No {label} found. Insert USB with ANODIZE_DISC_ID."));
                         }
                     }
                 }
@@ -550,7 +556,7 @@ impl App {
                         } else {
                             "--skip-disc mode: disc ready. Press [1]."
                         };
-                        self.status = label.into();
+                        self.set_status(label);
                         return;
                     }
 
@@ -565,25 +571,25 @@ impl App {
                                 let (cap_summary, remaining) = media::disc_capacity_summary(dev);
                                 self.sessions_remaining = Some(remaining);
                                 if need_blank && n > 0 {
-                                    self.status = format!(
+                                    self.set_status(format!(
                                         "Disc in {} has {n} session(s) — need a blank disc for migration.",
                                         dev.display()
-                                    );
+                                    ));
                                     continue;
                                 }
                                 if !need_blank && remaining < 2 {
-                                    self.status = format!(
+                                    self.set_status(format!(
                                         "Disc in {} is full ({cap_summary}). \
                                          Need 2 sessions for WAL. Insert a new disc.",
                                         dev.display()
-                                    );
+                                    ));
                                     continue;
                                 }
                                 self.optical_dev = Some(dev.clone());
                                 if !need_blank {
                                     self.prior_sessions = prior;
                                 }
-                                self.status = if need_blank {
+                                self.set_status(if need_blank {
                                     format!(
                                         "Blank disc in {} ({cap_summary}). Press [1] to write.",
                                         dev.display()
@@ -599,7 +605,7 @@ impl App {
                                          Press [1] to continue.",
                                         dev.display()
                                     )
-                                };
+                                });
                                 return;
                             }
                             Err(ref e) if e.contains("rewritable") => {
@@ -610,13 +616,12 @@ impl App {
                     }
                     self.optical_dev = None;
                     if let Some(msg) = rw_rejection {
-                        self.status = msg;
+                        self.set_status(msg);
                     } else if drives.is_empty() {
-                        self.status = "No optical drive detected. Insert drive and disc.".into();
+                        self.set_status("No optical drive detected. Insert drive and disc.");
                     } else {
-                        self.status = "No blank/appendable disc found. Insert write-once disc \
-                             (BD-R, DVD-R, CD-R, or M-Disc)."
-                            .into();
+                        self.set_status("No blank/appendable disc found. Insert write-once disc \
+                             (BD-R, DVD-R, CD-R, or M-Disc).");
                     }
                 }
             }
@@ -627,7 +632,7 @@ impl App {
                         self.burn_rx = None;
                         match result {
                             Err(e) => {
-                                self.status = format!("Intent disc write failed: {e}");
+                                self.set_status(format!("Intent disc write failed: {e}"));
                                 self.state = AppState::WaitDisc;
                                 self.optical_dev = None;
                                 #[cfg(feature = "dev-usb-disc")]
@@ -646,7 +651,7 @@ impl App {
                                             Some(1) => self.do_generate_and_build(),
                                             Some(2) => self.do_find_and_build(),
                                             _ => {
-                                                self.status = "Unknown key action".into();
+                                                self.set_status("Unknown key action");
                                                 self.state = AppState::WaitDisc;
                                             }
                                         }
@@ -655,7 +660,7 @@ impl App {
                                     Some(Operation::RevokeCert) => self.do_sign_crl_for_revoke(),
                                     Some(Operation::IssueCrl) => self.do_sign_crl_refresh(),
                                     _ => {
-                                        self.status = "Unknown operation after intent".into();
+                                        self.set_status("Unknown operation after intent");
                                         self.state = AppState::WaitDisc;
                                     }
                                 }
@@ -692,11 +697,10 @@ impl App {
                                     Some(Operation::MigrateDisc) => "Disc migration",
                                     None => "session",
                                 };
-                                self.status = format!("{op_label} written to disc: {disc_label}");
+                                self.set_status(format!("{op_label} written to disc: {disc_label}"));
                             }
                             Err(e) => {
-                                self.status =
-                                    format!("Burn failed: {e} — reinsert disc and retry.");
+                                self.set_status(format!("Burn failed: {e} — reinsert disc and retry."));
                                 self.state = AppState::WaitDisc;
                                 self.optical_dev = None;
                                 #[cfg(feature = "dev-usb-disc")]
@@ -721,7 +725,7 @@ impl App {
         let cfg = match &self.profile {
             Some(p) => &p.hsm,
             None => {
-                self.status = "No profile loaded".into();
+                self.set_status("No profile loaded");
                 return;
             }
         };
@@ -729,23 +733,22 @@ impl App {
         let hsm = match Pkcs11Hsm::new(&cfg.module_path, &cfg.token_label) {
             Ok(h) => h,
             Err(e) => {
-                self.status = format!("HSM open failed: {e}");
+                self.set_status(format!("HSM open failed: {e}"));
                 return;
             }
         };
         let mut actor = HsmActor::spawn(hsm);
         if let Err(e) = actor.login(&pin) {
-            self.status = format!("Login failed: {e}");
+            self.set_status(format!("Login failed: {e}"));
             return;
         }
         self.actor = Some(actor);
         self.state = AppState::WaitDisc;
-        self.status = if cfg!(feature = "dev-usb-disc") {
+        self.set_status(if cfg!(feature = "dev-usb-disc") {
             "Logged in. Insert disc USB with ANODIZE_DISC_ID (separate from profile USB)."
         } else {
             "Logged in. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc) and press [1]."
-        }
-        .into();
+        });
     }
 
     // ── Mode 2: Load CSR ───────────────────────────────────────────────────────
@@ -755,7 +758,7 @@ impl App {
         let csr_bytes = match std::fs::read(&csr_path) {
             Ok(b) => b,
             Err(e) => {
-                self.status = format!("Cannot read csr.der from USB: {e}");
+                self.set_status(format!("Cannot read csr.der from USB: {e}"));
                 self.current_op = None;
                 return;
             }
@@ -765,7 +768,7 @@ impl App {
         let csr_subject = match x509_cert::request::CertReq::from_der(&csr_bytes) {
             Ok(csr) => csr.info.subject.to_string(),
             Err(e) => {
-                self.status = format!("csr.der is not a valid DER-encoded CSR: {e}");
+                self.set_status(format!("csr.der is not a valid DER-encoded CSR: {e}"));
                 self.current_op = None;
                 return;
             }
@@ -778,15 +781,14 @@ impl App {
             .map(|p| p.cert_profiles.len())
             .unwrap_or(0);
         if profiles_len == 0 {
-            self.status =
-                "No [[cert_profiles]] defined in profile.toml. Add at least one profile.".into();
+            self.set_status("No [[cert_profiles]] defined in profile.toml. Add at least one profile.");
             self.current_op = None;
             return;
         }
 
         self.csr_der = Some(csr_bytes);
         self.state = AppState::LoadCsr;
-        self.status = format!("CSR loaded. Select profile [1]–[{profiles_len}].");
+        self.set_status(format!("CSR loaded. Select profile [1]–[{profiles_len}]."));
     }
 
     // ── Mode 3: Add revocation entry ──────────────────────────────────────────
@@ -795,17 +797,16 @@ impl App {
         let serial: u64 = match self.revoke_serial_buf.parse() {
             Ok(n) => n,
             Err(_) => {
-                self.status = format!(
+                self.set_status(format!(
                     "Invalid serial number: {:?}. Must be a u64.",
                     self.revoke_serial_buf
-                );
+                ));
                 return;
             }
         };
 
         if self.revocation_list.iter().any(|e| e.serial == serial) {
-            self.status =
-                format!("Serial {serial} is already in the revocation list — duplicate not added.");
+            self.set_status(format!("Serial {serial} is already in the revocation list — duplicate not added."));
             return;
         }
 
@@ -842,7 +843,7 @@ impl App {
         }
 
         self.state = AppState::RevokePreview;
-        self.status = "Review revocation. [1] to commit to disc, [q] to cancel.".into();
+        self.set_status("Review revocation. [1] to commit to disc, [q] to cancel.");
     }
 
     // ── Modes 3+4: Load revocation list from disc ─────────────────────────────
@@ -851,7 +852,7 @@ impl App {
         // Load root cert DER from disc (needed for signing)
         self.root_cert_der = load_root_cert_der_from_sessions(&self.prior_sessions);
         if self.root_cert_der.is_none() {
-            self.status = "No ROOT.CRT found on disc. Generate root CA first.".into();
+            self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
             self.current_op = None;
             return;
         }
@@ -887,11 +888,11 @@ impl App {
 
         const RAM_WARN_THRESHOLD: u64 = 512 * 1024 * 1024; // 512 MiB
         if total_bytes > RAM_WARN_THRESHOLD {
-            self.status = format!(
+            self.set_status(format!(
                 "WARNING: disc data ({} MiB) exceeds 512 MiB RAM threshold. \
                  Proceed only if you have sufficient free memory.",
                 total_bytes / (1024 * 1024)
-            );
+            ));
         }
 
         // Verify hash chain across all sessions
@@ -899,12 +900,12 @@ impl App {
 
         self.state = AppState::MigrateConfirm;
         let chain_status = if self.migrate_chain_ok { "OK" } else { "FAIL" };
-        self.status = format!(
+        self.set_status(format!(
             "Chain: {chain_status}  {} session(s)  {} bytes. \
              [1] to proceed, [q] to abort.",
             self.prior_sessions.len(),
             total_bytes
-        );
+        ));
     }
 
     // ── Key operations (Mode 1) ────────────────────────────────────────────────
@@ -913,7 +914,7 @@ impl App {
         let label = match &self.profile {
             Some(p) => p.hsm.key_label.clone(),
             None => {
-                self.status = "No profile".into();
+                self.set_status("No profile");
                 return;
             }
         };
@@ -921,20 +922,20 @@ impl App {
             let actor = match self.actor.as_mut() {
                 Some(a) => a,
                 None => {
-                    self.status = "No HSM session".into();
+                    self.set_status("No HSM session");
                     return;
                 }
             };
             match actor.generate_keypair(&label, KeySpec::EcdsaP384) {
                 Ok(k) => k,
                 Err(e) => {
-                    self.status = format!("Key generation failed: {e}");
+                    self.set_status(format!("Key generation failed: {e}"));
                     return;
                 }
             }
         };
         self.root_key = Some(key);
-        self.status = format!("Generated P-384 keypair (label={label:?})");
+        self.set_status(format!("Generated P-384 keypair (label={label:?})"));
         self.do_build_cert();
     }
 
@@ -942,7 +943,7 @@ impl App {
         let label = match &self.profile {
             Some(p) => p.hsm.key_label.clone(),
             None => {
-                self.status = "No profile".into();
+                self.set_status("No profile");
                 return;
             }
         };
@@ -950,57 +951,55 @@ impl App {
             let actor = match self.actor.as_ref() {
                 Some(a) => a,
                 None => {
-                    self.status = "No HSM session".into();
+                    self.set_status("No HSM session");
                     return;
                 }
             };
             match actor.find_key(&label) {
                 Ok(k) => k,
                 Err(e) => {
-                    self.status = format!("Key not found: {e}");
+                    self.set_status(format!("Key not found: {e}"));
                     return;
                 }
             }
         };
         self.root_key = Some(key);
-        self.status = format!("Found existing key (label={label:?})");
+        self.set_status(format!("Found existing key (label={label:?})"));
         self.do_build_cert();
     }
 
     fn do_build_cert(&mut self) {
         if let Some(ct) = self.confirmed_time {
             if !clock_drift_ok(ct) {
-                self.status =
-                    "Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock."
-                        .into();
+                self.set_status("Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock.");
                 return;
             }
         }
         let actor = match self.actor.clone() {
             Some(a) => a,
             None => {
-                self.status = "No HSM session".into();
+                self.set_status("No HSM session");
                 return;
             }
         };
         let key = match self.root_key {
             Some(k) => k,
             None => {
-                self.status = "No key handle".into();
+                self.set_status("No key handle");
                 return;
             }
         };
         let signer = match P384HsmSigner::new(actor, key) {
             Ok(s) => s,
             Err(e) => {
-                self.status = format!("Signer error: {e}");
+                self.set_status(format!("Signer error: {e}"));
                 return;
             }
         };
         let ca = match &self.profile {
             Some(p) => &p.ca,
             None => {
-                self.status = "No profile".into();
+                self.set_status("No profile");
                 return;
             }
         };
@@ -1013,14 +1012,14 @@ impl App {
         ) {
             Ok(c) => c,
             Err(e) => {
-                self.status = format!("Cert build failed: {e}");
+                self.set_status(mechanism_error_msg("Cert build failed", &e));
                 return;
             }
         };
         let cert_der = match cert.to_der() {
             Ok(d) => d,
             Err(e) => {
-                self.status = format!("DER encode failed: {e}");
+                self.set_status(format!("DER encode failed: {e}"));
                 return;
             }
         };
@@ -1031,7 +1030,7 @@ impl App {
         let crl_der = match issue_crl(&signer, &cert, &[], next_update, 1) {
             Ok(d) => d,
             Err(e) => {
-                self.status = format!("Initial CRL build failed: {e}");
+                self.set_status(mechanism_error_msg("Initial CRL build failed", &e));
                 return;
             }
         };
@@ -1041,7 +1040,7 @@ impl App {
         self.cert_der = Some(cert_der);
         self.crl_der = Some(crl_der);
         self.state = AppState::CertPreview;
-        self.status = "Certificate built. Verify fingerprint before writing.".into();
+        self.set_status("Certificate built. Verify fingerprint before writing.");
     }
 
     // ── Mode 2: Sign CSR ──────────────────────────────────────────────────────
@@ -1049,37 +1048,35 @@ impl App {
     fn do_sign_csr(&mut self) {
         if let Some(ct) = self.confirmed_time {
             if !clock_drift_ok(ct) {
-                self.status =
-                    "Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock."
-                        .into();
+                self.set_status("Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock.");
                 return;
             }
         }
         let label = match self.profile.as_ref().map(|p| p.hsm.key_label.clone()) {
             Some(l) => l,
             None => {
-                self.status = "No profile".into();
+                self.set_status("No profile");
                 return;
             }
         };
         let actor = match self.actor.clone() {
             Some(a) => a,
             None => {
-                self.status = "No HSM session".into();
+                self.set_status("No HSM session");
                 return;
             }
         };
         let root_key = match actor.find_key(&label) {
             Ok(k) => k,
             Err(e) => {
-                self.status = format!("Root key not found: {e}");
+                self.set_status(format!("Root key not found: {e}"));
                 return;
             }
         };
         let signer = match P384HsmSigner::new(actor, root_key) {
             Ok(s) => s,
             Err(e) => {
-                self.status = format!("Signer error: {e}");
+                self.set_status(format!("Signer error: {e}"));
                 return;
             }
         };
@@ -1087,14 +1084,14 @@ impl App {
         let root_cert_der = match &self.root_cert_der {
             Some(d) => d.clone(),
             None => {
-                self.status = "Root cert not loaded from disc".into();
+                self.set_status("Root cert not loaded from disc");
                 return;
             }
         };
         let root_cert = match Certificate::from_der(&root_cert_der) {
             Ok(c) => c,
             Err(e) => {
-                self.status = format!("Root cert DER decode failed: {e}");
+                self.set_status(format!("Root cert DER decode failed: {e}"));
                 return;
             }
         };
@@ -1102,7 +1099,7 @@ impl App {
         let csr_der = match self.csr_der.as_ref() {
             Some(d) => d.clone(),
             None => {
-                self.status = "No CSR loaded".into();
+                self.set_status("No CSR loaded");
                 return;
             }
         };
@@ -1114,7 +1111,7 @@ impl App {
         {
             Some(prof) => (prof.validity_days, prof.path_len),
             None => {
-                self.status = "No cert profile selected".into();
+                self.set_status("No cert profile selected");
                 return;
             }
         };
@@ -1131,15 +1128,15 @@ impl App {
         ) {
             Ok(c) => c,
             Err(CaError::CsrSignatureInvalid) => {
-                self.status = "CSR signature verification failed — CSR may be corrupt".into();
+                self.set_status("CSR signature verification failed — CSR may be corrupt");
                 return;
             }
             Err(CaError::CsrExtensionRejected(oid)) => {
-                self.status = format!("CSR contains rejected extension OID: {oid}");
+                self.set_status(format!("CSR contains rejected extension OID: {oid}"));
                 return;
             }
             Err(e) => {
-                self.status = format!("CSR signing failed: {e}");
+                self.set_status(mechanism_error_msg("CSR signing failed", &e));
                 return;
             }
         };
@@ -1147,7 +1144,7 @@ impl App {
         let cert_der = match cert.to_der() {
             Ok(d) => d,
             Err(e) => {
-                self.status = format!("DER encode failed: {e}");
+                self.set_status(format!("DER encode failed: {e}"));
                 return;
             }
         };
@@ -1156,7 +1153,7 @@ impl App {
         self.fingerprint = Some(fp);
         self.cert_der = Some(cert_der);
         self.state = AppState::CertPreview;
-        self.status = "Intermediate cert signed. Verify fingerprint before writing.".into();
+        self.set_status("Intermediate cert signed. Verify fingerprint before writing.");
     }
 
     // ── Mode 3: Sign CRL for revocation ──────────────────────────────────────
@@ -1174,37 +1171,35 @@ impl App {
     fn do_sign_crl_inner(&mut self) {
         if let Some(ct) = self.confirmed_time {
             if !clock_drift_ok(ct) {
-                self.status =
-                    "Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock."
-                        .into();
+                self.set_status("Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock.");
                 return;
             }
         }
         let label = match self.profile.as_ref().map(|p| p.hsm.key_label.clone()) {
             Some(l) => l,
             None => {
-                self.status = "No profile".into();
+                self.set_status("No profile");
                 return;
             }
         };
         let actor = match self.actor.clone() {
             Some(a) => a,
             None => {
-                self.status = "No HSM session".into();
+                self.set_status("No HSM session");
                 return;
             }
         };
         let root_key = match actor.find_key(&label) {
             Ok(k) => k,
             Err(e) => {
-                self.status = format!("Root key not found: {e}");
+                self.set_status(format!("Root key not found: {e}"));
                 return;
             }
         };
         let signer = match P384HsmSigner::new(actor, root_key) {
             Ok(s) => s,
             Err(e) => {
-                self.status = format!("Signer error: {e}");
+                self.set_status(format!("Signer error: {e}"));
                 return;
             }
         };
@@ -1212,14 +1207,14 @@ impl App {
         let root_cert_der = match &self.root_cert_der {
             Some(d) => d.clone(),
             None => {
-                self.status = "Root cert not on disc".into();
+                self.set_status("Root cert not on disc");
                 return;
             }
         };
         let root_cert = match Certificate::from_der(&root_cert_der) {
             Ok(c) => c,
             Err(e) => {
-                self.status = format!("Root cert DER decode: {e}");
+                self.set_status(format!("Root cert DER decode: {e}"));
                 return;
             }
         };
@@ -1227,7 +1222,7 @@ impl App {
         let crl_number = match self.crl_number {
             Some(n) => n,
             None => {
-                self.status = "CRL number not determined".into();
+                self.set_status("CRL number not determined");
                 return;
             }
         };
@@ -1253,7 +1248,7 @@ impl App {
         let crl_der = match issue_crl(&signer, &root_cert, &revoked, next_update, crl_number) {
             Ok(d) => d,
             Err(e) => {
-                self.status = format!("CRL signing failed: {e}");
+                self.set_status(mechanism_error_msg("CRL signing failed", &e));
                 return;
             }
         };
@@ -1273,7 +1268,7 @@ impl App {
         {
             self.root_cert_der = load_root_cert_der_from_sessions(&self.prior_sessions);
             if self.root_cert_der.is_none() {
-                self.status = "No ROOT.CRT found on disc. Generate root CA first.".into();
+                self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
                 return;
             }
         }
@@ -1281,14 +1276,14 @@ impl App {
         let raw_bytes = match self.profile_toml_bytes.clone() {
             Some(b) => b,
             None => {
-                self.status = "Profile bytes missing".into();
+                self.set_status("Profile bytes missing");
                 return;
             }
         };
 
         #[cfg(not(feature = "dev-usb-disc"))]
         if !self.skip_disc && self.sessions_remaining.map(|r| r < 2).unwrap_or(false) {
-            self.status = "Disc full — cannot write intent session. Insert new disc.".into();
+            self.set_status("Disc full — cannot write intent session. Insert new disc.");
             return;
         }
 
@@ -1300,7 +1295,7 @@ impl App {
         #[cfg(feature = "dev-usb-disc")]
         let staging = PathBuf::from("/tmp/anodize-staging");
         if let Err(e) = std::fs::create_dir_all(&staging) {
-            self.status = format!("Cannot create staging dir: {e}");
+            self.set_status(format!("Cannot create staging dir: {e}"));
             return;
         }
         let log_path = staging.join("audit.log");
@@ -1309,7 +1304,7 @@ impl App {
         let mut log = match AuditLog::create(&log_path, &genesis) {
             Ok(l) => l,
             Err(e) => {
-                self.status = format!("Audit log create failed: {e}");
+                self.set_status(format!("Audit log create failed: {e}"));
                 return;
             }
         };
@@ -1321,7 +1316,7 @@ impl App {
         };
 
         if let Err(e) = log.append(&event_name, event_data) {
-            self.status = format!("Audit intent append failed: {e}");
+            self.set_status(format!("Audit intent append failed: {e}"));
             return;
         }
         drop(log);
@@ -1329,7 +1324,7 @@ impl App {
         let partial_log_bytes = match std::fs::read(&log_path) {
             Ok(b) => b,
             Err(e) => {
-                self.status = format!("Cannot read intent audit log: {e}");
+                self.set_status(format!("Cannot read intent audit log: {e}"));
                 return;
             }
         };
@@ -1354,7 +1349,7 @@ impl App {
             let disc = match self.disc_usb.clone() {
                 Some(d) => d,
                 None => {
-                    self.status = "No disc USB — cannot write intent".into();
+                    self.set_status("No disc USB — cannot write intent");
                     self.burn_rx = None;
                     self.pending_intent_session = None;
                     return;
@@ -1383,7 +1378,7 @@ impl App {
             } else if let Some(dev) = self.optical_dev.clone() {
                 media::write_session(&dev, all_sessions, false, tx);
             } else {
-                self.status = "No optical device — cannot write intent".into();
+                self.set_status("No optical device — cannot write intent");
                 self.burn_rx = None;
                 self.pending_intent_session = None;
                 return;
@@ -1391,7 +1386,7 @@ impl App {
         }
 
         self.state = AppState::WritingIntent;
-        self.status = "Writing intent to disc. Operation will follow…".into();
+        self.set_status("Writing intent to disc. Operation will follow…");
     }
 
     /// Build the intent audit event (name, data) for the current operation.
@@ -1520,7 +1515,7 @@ impl App {
             let disc = match self.disc_usb.clone() {
                 Some(d) => d,
                 None => {
-                    self.status = "No disc USB — cannot write".into();
+                    self.set_status("No disc USB — cannot write");
                     self.burn_rx = None;
                     return;
                 }
@@ -1531,7 +1526,7 @@ impl App {
                     .ok();
             });
             self.state = AppState::BurningDisc;
-            self.status = "Writing ISO to disc USB…".into();
+            self.set_status("Writing ISO to disc USB…");
         }
 
         #[cfg(not(feature = "dev-usb-disc"))]
@@ -1550,13 +1545,13 @@ impl App {
             } else if let Some(dev) = &self.optical_dev {
                 media::write_session(dev, all_sessions, false, tx);
             } else {
-                self.status = "No optical device — cannot burn".into();
+                self.set_status("No optical device — cannot burn");
                 self.burn_rx = None;
                 return;
             }
 
             self.state = AppState::BurningDisc;
-            self.status = "Burning disc session… (this may take a few minutes)".into();
+            self.set_status("Burning disc session… (this may take a few minutes)");
         }
     }
 
@@ -1575,7 +1570,7 @@ impl App {
                 let mut log = match AuditLog::open(&log_path) {
                     Ok(l) => l,
                     Err(e) => {
-                        self.status = format!("Audit log reopen failed: {e}");
+                        self.set_status(format!("Audit log reopen failed: {e}"));
                         return None;
                     }
                 };
@@ -1593,7 +1588,7 @@ impl App {
                         "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
                     }),
                 ) {
-                    self.status = format!("Audit log append failed: {e}");
+                    self.set_status(format!("Audit log append failed: {e}"));
                     return None;
                 }
                 if let Err(e) = log.append(
@@ -1604,7 +1599,7 @@ impl App {
                         "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
                     }),
                 ) {
-                    self.status = format!("CRL audit append failed: {e}");
+                    self.set_status(format!("CRL audit append failed: {e}"));
                     return None;
                 }
                 drop(log);
@@ -1612,7 +1607,7 @@ impl App {
                 let audit_bytes = match std::fs::read(&log_path) {
                     Ok(b) => b,
                     Err(e) => {
-                        self.status = format!("Cannot read audit log: {e}");
+                        self.set_status(format!("Cannot read audit log: {e}"));
                         return None;
                     }
                 };
@@ -1644,7 +1639,7 @@ impl App {
                 let mut log = match AuditLog::open(&log_path) {
                     Ok(l) => l,
                     Err(e) => {
-                        self.status = format!("Audit log reopen failed: {e}");
+                        self.set_status(format!("Audit log reopen failed: {e}"));
                         return None;
                     }
                 };
@@ -1665,7 +1660,7 @@ impl App {
                         "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
                     }),
                 ) {
-                    self.status = format!("Audit log append failed: {e}");
+                    self.set_status(format!("Audit log append failed: {e}"));
                     return None;
                 }
                 drop(log);
@@ -1673,7 +1668,7 @@ impl App {
                 let audit_bytes = match std::fs::read(&log_path) {
                     Ok(b) => b,
                     Err(e) => {
-                        self.status = format!("Cannot read audit log: {e}");
+                        self.set_status(format!("Cannot read audit log: {e}"));
                         return None;
                     }
                 };
@@ -1703,7 +1698,7 @@ impl App {
                 let mut log = match AuditLog::open(&log_path) {
                     Ok(l) => l,
                     Err(e) => {
-                        self.status = format!("Audit log reopen failed: {e}");
+                        self.set_status(format!("Audit log reopen failed: {e}"));
                         return None;
                     }
                 };
@@ -1721,7 +1716,7 @@ impl App {
                         "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
                     }),
                 ) {
-                    self.status = format!("Audit log append failed: {e}");
+                    self.set_status(format!("Audit log append failed: {e}"));
                     return None;
                 }
                 if let Err(e) = log.append(
@@ -1732,7 +1727,7 @@ impl App {
                         "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
                     }),
                 ) {
-                    self.status = format!("CRL audit append failed: {e}");
+                    self.set_status(format!("CRL audit append failed: {e}"));
                     return None;
                 }
                 drop(log);
@@ -1740,7 +1735,7 @@ impl App {
                 let audit_bytes = match std::fs::read(&log_path) {
                     Ok(b) => b,
                     Err(e) => {
-                        self.status = format!("Cannot read audit log: {e}");
+                        self.set_status(format!("Cannot read audit log: {e}"));
                         return None;
                     }
                 };
@@ -1773,7 +1768,7 @@ impl App {
                 let mut log = match AuditLog::open(&log_path) {
                     Ok(l) => l,
                     Err(e) => {
-                        self.status = format!("Audit log reopen failed: {e}");
+                        self.set_status(format!("Audit log reopen failed: {e}"));
                         return None;
                     }
                 };
@@ -1785,7 +1780,7 @@ impl App {
                         "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
                     }),
                 ) {
-                    self.status = format!("Audit log append failed: {e}");
+                    self.set_status(format!("Audit log append failed: {e}"));
                     return None;
                 }
                 drop(log);
@@ -1793,7 +1788,7 @@ impl App {
                 let audit_bytes = match std::fs::read(&log_path) {
                     Ok(b) => b,
                     Err(e) => {
-                        self.status = format!("Cannot read audit log: {e}");
+                        self.set_status(format!("Cannot read audit log: {e}"));
                         return None;
                     }
                 };
@@ -1825,7 +1820,7 @@ impl App {
             }
 
             None => {
-                self.status = "No operation set".into();
+                self.set_status("No operation set");
                 None
             }
         }
@@ -1851,13 +1846,13 @@ impl App {
             Some(Operation::GenerateRootCa) => {
                 if let Some(cert_der) = &self.cert_der {
                     if let Err(e) = std::fs::write(usb.join("root.crt"), cert_der) {
-                        self.status = format!("USB write failed (root.crt): {e}");
+                        self.set_status(format!("USB write failed (root.crt): {e}"));
                         return;
                     }
                 }
                 if let Some(crl_der) = &self.crl_der {
                     if let Err(e) = std::fs::write(usb.join("root.crl"), crl_der) {
-                        self.status = format!("USB write failed (root.crl): {e}");
+                        self.set_status(format!("USB write failed (root.crl): {e}"));
                         return;
                     }
                 }
@@ -1865,7 +1860,7 @@ impl App {
             Some(Operation::SignCsr) => {
                 if let Some(cert_der) = &self.cert_der {
                     if let Err(e) = std::fs::write(usb.join("intermediate.crt"), cert_der) {
-                        self.status = format!("USB write failed (intermediate.crt): {e}");
+                        self.set_status(format!("USB write failed (intermediate.crt): {e}"));
                         return;
                     }
                 }
@@ -1873,12 +1868,12 @@ impl App {
             Some(Operation::RevokeCert) => {
                 let revoked_toml = serialize_revocation_list(&self.revocation_list);
                 if let Err(e) = std::fs::write(usb.join("revoked.toml"), &revoked_toml) {
-                    self.status = format!("USB write failed (revoked.toml): {e}");
+                    self.set_status(format!("USB write failed (revoked.toml): {e}"));
                     return;
                 }
                 if let Some(crl_der) = &self.crl_der {
                     if let Err(e) = std::fs::write(usb.join("root.crl"), crl_der) {
-                        self.status = format!("USB write failed (root.crl): {e}");
+                        self.set_status(format!("USB write failed (root.crl): {e}"));
                         return;
                     }
                 }
@@ -1886,7 +1881,7 @@ impl App {
             Some(Operation::IssueCrl) => {
                 if let Some(crl_der) = &self.crl_der {
                     if let Err(e) = std::fs::write(usb.join("root.crl"), crl_der) {
-                        self.status = format!("USB write failed (root.crl): {e}");
+                        self.set_status(format!("USB write failed (root.crl): {e}"));
                         return;
                     }
                 }
@@ -1894,7 +1889,7 @@ impl App {
             Some(Operation::MigrateDisc) | None => {
                 // No USB export for migration
                 self.state = AppState::Done;
-                self.status = "Migration complete.".into();
+                self.set_status("Migration complete.");
                 return;
             }
         }
@@ -1902,12 +1897,12 @@ impl App {
         // Copy audit log to USB for all non-migration operations
         let usb_log = usb.join("audit.log");
         if let Err(e) = std::fs::copy(&staging_log, &usb_log) {
-            self.status = format!("Audit log copy to USB failed: {e}");
+            self.set_status(format!("Audit log copy to USB failed: {e}"));
             return;
         }
 
         self.state = AppState::Done;
-        self.status = format!("USB write complete: {}", usb.display());
+        self.set_status(format!("USB write complete: {}", usb.display()));
     }
 }
 
@@ -1920,6 +1915,19 @@ fn noise_display_len() -> usize {
         .unwrap_or_default()
         .subsec_nanos() as usize;
     8 + (nanos % 13)
+}
+
+// ── Error helpers ─────────────────────────────────────────────────────────────
+
+fn mechanism_error_msg(prefix: &str, e: &CaError) -> String {
+    if e.is_mechanism_unsupported() {
+        "HSM does not support CKM_ECDSA_SHA384. \
+         Ubuntu SoftHSM2 is built without it — use 'make qemu-dev-curses' \
+         (Nix SoftHSM2) or a YubiHSM 2."
+            .to_string()
+    } else {
+        format!("{prefix}: {e}")
+    }
 }
 
 // ── Fingerprint ───────────────────────────────────────────────────────────────
@@ -2068,7 +2076,24 @@ fn configure_softhsm_from_usb(usb_mountpoint: &std::path::Path) -> Result<()> {
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
+fn render_log(frame: &mut Frame, app: &App) {
+    let content = app.log_lines.join("\n");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Status Log  [L/Esc] close  [\u{2191}/\u{2193}/PgUp/PgDn] scroll");
+    let para = Paragraph::new(content.as_str())
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .scroll((app.log_scroll, 0));
+    frame.render_widget(para, frame.area());
+}
+
 fn render(frame: &mut Frame, app: &App) {
+    if app.log_view {
+        render_log(frame, app);
+        return;
+    }
+
     let area = frame.area();
 
     // Build header lines dynamically so runtime flags (skip_disc) and
@@ -2164,7 +2189,7 @@ fn render(frame: &mut Frame, app: &App) {
 
     let status = Paragraph::new(app.status.as_str())
         .style(Style::default().fg(Color::Yellow))
-        .block(Block::default().borders(Borders::ALL).title("Status"));
+        .block(Block::default().borders(Borders::ALL).title("Status  [L] log"));
     frame.render_widget(status, chunks[2]);
 }
 
@@ -2597,6 +2622,32 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App
                             && app.state != AppState::RevokeInput =>
                     {
                         break;
+                    }
+                    // Toggle full-screen log view (excluded from text-entry states)
+                    KeyCode::Char('l') | KeyCode::Char('L')
+                        if app.state != AppState::EnterPin
+                            && app.state != AppState::RevokeInput =>
+                    {
+                        app.log_view = !app.log_view;
+                        if app.log_view {
+                            app.log_scroll =
+                                app.log_lines.len().saturating_sub(1) as u16;
+                        }
+                    }
+                    KeyCode::Esc if app.log_view => {
+                        app.log_view = false;
+                    }
+                    KeyCode::Up if app.log_view => {
+                        app.log_scroll = app.log_scroll.saturating_sub(1);
+                    }
+                    KeyCode::Down if app.log_view => {
+                        app.log_scroll = app.log_scroll.saturating_add(1);
+                    }
+                    KeyCode::PageUp if app.log_view => {
+                        app.log_scroll = app.log_scroll.saturating_sub(10);
+                    }
+                    KeyCode::PageDown if app.log_view => {
+                        app.log_scroll = app.log_scroll.saturating_add(10);
                     }
                     other => app.handle_key(other),
                 }
