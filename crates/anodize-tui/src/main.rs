@@ -968,6 +968,14 @@ impl App {
     }
 
     fn do_build_cert(&mut self) {
+        if let Some(ct) = self.confirmed_time {
+            if !clock_drift_ok(ct) {
+                self.status =
+                    "Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock."
+                        .into();
+                return;
+            }
+        }
         let actor = match self.actor.clone() {
             Some(a) => a,
             None => {
@@ -1018,7 +1026,8 @@ impl App {
         };
 
         // Issue initial CRL (#1, empty) alongside root cert
-        let next_update = SystemTime::now() + std::time::Duration::from_secs(365 * 24 * 3600);
+        let base_time = self.confirmed_time.unwrap_or_else(SystemTime::now);
+        let next_update = base_time + std::time::Duration::from_secs(365 * 24 * 3600);
         let crl_der = match issue_crl(&signer, &cert, &[], next_update, 1) {
             Ok(d) => d,
             Err(e) => {
@@ -1038,6 +1047,14 @@ impl App {
     // ── Mode 2: Sign CSR ──────────────────────────────────────────────────────
 
     fn do_sign_csr(&mut self) {
+        if let Some(ct) = self.confirmed_time {
+            if !clock_drift_ok(ct) {
+                self.status =
+                    "Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock."
+                        .into();
+                return;
+            }
+        }
         let label = match self.profile.as_ref().map(|p| p.hsm.key_label.clone()) {
             Some(l) => l,
             None => {
@@ -1155,6 +1172,14 @@ impl App {
     }
 
     fn do_sign_crl_inner(&mut self) {
+        if let Some(ct) = self.confirmed_time {
+            if !clock_drift_ok(ct) {
+                self.status =
+                    "Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock."
+                        .into();
+                return;
+            }
+        }
         let label = match self.profile.as_ref().map(|p| p.hsm.key_label.clone()) {
             Some(l) => l,
             None => {
@@ -1222,7 +1247,8 @@ impl App {
             })
             .collect();
 
-        let next_update = SystemTime::now() + std::time::Duration::from_secs(365 * 24 * 3600);
+        let base_time = self.confirmed_time.unwrap_or_else(SystemTime::now);
+        let next_update = base_time + std::time::Duration::from_secs(365 * 24 * 3600);
 
         let crl_der = match issue_crl(&signer, &root_cert, &revoked, next_update, crl_number) {
             Ok(d) => d,
@@ -2007,6 +2033,19 @@ fn parse_rfc3339_to_system_time(s: &str) -> Option<SystemTime> {
     } else {
         None
     }
+}
+
+/// Returns true if the wall clock is within 5 minutes of the operator-confirmed time.
+/// A larger drift suggests the CMOS clock changed after ClockCheck and certificate
+/// timestamps would diverge from what the operator verified.
+fn clock_drift_ok(confirmed: SystemTime) -> bool {
+    let now = SystemTime::now();
+    let drift = if now >= confirmed {
+        now.duration_since(confirmed)
+    } else {
+        confirmed.duration_since(now)
+    };
+    drift.map(|d| d.as_secs() <= 300).unwrap_or(false)
 }
 
 // ── SoftHSM2 USB backend (dev-softhsm-usb feature) ───────────────────────────
