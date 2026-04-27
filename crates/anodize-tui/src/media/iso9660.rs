@@ -29,7 +29,7 @@ pub struct IsoFile {
 /// All files for one ceremony session, grouped under a timestamped directory.
 #[derive(Debug, Clone)]
 pub struct SessionEntry {
-    /// Directory name: "YYYYMMDDTHHMMSSZ" (16 chars, UTC).
+    /// Directory name: "YYYYMMDDTHHMMSS_NNNNNNNNNZ" (26 chars, UTC) — see `session_dir_name`.
     pub dir_name: String,
     pub timestamp: SystemTime,
     pub files: Vec<IsoFile>,
@@ -190,7 +190,7 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
         w16(s, 128, 2048);
 
         // Path table size — calculate
-        let pt_size = path_table_size(n);
+        let pt_size = path_table_size(sessions);
         w32(s, 132, pt_size as u32);
 
         // Location of Type L path table (bytes 140–143, LE)
@@ -201,7 +201,7 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
         // Location of Optional Type M path table (152–155): 0
 
         // Directory record for root (bytes 156–189, 34 bytes)
-        let root_size = root_dir_size(n);
+        let root_size = root_dir_size(sessions);
         let root_rec = dir_rec(
             true,
             &[0x00],
@@ -285,7 +285,7 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
     // ── Root directory records (sector 20) ────────────────────────────────────
     {
         let root = &mut image[root_dir_lba as usize * SECTOR..(root_dir_lba as usize + 1) * SECTOR];
-        let root_data_len = root_dir_size(n) as u32;
+        let root_data_len = root_dir_size(sessions) as u32;
         let mut off = 0;
 
         // "." self-reference
@@ -328,7 +328,7 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
     for (i, sess) in sessions.iter().enumerate() {
         let dir_lba = session_dir_start + i as u32;
         let dir_data_len = session_dir_size(&sess.files) as u32;
-        let root_data_len = root_dir_size(n) as u32;
+        let root_data_len = root_dir_size(sessions) as u32;
 
         let sec = &mut image[dir_lba as usize * SECTOR..(dir_lba as usize + 1) * SECTOR];
         let mut off = 0;
@@ -368,18 +368,39 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
     image
 }
 
-fn path_table_size(n_sessions: usize) -> usize {
+fn path_table_size(sessions: &[SessionEntry]) -> usize {
     // Root entry: 8 + 1 (id=0x01) = 9, padded to 10
     let root = 10usize;
-    // Each session entry: 8 + 16 (dir_name) = 24 (even, no pad)
-    let sessions = n_sessions * 24;
-    root + sessions
+    // Each session entry: 8 + dir_name.len(), padded to even
+    let sess_total: usize = sessions
+        .iter()
+        .map(|s| {
+            let base = 8 + s.dir_name.len();
+            if base % 2 == 0 {
+                base
+            } else {
+                base + 1
+            }
+        })
+        .sum();
+    root + sess_total
 }
 
-fn root_dir_size(n_sessions: usize) -> usize {
+fn root_dir_size(sessions: &[SessionEntry]) -> usize {
     // "." = 34, ".." = 34
-    // Each session dir entry: 33 + 16 = 49, padded to 50
-    34 + 34 + n_sessions * 50
+    // Each session dir entry: 33 + dir_name.len(), padded to even
+    let sess_total: usize = sessions
+        .iter()
+        .map(|s| {
+            let base = 33 + s.dir_name.len();
+            if base % 2 == 0 {
+                base
+            } else {
+                base + 1
+            }
+        })
+        .sum();
+    34 + 34 + sess_total
 }
 
 fn session_dir_size(files: &[IsoFile]) -> usize {
@@ -585,7 +606,7 @@ mod tests {
     #[test]
     fn build_iso_min_size() {
         let s = make_session(
-            "20260425T143000Z",
+            "20260425T143000_000000000Z",
             1_000_000,
             &[("ROOT.CRT", b"fakecert"), ("AUDIT.LOG", b"fakelog")],
         );
@@ -600,7 +621,11 @@ mod tests {
 
     #[test]
     fn pvd_magic() {
-        let s = make_session("20260425T143000Z", 1_000_000, &[("ROOT.CRT", b"x")]);
+        let s = make_session(
+            "20260425T143000_000000000Z",
+            1_000_000,
+            &[("ROOT.CRT", b"x")],
+        );
         let img = build_iso(&[s]);
         assert_eq!(img[16 * SECTOR], 0x01);
         assert_eq!(&img[16 * SECTOR + 1..16 * SECTOR + 6], b"CD001");
@@ -610,7 +635,7 @@ mod tests {
     fn parse_roundtrip() {
         let sessions = vec![
             make_session(
-                "20260425T143000Z",
+                "20260425T143000_000000000Z",
                 1_000_000,
                 &[
                     ("ROOT.CRT", b"cert-der-bytes"),
@@ -618,7 +643,7 @@ mod tests {
                 ],
             ),
             make_session(
-                "20260426T091500Z",
+                "20260426T091500_000000000Z",
                 2_000_000,
                 &[
                     ("ROOT.CRT", b"cert-der-bytes"),
@@ -631,8 +656,8 @@ mod tests {
         let parsed = parse_iso(&img).expect("parse_iso failed");
 
         assert_eq!(parsed.len(), 2, "expected 2 sessions, got {}", parsed.len());
-        assert_eq!(parsed[0].dir_name, "20260425T143000Z");
-        assert_eq!(parsed[1].dir_name, "20260426T091500Z");
+        assert_eq!(parsed[0].dir_name, "20260425T143000_000000000Z");
+        assert_eq!(parsed[1].dir_name, "20260426T091500_000000000Z");
 
         // File data roundtrip
         let f0 = parsed[0]
@@ -651,7 +676,11 @@ mod tests {
 
     #[test]
     fn both_endian_encoding() {
-        let s = make_session("20260425T143000Z", 1_000_000, &[("ROOT.CRT", b"x")]);
+        let s = make_session(
+            "20260425T143000_000000000Z",
+            1_000_000,
+            &[("ROOT.CRT", b"x")],
+        );
         let img = build_iso(&[s]);
         // Volume space size at PVD bytes 80–87: LE then BE
         let pvd = &img[16 * SECTOR..];

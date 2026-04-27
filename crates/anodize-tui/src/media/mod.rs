@@ -393,16 +393,18 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
 
 // ── Utility: session directory name from SystemTime ───────────────────────────
 
-/// Format a SystemTime as "YYYYMMDDTHHMMSSZ" (16 chars, UTC, ISO 8601-ish).
+/// Format a SystemTime as "YYYYMMDDTHHMMSS_NNNNNNNNNZ" (26 chars, UTC).
+/// Nanoseconds prevent directory collision when two sessions start in the same second.
 pub fn session_dir_name(ts: SystemTime) -> String {
     let odt = time::OffsetDateTime::from(ts);
     format!(
-        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
+        "{:04}{:02}{:02}T{:02}{:02}{:02}_{:09}Z",
         odt.year(),
         odt.month() as u8,
         odt.day(),
         odt.hour(),
         odt.minute(),
         odt.second(),
+        odt.nanosecond(),
     )
 }
