@@ -343,19 +343,17 @@ fn ec_spki_from_params_and_point(ec_params_der: &[u8], ec_point_raw: &[u8]) -> V
     // P-384 point has X[0]==95 and X[1]==0x04, which would otherwise satisfy
     // the earlier structural conditions.
     let expected_len = uncompressed_point_len(ec_params_der);
-    let point: &[u8] = if ec_point_raw.len() >= 3
-        && ec_point_raw[0] == 0x04
-        && ec_point_raw[2] == 0x04
-    {
-        let inner_len = ec_point_raw[1] as usize;
-        if inner_len + 2 == ec_point_raw.len() && expected_len == Some(inner_len) {
-            &ec_point_raw[2..]
+    let point: &[u8] =
+        if ec_point_raw.len() >= 3 && ec_point_raw[0] == 0x04 && ec_point_raw[2] == 0x04 {
+            let inner_len = ec_point_raw[1] as usize;
+            if inner_len + 2 == ec_point_raw.len() && expected_len == Some(inner_len) {
+                &ec_point_raw[2..]
+            } else {
+                ec_point_raw
+            }
         } else {
             ec_point_raw
-        }
-    } else {
-        ec_point_raw
-    };
+        };
 
     // AlgorithmIdentifier SEQUENCE { id-ecPublicKey OID, ec_params_der }
     let alg_inner = [ID_EC_PUBLIC_KEY_OID, ec_params_der].concat();

@@ -809,9 +809,8 @@ impl App {
         };
 
         if self.revocation_list.iter().any(|e| e.serial == serial) {
-            self.status = format!(
-                "Serial {serial} is already in the revocation list — duplicate not added."
-            );
+            self.status =
+                format!("Serial {serial} is already in the revocation list — duplicate not added.");
             return;
         }
 
@@ -1213,14 +1212,18 @@ impl App {
             }
         };
 
-        // Convert RevocationEntry list to (serial, SystemTime) pairs
-        let revoked: Vec<(u64, SystemTime)> = self
+        // Convert RevocationEntry list to (serial, SystemTime, reason) triples
+        let revoked: Vec<(u64, SystemTime, Option<anodize_ca::CrlReason>)> = self
             .revocation_list
             .iter()
             .map(|e| {
                 let t = parse_rfc3339_to_system_time(&e.revocation_time)
                     .unwrap_or_else(SystemTime::now);
-                (e.serial, t)
+                let reason = e
+                    .reason
+                    .as_deref()
+                    .map(anodize_ca::reason_str_to_crl_reason);
+                (e.serial, t, reason)
             })
             .collect();
 

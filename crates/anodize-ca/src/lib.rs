@@ -31,6 +31,8 @@ use x509_cert::{
     Version,
 };
 
+pub use x509_cert::ext::pkix::CrlReason;
+
 const ECDSA_WITH_SHA384_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3");
 
 const ID_EXTENSION_REQ: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.14");
@@ -234,14 +236,40 @@ pub fn sign_intermediate_csr<H: Hsm>(
     Ok(builder.build::<DerSignature>()?)
 }
 
+/// Map a free-text reason string to an RFC 5280 `CrlReason` code.
+///
+/// Recognised values (case-insensitive, hyphens or spaces): "key-compromise",
+/// "ca-compromise", "affiliation-changed", "superseded",
+/// "cessation-of-operation", "certificate-hold", "remove-from-crl",
+/// "privilege-withdrawn", "aa-compromise". Unrecognised strings map to
+/// `CrlReason::Unspecified`.
+pub fn reason_str_to_crl_reason(s: &str) -> CrlReason {
+    match s.to_ascii_lowercase().replace(' ', "-").as_str() {
+        "key-compromise" => CrlReason::KeyCompromise,
+        "ca-compromise" => CrlReason::CaCompromise,
+        "affiliation-changed" => CrlReason::AffiliationChanged,
+        "superseded" => CrlReason::Superseded,
+        "cessation-of-operation" => CrlReason::CessationOfOperation,
+        "certificate-hold" => CrlReason::CertificateHold,
+        "remove-from-crl" => CrlReason::RemoveFromCRL,
+        "privilege-withdrawn" => CrlReason::PrivilegeWithdrawn,
+        "aa-compromise" => CrlReason::AaCompromise,
+        _ => CrlReason::Unspecified,
+    }
+}
+
 /// Issue a CRL signed by the root CA.
+///
+/// `revoked` entries carry an optional RFC 5280 reason code; pass `None` to
+/// omit the per-entry extension (reason treated as unspecified by relying
+/// parties).
 ///
 /// `crl_number` must be monotonically increasing across all CRLs issued by this CA.
 /// Returns DER-encoded `CertificateList` bytes.
 pub fn issue_crl<H: Hsm>(
     signer: &P384HsmSigner<H>,
     root_cert: &Certificate,
-    revoked: &[(u64, SystemTime)],
+    revoked: &[(u64, SystemTime, Option<CrlReason>)],
     next_update: SystemTime,
     crl_number: u64,
 ) -> Result<Vec<u8>, CaError> {
@@ -259,12 +287,25 @@ pub fn issue_crl<H: Hsm>(
     } else {
         let certs = revoked
             .iter()
-            .map(|(serial, rev_time)| {
+            .map(|(serial, rev_time, reason)| {
+                let crl_entry_extensions = match reason {
+                    Some(r) => {
+                        let reason_encoded = r.to_der()?;
+                        let ext = Extension {
+                            extn_id: CrlReason::OID,
+                            critical: false,
+                            extn_value: OctetString::new(reason_encoded)
+                                .map_err(|e| CaError::Der(e.to_string()))?,
+                        };
+                        Some(vec![ext])
+                    }
+                    None => None,
+                };
                 Ok(RevokedCert {
                     serial_number: SerialNumber::from(*serial),
                     revocation_date: Time::try_from(*rev_time)
                         .map_err(|e| CaError::Der(e.to_string()))?,
-                    crl_entry_extensions: None,
+                    crl_entry_extensions,
                 })
             })
             .collect::<Result<Vec<_>, CaError>>()?;

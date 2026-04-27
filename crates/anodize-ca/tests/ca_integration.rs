@@ -262,7 +262,10 @@ fn issue_crl_encodes_revoked_serials() {
 
     let now = SystemTime::now();
     let next_update = now + std::time::Duration::from_secs(30 * 24 * 3600);
-    let revoked = vec![(42u64, now), (99u64, now)];
+    let revoked = vec![
+        (42u64, now, Some(anodize_ca::CrlReason::KeyCompromise)),
+        (99u64, now, None),
+    ];
 
     let crl_der = issue_crl(&root_signer, &root_cert, &revoked, next_update, 1).expect("issue CRL");
 
