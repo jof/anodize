@@ -469,9 +469,13 @@ impl App {
                         match load_profile(&profile_path) {
                             Ok(profile) => {
                                 if profile.hsm.pin_source != PinSource::Prompt {
-                                    self.status = "WARNING: pin_source is not 'prompt' — \
-                                         unsuitable for ceremony"
-                                        .into();
+                                    profile.hsm.pin_source.warn_if_unsafe();
+                                    self.status =
+                                        "ERROR: pin_source is not 'prompt' — unsuitable for \
+                                         ceremony. Fix profile.toml and re-insert USB."
+                                            .into();
+                                    let _ = media::unmount(&self.usb_mountpoint);
+                                    return;
                                 }
                                 if let Err(e) = profile.hsm.check_module_allowed() {
                                     self.status = format!("PKCS#11 module not allowed: {e}");
