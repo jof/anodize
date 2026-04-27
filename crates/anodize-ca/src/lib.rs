@@ -146,14 +146,8 @@ pub fn build_root_cert<H: Hsm>(
     let validity = Validity::from_now(Duration::from_secs(u64::from(validity_days) * 86400))
         .map_err(|e| CaError::Der(e.to_string()))?;
 
-    let builder = CertificateBuilder::new(
-        Profile::Root,
-        SerialNumber::from(1u64),
-        validity,
-        subject,
-        spki,
-        signer,
-    )?;
+    let serial = random_serial()?;
+    let builder = CertificateBuilder::new(Profile::Root, serial, validity, subject, spki, signer)?;
 
     Ok(builder.build::<DerSignature>()?)
 }
@@ -379,6 +373,17 @@ fn build_crl_extensions(
     };
 
     Ok(vec![crl_num_ext, akid_ext])
+}
+
+fn random_serial() -> Result<SerialNumber, CaError> {
+    let mut bytes = [0u8; 16];
+    getrandom::getrandom(&mut bytes).map_err(|e| CaError::Der(e.to_string()))?;
+    // RFC 5280 serial numbers are positive ASN.1 integers; clear the high bit to
+    // keep the encoding non-negative without a leading 0x00 padding byte.
+    bytes[0] &= 0x7f;
+    // Ensure at least one non-zero byte so the integer isn't zero.
+    bytes[0] |= 0x01;
+    SerialNumber::new(&bytes).map_err(|e| CaError::Der(e.to_string()))
 }
 
 fn parse_dn(cn: &str, org: &str, country: &str) -> Result<x509_cert::name::Name, CaError> {

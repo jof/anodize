@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anodize-hsm = { path = "../anodize-hsm" }
+getrandom.workspace = true
 x509-cert.workspace = true
 der.workspace = true
 spki.workspace = true
