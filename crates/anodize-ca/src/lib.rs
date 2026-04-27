@@ -62,6 +62,18 @@ pub enum CaError {
     Der(String),
 }
 
+impl CaError {
+    /// Returns true when the root cause is that the HSM does not support
+    /// CKM_ECDSA_SHA384 (Ubuntu SoftHSM2 2.6.x is compiled without it).
+    pub fn is_mechanism_unsupported(&self) -> bool {
+        match self {
+            CaError::Hsm(anodize_hsm::HsmError::MechanismUnsupported(_)) => true,
+            // The builder path stringifies the error chain, so check the rendered form.
+            _ => self.to_string().contains("does not support mechanism"),
+        }
+    }
+}
+
 impl From<der::Error> for CaError {
     fn from(e: der::Error) -> Self {
         CaError::Der(e.to_string())
