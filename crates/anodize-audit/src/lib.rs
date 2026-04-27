@@ -26,6 +26,10 @@ pub enum AuditError {
     },
     #[error("expected seq {expected} but found {actual}")]
     SeqMismatch { expected: u64, actual: u64 },
+    /// Returned by `open` when the file is empty (no records written yet).
+    /// Use `create` to start a new log, not `open`.
+    #[error("audit log is empty (no records): {path}")]
+    EmptyLog { path: PathBuf },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -128,6 +132,7 @@ fn is_leap(year: u32) -> bool {
     year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
+#[derive(Debug)]
 pub struct AuditLog {
     path: PathBuf,
     last_hash: String,
@@ -197,6 +202,12 @@ impl AuditLog {
 
             last_hash = record.entry_hash;
             next_seq += 1;
+        }
+
+        if next_seq == 0 {
+            return Err(AuditError::EmptyLog {
+                path: path.to_owned(),
+            });
         }
 
         Ok(Self {
@@ -375,6 +386,20 @@ mod tests {
             matches!(err, AuditError::ChainBroken { seq: 0, .. }),
             "expected ChainBroken at seq 0, got: {:?}",
             err
+        );
+    }
+
+    #[test]
+    fn open_empty_file_returns_error() {
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_owned();
+        // File is empty (AuditLog::create was never followed by append).
+        drop(f);
+        std::fs::write(&path, b"").unwrap();
+        let err = AuditLog::open(&path).unwrap_err();
+        assert!(
+            matches!(err, AuditError::EmptyLog { .. }),
+            "expected EmptyLog, got: {err:?}"
         );
     }
 
