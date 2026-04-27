@@ -74,7 +74,8 @@ impl From<x509_cert::builder::Error> for CaError {
 
 /// Bridges the `Hsm` trait to the x509-cert builder signer API.
 ///
-/// The HSM performs hash-then-sign internally via `CKM_ECDSA_SHA384`.
+/// Signing uses `CKM_ECDSA_SHA384`: the full message is passed to the HSM
+/// and the hash-then-sign operation occurs entirely inside the hardware boundary.
 /// Raw private key material never crosses into this process.
 pub struct P384HsmSigner<H: Hsm> {
     hsm: H,

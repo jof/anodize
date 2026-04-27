@@ -6,7 +6,6 @@ use cryptoki::{
     types::AuthPin,
 };
 use secrecy::{ExposeSecret, SecretString};
-use sha2::Digest;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -19,6 +18,11 @@ pub enum HsmError {
     TokenNotFound(String),
     #[error("operation not supported for this key spec")]
     UnsupportedKeySpec,
+    /// The HSM does not support the requested signing mechanism (e.g.
+    /// CKM_ECDSA_SHA384 on an older SoftHSM2 build). Production hardware
+    /// (YubiHSM 2) and Nix-packaged SoftHSM2 both support it.
+    #[error("HSM does not support mechanism: {0}")]
+    MechanismUnsupported(String),
     #[error("HSM actor thread died unexpectedly")]
     ActorDead,
 }
@@ -220,18 +224,23 @@ impl Hsm for Pkcs11Hsm {
     }
 
     fn sign(&self, key: KeyHandle, mech: SignMech, data: &[u8]) -> Result<Vec<u8>> {
-        // Pre-hash the data in software and sign the digest with CKM_ECDSA (raw).
-        // CKM_ECDSA_SHA{256,384} are not universally supported across PKCS#11
-        // implementations (e.g. SoftHSM2 2.6.x on Ubuntu). Pre-hashing here
-        // produces an identical signature and avoids the mechanism support issue.
-        let digest: Vec<u8> = match mech {
-            SignMech::EcdsaSha384 => sha2::Sha384::digest(data).to_vec(),
-            SignMech::EcdsaSha256 => sha2::Sha256::digest(data).to_vec(),
+        let mechanism = match mech {
+            SignMech::EcdsaSha384 => Mechanism::EcdsaSha384,
+            SignMech::EcdsaSha256 => Mechanism::EcdsaSha256,
             _ => return Err(HsmError::UnsupportedKeySpec),
         };
-        Ok(self
-            .session()
-            .sign(&Mechanism::Ecdsa, key.priv_handle, &digest)?)
+        self.session()
+            .sign(&mechanism, key.priv_handle, data)
+            .map_err(|e| {
+                if matches!(
+                    e,
+                    cryptoki::error::Error::Pkcs11(cryptoki::error::RvError::MechanismInvalid, _)
+                ) {
+                    HsmError::MechanismUnsupported(format!("{mech:?}"))
+                } else {
+                    HsmError::Pkcs11(e)
+                }
+            })
     }
 
     fn public_key_der(&self, key: KeyHandle) -> Result<Vec<u8>> {
