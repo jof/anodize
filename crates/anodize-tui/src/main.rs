@@ -30,15 +30,10 @@ use der::{Decode, Encode};
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Direction, Layout},
-    style::{Color, Style},
-    text::Text,
+    style::{Color, Modifier, Style},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
-};
-#[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
-use ratatui::{
-    style::Modifier,
-    text::{Line, Span},
 };
 use secrecy::SecretString;
 use sha2::{Digest, Sha256};
@@ -2037,10 +2032,31 @@ fn configure_softhsm_from_usb(usb_mountpoint: &std::path::Path) -> Result<()> {
 fn render(frame: &mut Frame, app: &App) {
     let area = frame.area();
 
-    #[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
-    let header_height = 4u16;
-    #[cfg(not(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb")))]
-    let header_height = 3u16;
+    // Build header lines dynamically so runtime flags (skip_disc) and
+    // compile-time flags (dev features) both contribute warning rows.
+    let is_dev = cfg!(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"));
+    let mut header_lines: Vec<Line> = vec![Line::from("ANODIZE ROOT CA CEREMONY")];
+    if is_dev {
+        header_lines.push(Line::from(Span::styled(
+            "*** DEV BUILD — NOT FOR PRODUCTION USE ***",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )));
+    }
+    if app.skip_disc {
+        header_lines.push(Line::from(Span::styled(
+            "*** --skip-disc ACTIVE: optical disc write will be skipped ***",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+    // height = content lines + 2 border lines
+    let header_height = header_lines.len() as u16 + 2;
+    let border_style = if is_dev || app.skip_disc {
+        Style::default().fg(if is_dev { Color::Red } else { Color::Yellow })
+    } else {
+        Style::default()
+    };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -2051,28 +2067,14 @@ fn render(frame: &mut Frame, app: &App) {
         ])
         .split(area);
 
-    #[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
     {
-        let title = Paragraph::new(vec![
-            Line::from("ANODIZE ROOT CA CEREMONY"),
-            Line::from(Span::styled(
-                "*** DEV BUILD — NOT FOR PRODUCTION USE ***",
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            )),
-        ])
-        .alignment(Alignment::Center)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Red)),
-        );
-        frame.render_widget(title, chunks[0]);
-    }
-    #[cfg(not(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb")))]
-    {
-        let title = Paragraph::new("ANODIZE ROOT CA CEREMONY")
+        let title = Paragraph::new(header_lines)
             .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::ALL));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border_style),
+            );
         frame.render_widget(title, chunks[0]);
     }
 
