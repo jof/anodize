@@ -309,25 +309,53 @@ impl Hsm for Pkcs11Hsm {
 // id-ecPublicKey OID: 1.2.840.10045.2.1
 const ID_EC_PUBLIC_KEY_OID: &[u8] = &[0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01];
 
+/// Return the expected byte length of an uncompressed EC point for a known
+/// curve's DER params, or `None` for an unrecognised curve.
+///
+/// Uncompressed point: 0x04 || X(coord_bytes) || Y(coord_bytes)
+/// P-256: 1 + 32 + 32 = 65 bytes
+/// P-384: 1 + 48 + 48 = 97 bytes
+fn uncompressed_point_len(ec_params_der: &[u8]) -> Option<usize> {
+    if ec_params_der == EC_PARAMS_P384 {
+        Some(97)
+    } else if ec_params_der == EC_PARAMS_P256 {
+        Some(65)
+    } else {
+        None
+    }
+}
+
 /// Build a DER SubjectPublicKeyInfo for an EC public key from raw PKCS#11 attributes.
 ///
 /// `ec_params_der` is the DER-encoded curve OID (from CKA_EC_PARAMS).
 /// `ec_point_raw` is the EC point from CKA_EC_POINT; some implementations wrap
 /// it in a DER OCTET STRING — we unwrap if needed.
 fn ec_spki_from_params_and_point(ec_params_der: &[u8], ec_point_raw: &[u8]) -> Vec<u8> {
-    // Some PKCS#11 implementations return CKA_EC_POINT wrapped in a DER OCTET STRING.
-    // Heuristic: if the bytes look like `04 <len> 04 ...`, strip the outer wrapper.
-    let point: &[u8] =
-        if ec_point_raw.len() > 2 && ec_point_raw[0] == 0x04 && ec_point_raw[2] == 0x04 {
-            let inner_len = ec_point_raw[1] as usize;
-            if inner_len + 2 == ec_point_raw.len() {
-                &ec_point_raw[2..] // strip DER OCTET STRING tag + length
-            } else {
-                ec_point_raw
-            }
+    // Some PKCS#11 implementations return CKA_EC_POINT wrapped in a DER OCTET STRING
+    // (tag 0x04 + length byte + inner point). Strip the wrapper only when:
+    //   [0] == 0x04  (DER OCTET STRING tag)
+    //   [1]          inner length byte
+    //   [2] == 0x04  inner: uncompressed point marker
+    //   inner_len + 2 == total length     (length byte is consistent)
+    //   inner_len == expected point size  (matches the known curve)
+    //
+    // The last check eliminates the 1-in-65536 false-positive where a raw
+    // P-384 point has X[0]==95 and X[1]==0x04, which would otherwise satisfy
+    // the earlier structural conditions.
+    let expected_len = uncompressed_point_len(ec_params_der);
+    let point: &[u8] = if ec_point_raw.len() >= 3
+        && ec_point_raw[0] == 0x04
+        && ec_point_raw[2] == 0x04
+    {
+        let inner_len = ec_point_raw[1] as usize;
+        if inner_len + 2 == ec_point_raw.len() && expected_len == Some(inner_len) {
+            &ec_point_raw[2..]
         } else {
             ec_point_raw
-        };
+        }
+    } else {
+        ec_point_raw
+    };
 
     // AlgorithmIdentifier SEQUENCE { id-ecPublicKey OID, ec_params_der }
     let alg_inner = [ID_EC_PUBLIC_KEY_OID, ec_params_der].concat();
