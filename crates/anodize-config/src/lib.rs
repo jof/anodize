@@ -137,6 +137,45 @@ pub enum ConfigError {
     RevocationUtf8,
     #[error("revocation list TOML parse error: {source}")]
     RevocationToml { source: toml::de::Error },
+    #[error("cannot resolve module path {path}: {source}")]
+    ModulePath {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("PKCS#11 module {path} is not in the list of modules bundled in this image")]
+    ModuleNotAllowed { path: PathBuf },
+}
+
+impl HsmConfig {
+    /// Verify that `module_path` is one of the PKCS#11 modules bundled in the
+    /// ISO image. Reads `ANODIZE_PKCS11_MODULES` (colon-separated canonical
+    /// paths set by the NixOS module at build time). When the env var is
+    /// absent (dev host builds), the check is skipped. On the ISO it is
+    /// always set, so an unlisted module is a hard error.
+    pub fn check_module_allowed(&self) -> Result<(), ConfigError> {
+        let allowed_env = std::env::var("ANODIZE_PKCS11_MODULES").ok();
+        module_allowed(&self.module_path, allowed_env.as_deref())
+    }
+}
+
+fn module_allowed(module_path: &Path, allowed_env: Option<&str>) -> Result<(), ConfigError> {
+    let Some(allowed) = allowed_env else {
+        return Ok(());
+    };
+    let real = std::fs::canonicalize(module_path).map_err(|source| ConfigError::ModulePath {
+        path: module_path.to_owned(),
+        source,
+    })?;
+    let allowed_set: std::collections::HashSet<PathBuf> = allowed
+        .split(':')
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .collect();
+    if allowed_set.contains(&real) {
+        Ok(())
+    } else {
+        Err(ConfigError::ModuleNotAllowed { path: real })
+    }
 }
 
 pub fn load(path: &Path) -> Result<Profile, ConfigError> {
@@ -321,5 +360,41 @@ revocation_time = "2026-05-15T12:00:00Z"
         let serialized = serialize_revocation_list(&[]);
         let reparsed = parse_revocation_list(serialized.as_bytes()).expect("re-parse empty");
         assert!(reparsed.is_empty());
+    }
+
+    // ── module_allowed ────────────────────────────────────────────────────────
+
+    #[test]
+    fn module_allowed_env_absent_skips_check() {
+        // When ANODIZE_PKCS11_MODULES is not set, any path is accepted.
+        assert!(module_allowed(Path::new("/nonexistent/path.so"), None).is_ok());
+    }
+
+    #[test]
+    fn module_allowed_path_in_set() {
+        // /dev/null exists on every Linux system and canonicalizes to itself.
+        assert!(module_allowed(Path::new("/dev/null"), Some("/dev/null")).is_ok());
+    }
+
+    #[test]
+    fn module_allowed_path_not_in_set() {
+        let err = module_allowed(Path::new("/dev/null"), Some("/other/module.so")).unwrap_err();
+        assert!(matches!(err, ConfigError::ModuleNotAllowed { .. }));
+    }
+
+    #[test]
+    fn module_allowed_colon_separated_list() {
+        // Multiple entries in the env var — path matches the second one.
+        assert!(module_allowed(Path::new("/dev/null"), Some("/first/module.so:/dev/null")).is_ok());
+    }
+
+    #[test]
+    fn module_allowed_path_nonexistent() {
+        let err = module_allowed(
+            Path::new("/tmp/anodize-test-nonexistent-module-xyzzy.so"),
+            Some("/tmp/anodize-test-nonexistent-module-xyzzy.so"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::ModulePath { .. }));
     }
 }

@@ -473,6 +473,11 @@ impl App {
                                          unsuitable for ceremony"
                                         .into();
                                 }
+                                if let Err(e) = profile.hsm.check_module_allowed() {
+                                    self.status = format!("PKCS#11 module not allowed: {e}");
+                                    let _ = media::unmount(&self.usb_mountpoint);
+                                    return;
+                                }
                                 self.profile = Some(profile);
                                 self.profile_toml_bytes = Some(raw_bytes);
                                 self.state = AppState::ProfileLoaded;
