@@ -1,4 +1,4 @@
-.PHONY: ci nix-check qemu qemu-sdl qemu-curses qemu-dev qemu-dev-sdl qemu-dev-curses clean test fmt lint deny build-dev
+.PHONY: ci nix-check qemu qemu-sdl qemu-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic clean test fmt lint deny build-dev
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -97,12 +97,10 @@ qemu-sdl: anodize.iso fake-usb.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_BASE) -display sdl -vga std
 
-# Curses mode — renders VGA text content in the terminal.  Press Ctrl-A X to
-# quit QEMU.  Only shows VGA text-mode output; framebuffer content is invisible
-# here — compare with SDL or serial stdio output to check boot progress.
-qemu-curses: anodize.iso fake-usb.img
+# No-graphic mode — serial console only, no VGA rendering.  Ctrl-A X to quit.
+qemu-nographic: anodize.iso fake-usb.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
-	$(QEMU_BASE) -display curses -vga std
+	$(subst -serial stdio,-nographic,$(QEMU_BASE))
 
 # Dev-mode QEMU targets: boot the dev ISO with both profile USB and disc USB attached.
 QEMU_DEV_BASE_ISO = $(subst -cdrom anodize.iso,-cdrom anodize-dev.iso,$(QEMU_DEV_BASE))
@@ -113,9 +111,10 @@ qemu-dev-sdl: anodize-dev.iso fake-usb.img fake-disc-usb.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_DEV_BASE_ISO) -display sdl -vga std
 
-qemu-dev-curses: anodize-dev.iso fake-usb.img fake-disc-usb.img
+# No-graphic mode — serial console only, no VGA rendering.  Ctrl-A X to quit.
+qemu-dev-nographic: anodize-dev.iso fake-usb.img fake-disc-usb.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
-	$(QEMU_DEV_BASE_ISO) -display curses -vga std
+	$(subst -serial stdio,-nographic,$(QEMU_DEV_BASE_ISO))
 
 # 64 MiB FAT image pre-marked as a disc USB for dev-usb-disc testing.
 # Requires mtools (mcopy).  Only built once — delete to recreate.
