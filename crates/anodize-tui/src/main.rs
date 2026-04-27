@@ -1954,17 +1954,21 @@ fn next_crl_number_from_sessions(sessions: &[SessionEntry]) -> u64 {
     last + 1
 }
 
-/// Verify the audit hash chain across all sessions. Returns true if chain is intact.
+/// Verify the audit hash chain within each disc session independently.
+///
+/// Each session's AUDIT.LOG is an independent chain anchored to
+/// SHA-256(profile.toml). We verify internal consistency (each record's
+/// prev_hash == prior record's entry_hash) but do not attempt cross-session
+/// linkage, because each session starts a fresh chain from the same genesis.
 fn verify_audit_chain(sessions: &[SessionEntry]) -> bool {
-    let mut prev_hash: Option<String> = None;
     for session in sessions.iter() {
         if let Some(file) = session.files.iter().find(|f| f.name == "AUDIT.LOG") {
+            let mut prev_hash: Option<String> = None;
             for line in file.data.split(|&b| b == b'\n') {
                 if line.is_empty() {
                     continue;
                 }
                 if let Ok(record) = serde_json::from_slice::<serde_json::Value>(line) {
-                    // Each record must have prev_hash matching the last entry_hash
                     if let Some(ph) = prev_hash.as_deref() {
                         if record.get("prev_hash").and_then(|v| v.as_str()) != Some(ph) {
                             return false;
