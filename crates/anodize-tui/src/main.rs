@@ -808,6 +808,13 @@ impl App {
             }
         };
 
+        if self.revocation_list.iter().any(|e| e.serial == serial) {
+            self.status = format!(
+                "Serial {serial} is already in the revocation list — duplicate not added."
+            );
+            return;
+        }
+
         let reason = if self.revoke_reason_buf.is_empty() {
             None
         } else {
