@@ -224,23 +224,50 @@ impl Hsm for Pkcs11Hsm {
     }
 
     fn sign(&self, key: KeyHandle, mech: SignMech, data: &[u8]) -> Result<Vec<u8>> {
-        let mechanism = match mech {
-            SignMech::EcdsaSha384 => Mechanism::EcdsaSha384,
-            SignMech::EcdsaSha256 => Mechanism::EcdsaSha256,
-            _ => return Err(HsmError::UnsupportedKeySpec),
+        use sha2::Digest as _;
+
+        // For each ECDSA-with-hash mechanism: try the PKCS#11 v3.0 combined
+        // mechanism first (hash occurs inside the HSM — preferred security model).
+        // SoftHSM2 2.x only implements CKM_ECDSA_SHA1; the SHA-2 variants
+        // (CKM_ECDSA_SHA256, CKM_ECDSA_SHA384, …) are defined in PKCS#11 v3.0
+        // but not yet implemented by SoftHSM2. If the token rejects the
+        // combined mechanism, fall back to computing the digest in software
+        // and using raw CKM_ECDSA. YubiHSM 2 (production hardware) supports
+        // the combined mechanisms and never hits the fallback.
+        let is_mech_invalid = |e: &cryptoki::error::Error| {
+            matches!(
+                e,
+                cryptoki::error::Error::Pkcs11(cryptoki::error::RvError::MechanismInvalid, _)
+            )
         };
-        self.session()
-            .sign(&mechanism, key.priv_handle, data)
-            .map_err(|e| {
-                if matches!(
-                    e,
-                    cryptoki::error::Error::Pkcs11(cryptoki::error::RvError::MechanismInvalid, _)
-                ) {
-                    HsmError::MechanismUnsupported(format!("{mech:?}"))
-                } else {
-                    HsmError::Pkcs11(e)
+
+        match mech {
+            SignMech::EcdsaSha384 => {
+                match self.session().sign(&Mechanism::EcdsaSha384, key.priv_handle, data) {
+                    Ok(sig) => Ok(sig),
+                    Err(ref e) if is_mech_invalid(e) => {
+                        let digest = sha2::Sha384::digest(data).to_vec();
+                        self.session()
+                            .sign(&Mechanism::Ecdsa, key.priv_handle, &digest)
+                            .map_err(HsmError::Pkcs11)
+                    }
+                    Err(e) => Err(HsmError::Pkcs11(e)),
                 }
-            })
+            }
+            SignMech::EcdsaSha256 => {
+                match self.session().sign(&Mechanism::EcdsaSha256, key.priv_handle, data) {
+                    Ok(sig) => Ok(sig),
+                    Err(ref e) if is_mech_invalid(e) => {
+                        let digest = sha2::Sha256::digest(data).to_vec();
+                        self.session()
+                            .sign(&Mechanism::Ecdsa, key.priv_handle, &digest)
+                            .map_err(HsmError::Pkcs11)
+                    }
+                    Err(e) => Err(HsmError::Pkcs11(e)),
+                }
+            }
+            _ => Err(HsmError::UnsupportedKeySpec),
+        }
     }
 
     fn public_key_der(&self, key: KeyHandle) -> Result<Vec<u8>> {
