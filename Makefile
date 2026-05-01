@@ -46,7 +46,8 @@ define nix-iso-build
 		-v "$(CURDIR):/src" \
 		-w /src \
 		$(NIX_IMAGE) \
-		sh -c 'git config --global --add safe.directory /src && \
+		sh -c 'rm -rf /homeless-shelter && \
+		       git config --global --add safe.directory /src && \
 		       nix --extra-experimental-features "nix-command flakes" \
 		           --option build-users-group "" \
 		           $(NIX_SANDBOX_FLAG) build .#$(1) && \

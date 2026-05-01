@@ -72,6 +72,17 @@ Both binaries live in the `anodize-tui` crate and ship on the ISO:
 - **`anodize-ceremony`**: ratatui TUI implementing the full ceremony state machine. All operator actions are numbered menu items. No shell exposed.
 - **`anodize-sentinel`**: terminal gatekeeper. Acquires an exclusive `flock` before exec-ing the ceremony binary; prevents concurrent ceremony runs on multiple TTYs. Offers power-off via `reboot(2)`.
 
+### No secrets on the terminal
+
+**Design invariant**: sensitive values and secrets must never be printed to the terminal. This includes HSM PINs, raw private key material, wrap keys, and any intermediate secret used during signing.
+
+Rationale:
+- The ceremony shell runs inside `tmux` with a 50,000-line scrollback buffer. Any value that reaches the terminal persists in the scrollback until reboot.
+- Future work will add `tmux pipe-pane` session logging for a complete audit trail of every terminal interaction. Secrets in the output would then be written to the audit log in cleartext.
+- An operator photographing the screen (common during witnessed ceremonies) would capture any displayed secret.
+
+PIN entry uses masked input with random-length noise (see Phase 4). All other secret values are handled exclusively via the `Hsm` trait boundary — they never cross into the TUI layer.
+
 ### Disc before USB invariant
 
 Every signed artifact (cert, CRL) is held in RAM after signing. The TUI commits the artifact to a write-once optical disc (BD-R, DVD-R, or M-Disc) before writing to USB. The USB write step is only reachable in the TUI state machine after the disc write completes — a full SG_IO SAO session burn, not a file write to a pre-mounted path. This is enforced structurally: the data does not exist on any writable path until after the disc session closes successfully.
