@@ -88,6 +88,10 @@
           # nix build .#dev-iso  →  dev ISO with dev-usb-disc feature (USB as disc).
           # Build this via Docker on any host: make anodize-dev.iso
           dev-iso = self.nixosConfigurations.ceremony-dev-iso.config.system.build.isoImage;
+
+          # nix build .#dev-iso-aarch64  →  dev ISO for Apple Silicon (aarch64).
+          # Build this via Docker on any host: make anodize-dev-aarch64.iso
+          dev-iso-aarch64 = self.nixosConfigurations.ceremony-dev-iso-aarch64.config.system.build.isoImage;
         };
 
         # Development shell — Rust toolchain comes from rustup (rust-toolchain.toml).
@@ -117,11 +121,17 @@
         # Pass the compiled ceremony binary into the NixOS module.
         specialArgs = {
           anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony;
+          serialPort = "ttyS0";
         };
 
         modules = [
           "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
           ./nix/iso.nix
+          {
+            # Pin the NixOS revision to the git commit so the system closure
+            # is identical across builds from the same commit.
+            system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
+          }
         ];
       };
 
@@ -132,12 +142,14 @@
 
         specialArgs = {
           anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony-dev;
+          serialPort = "ttyS0";
         };
 
         modules = [
           "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
           ./nix/iso.nix
           {
+            system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
             # Distinguish the dev ISO from the production ISO by name.
             isoImage.isoName = nixpkgs.lib.mkForce "anodize-dev";
             isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-DEV";
@@ -146,6 +158,35 @@
             # printed by anodize-ceremony (before TUI raw mode) appears on serial.
             # console=tty0 keeps framebuffer output as well.
             boot.kernelParams = [ "console=ttyS0,115200" "console=tty0" ];
+
+            environment.variables.ANODIZE_BUILD_TYPE = "dev";
+          }
+        ];
+      };
+
+      # Development ISO for Apple Silicon Macs — runs at near-native speed via HVF.
+      # aarch64 QEMU virt machine exposes a PL011 UART at ttyAMA0, not a 16550 at ttyS0.
+      nixosConfigurations.ceremony-dev-iso-aarch64 = nixpkgs.lib.nixosSystem {
+        system = "aarch64-linux";
+
+        specialArgs = {
+          anodize-ceremony = self.packages.aarch64-linux.anodize-ceremony-dev;
+          serialPort = "ttyAMA0";
+        };
+
+        modules = [
+          "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
+          ./nix/iso.nix
+          {
+            system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
+            image.fileName    = nixpkgs.lib.mkForce "anodize-dev-aarch64.iso";
+            isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-DEV-A64";
+
+            # Single console so all output reaches ttyAMA0 (PL011 UART) in
+            # QEMU nographic mode.
+            boot.kernelParams = [ "console=ttyAMA0,115200" ];
+
+            environment.variables.ANODIZE_BUILD_TYPE = "dev";
           }
         ];
       };
