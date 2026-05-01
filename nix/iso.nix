@@ -126,12 +126,25 @@ in
     connector = yhusb://
   '';
 
+  # ── PKCS#11 backend selection ─────────────────────────────────────────────
+  #
+  # The HSM backend is a *runtime* choice, not a build-time one.  A single
+  # ISO image ships both the SoftHSM2 and YubiHSM 2 PKCS#11 modules.  The
+  # operator's profile.toml (on the USB stick) sets module_path to pick which
+  # module the ceremony binary loads:
+  #
+  #   SoftHSM2 (dev/testing):
+  #     module_path = "/run/current-system/sw/lib/softhsm/libsofthsm2.so"
+  #
+  #   YubiHSM 2 (production hardware):
+  #     module_path = "/run/current-system/sw/lib/pkcs11/yubihsm_pkcs11.so"
+  #
+  # ANODIZE_PKCS11_MODULES is an allowlist — the binary refuses any
+  # module_path whose realpath is not in this colon-separated list.
+
   environment.variables = {
-    # Stable paths operators can use in profile.toml without knowing store paths.
     SOFTHSM2_MODULE     = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
     YUBIHSM_PKCS11_CONF = "/etc/yubihsm_pkcs11.conf";
-    # Allowlist of PKCS#11 modules the ceremony binary is permitted to load.
-    # The binary refuses any module_path whose realpath is not in this list.
     ANODIZE_PKCS11_MODULES = lib.concatStringsSep ":" [
       "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so"
       "${pkgs.yubihsm-shell}/lib/pkcs11/yubihsm_pkcs11.so"

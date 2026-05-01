@@ -1,4 +1,4 @@
-.PHONY: ci nix-check iso dev-iso dev-iso-aarch64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic list-usb write-usb hash-iso verify-iso clean test fmt lint deny build-dev
+.PHONY: ci nix-check iso dev-iso dev-iso-aarch64 proddbg-iso qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic list-usb write-usb write-usb-proddbg hash-iso verify-iso clean test fmt lint deny build-dev
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -75,9 +75,14 @@ anodize-dev.iso: $(NIX_SOURCES)
 anodize-dev-aarch64.iso: $(NIX_SOURCES)
 	$(call nix-iso-build,dev-iso-aarch64,anodize-dev-aarch64.iso,linux/arm64,arm64)
 
+# Production debug ISO — real hardware + SSH/DHCP for remote debugging (x86_64).
+anodize-proddbg.iso: $(NIX_SOURCES)
+	$(call nix-iso-build,proddbg-iso,anodize-proddbg.iso,linux/amd64,amd64)
+
 iso:             anodize.iso
 dev-iso:         anodize-dev.iso
 dev-iso-aarch64: anodize-dev-aarch64.iso
+proddbg-iso:     anodize-proddbg.iso
 
 # Create a 64 MiB FAT USB image pre-loaded with a SoftHSM2 profile and a
 # pre-initialized SoftHSM2 token for dev-softhsm-usb testing.
@@ -272,6 +277,26 @@ endif
 	diskutil eject /dev/$$disk && \
 	echo "Done — safe to remove the USB stick."
 
+write-usb-proddbg: anodize-proddbg.iso
+ifndef USB_SERIAL
+	$(error USB_SERIAL is required — set it to your USB stick serial number)
+endif
+	@disk=$$(ioreg -r -c IOUSBHostDevice -l | \
+		python3 -c 'import sys, re; \
+		data = sys.stdin.read(); \
+		serial = "$(USB_SERIAL)"; \
+		pos = data.find("\"USB Serial Number\" = \"" + serial + "\""); \
+		match = re.search(r"\"BSD Name\"\s*=\s*\"(disk\d+)\"", data[pos:]) if pos >= 0 else None; \
+		print(match.group(1)) if match else sys.exit(1)') && \
+	if [ -z "$$disk" ]; then \
+		echo "No disk found with serial $(USB_SERIAL)" >&2; exit 1; \
+	fi && \
+	echo "Found serial $(USB_SERIAL) at /dev/$$disk" && \
+	diskutil unmountDisk /dev/$$disk && \
+	sudo dd if=anodize-proddbg.iso of=/dev/r$$disk bs=1m && \
+	diskutil eject /dev/$$disk && \
+	echo "Done — safe to remove the USB stick."
+
 # ---------------------------------------------------------------------------
 # ISO hash and verification — for reproducibility assurance.
 #
@@ -305,7 +330,7 @@ build-dev:
 	cargo build -p anodize-tui --features dev-usb-disc,dev-softhsm-usb
 
 clean:
-	rm -f anodize.iso anodize-dev.iso anodize-dev-aarch64.iso anodize.iso.sha256 fake-usb.img fake-disc-usb.img /tmp/anodize-ovmf-vars.fd
+	rm -f anodize.iso anodize-dev.iso anodize-dev-aarch64.iso anodize-proddbg.iso anodize.iso.sha256 fake-usb.img fake-disc-usb.img /tmp/anodize-ovmf-vars.fd
 
 # Inner-loop shortcuts (no Docker overhead)
 fmt:

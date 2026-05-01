@@ -8,6 +8,7 @@ result-*
 anodize.iso
 anodize-dev.iso
 anodize-dev-aarch64.iso
+anodize-proddbg.iso
 anodize.iso.sha256
 fake-usb.img
 fake-disc-usb.img

@@ -92,6 +92,10 @@
           # nix build .#dev-iso-aarch64  →  dev ISO for Apple Silicon (aarch64).
           # Build this via Docker on any host: make anodize-dev-aarch64.iso
           dev-iso-aarch64 = self.nixosConfigurations.ceremony-dev-iso-aarch64.config.system.build.isoImage;
+
+          # nix build .#proddbg-iso  →  debug ISO with SSH/DHCP for hardware iteration.
+          # Build this via Docker on any host: make anodize-proddbg.iso
+          proddbg-iso = self.nixosConfigurations.ceremony-proddbg-iso.config.system.build.isoImage;
         };
 
         # Development shell — Rust toolchain comes from rustup (rust-toolchain.toml).
@@ -160,6 +164,58 @@
             boot.kernelParams = [ "console=ttyS0,115200" "console=tty0" ];
 
             environment.variables.ANODIZE_BUILD_TYPE = "dev";
+          }
+        ];
+      };
+
+      # Production debug ISO — real hardware support (YubiHSM 2) with DHCP
+      # networking and SSH for remote iteration from a development workstation.
+      # SSH as ceremony → sentinel menu.  SSH as root → bash shell.
+      # Default password: anodize-debug (override via Crusoe/downstream branch).
+      nixosConfigurations.ceremony-proddbg-iso = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+
+        specialArgs = {
+          anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony;
+          serialPort = "ttyS0";
+        };
+
+        modules = [
+          "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
+          ./nix/iso.nix
+          {
+            system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
+            image.fileName    = nixpkgs.lib.mkForce "anodize-proddbg.iso";
+            isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-DBG";
+            boot.kernelParams = [ "console=tty0" "console=ttyS0,115200" ];
+
+            environment.variables.ANODIZE_BUILD_TYPE = "proddbg";
+
+            # Extra tools for network debugging.
+            environment.systemPackages = with nixpkgs.legacyPackages.x86_64-linux; [
+              iproute2   # ip addr, ip route
+              iputils    # ping
+            ];
+
+            # ── Network: DHCP on all discovered wired interfaces ──
+            networking.useDHCP = nixpkgs.lib.mkForce true;
+
+            # ── SSH: password auth for remote debugging ──
+            services.openssh = {
+              enable = nixpkgs.lib.mkForce true;
+              settings = {
+                PermitRootLogin = "yes";
+                PasswordAuthentication = true;
+              };
+            };
+
+            # ── Debug credentials ──
+            # ceremony → sentinel menu, root → bash shell.
+            users.users.ceremony.password = nixpkgs.lib.mkForce "anodize-debug";
+            users.users.root = {
+              hashedPassword = nixpkgs.lib.mkForce null;
+              password = "anodize-debug";
+            };
           }
         ];
       };
