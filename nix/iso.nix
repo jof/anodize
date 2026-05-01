@@ -15,7 +15,7 @@
 # Disc-before-USB invariant is enforced in the anodize-ceremony binary itself;
 # this module only provides the environment in which it runs.
 
-{ config, pkgs, lib, anodize-ceremony, ... }:
+{ config, pkgs, lib, anodize-ceremony, serialPort ? "ttyS0", ... }:
 
 let
   # The ceremony user's login shell: exec the sentinel via its capability
@@ -27,11 +27,26 @@ let
   # /run/wrappers/bin/anodize-ceremony, preventing two terminals from running
   # the ceremony simultaneously.
   ceremonyShell = (pkgs.writeShellScriptBin "ceremony-shell" ''
-    exec /run/wrappers/bin/anodize-sentinel
+    # Run the sentinel inside tmux so operators can scroll back through
+    # previous command output on the framebuffer console.
+    # Scrollback: Ctrl+B then [ to enter copy mode, PageUp/PageDown to
+    # scroll, q or Escape to exit copy mode.
+    if [ -z "''${TMUX:-}" ]; then
+      exec ${pkgs.tmux}/bin/tmux new-session -- /run/wrappers/bin/anodize-sentinel
+    else
+      exec /run/wrappers/bin/anodize-sentinel
+    fi
   '') // { shellPath = "/bin/ceremony-shell"; };
 
 in
 {
+  # ── Reproducibility ──────────────────────────────────────────────────────
+  # NixOS computes a version suffix from the nixpkgs input.  Force it to
+  # empty so the system closure is identical across builds from the same
+  # flake.lock + committed source tree.  The git commit is captured
+  # separately via system.nixos.revision in flake.nix.
+  system.nixos.versionSuffix = lib.mkForce "";
+
   # ── ISO image settings ─────────────────────────────────────────────────────
 
   isoImage.squashfsCompression = "zstd -Xcompression-level 6";
@@ -102,6 +117,7 @@ in
     pkgs.yubihsm-shell        # YubiHSM 2 PKCS#11 module + shell utilities
     pkgs.softhsm              # SoftHSM2 PKCS#11 module (dev/testing)
     pkgs.opensc               # PKCS#11 utilities (pkcs11-tool, etc.)
+    pkgs.tmux                 # scrollback support for ceremony shell
   ];
 
   # Direct USB connection to YubiHSM 2 — no connector daemon required.
@@ -143,6 +159,27 @@ in
     key_spec     = "ecdsa-p384"
     pin_source   = "prompt"
   '';
+
+  # tmux configuration — large scrollback so operators can review ceremony
+  # output after returning to the sentinel menu.
+  # Scrollback: Ctrl+B then [ to enter copy mode, PageUp/PageDown to scroll,
+  # q or Escape to exit copy mode.
+  environment.etc."tmux.conf".text = ''
+    set-option -g history-limit 50000
+    set-option -g status off
+  '';
+
+  # ── Sudo: passwordless for the appliance ──────────────────────────────────
+
+  # The ISO boots to auto-login with no shell access — only the sentinel
+  # menu.  A sudo password prompt adds no security on an air-gapped
+  # appliance with physical access, and the ceremony user's password is
+  # empty anyway.  Disable the wheel password requirement so mount/umount
+  # (and any future privileged helpers) work without prompting.
+  security.sudo = {
+    enable = true;
+    wheelNeedsPassword = false;
+  };
 
   # ── Capability wrappers ────────────────────────────────────────────────────
 
@@ -219,11 +256,11 @@ in
 
   # ── Serial console: auto-login → sentinel ─────────────────────────────────
 
-  # systemd-getty-generator activates serial-getty@ttyS0 because ttyS0 is
-  # listed last in console= kernel params.  Override ExecStart to add
-  # --autologin so it behaves identically to the VT getty on tty1: the
-  # ceremony user is logged in immediately and ceremonyShell → sentinel runs.
-  systemd.services."serial-getty@ttyS0" = {
+  # serialPort defaults to "ttyS0" (x86_64); pass "ttyAMA0" for aarch64.
+  # Override ExecStart to add --autologin so it behaves identically to the
+  # VT getty on tty1: ceremony user is logged in immediately and
+  # ceremonyShell → sentinel runs.
+  systemd.services."serial-getty@${serialPort}" = {
     enable = true;
     wantedBy = [ "getty.target" ];
     # Disable systemd's restart rate-limit so the sentinel is relaunched
@@ -232,7 +269,7 @@ in
     serviceConfig = {
       ExecStart = [
         ""   # clear the template's ExecStart before adding ours
-        "${pkgs.util-linux}/sbin/agetty --autologin ceremony --keep-baud 115200,57600,38400,9600 ttyS0 vt220"
+        "${pkgs.util-linux}/sbin/agetty --autologin ceremony --keep-baud 115200,57600,38400,9600 ${serialPort} vt220"
       ];
       Restart    = "always";
       RestartSec = "0";
