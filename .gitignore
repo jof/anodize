@@ -7,5 +7,7 @@ result-*
 # Build artifacts (produced by make targets)
 anodize.iso
 anodize-dev.iso
+anodize-dev-aarch64.iso
+anodize.iso.sha256
 fake-usb.img
 fake-disc-usb.img
