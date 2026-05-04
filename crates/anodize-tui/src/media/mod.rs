@@ -174,28 +174,6 @@ pub fn find_profile_usb(
     Ok(None)
 }
 
-/// Returns a human-readable disc capacity summary and the number of sessions still writable.
-/// Opens the device, reads disc info and MMC profile, then closes.
-/// On any error returns a conservative summary assuming CD-R limits.
-/// Called from the WaitDisc background tick.
-pub fn disc_capacity_summary(dev: &Path) -> (String, u16) {
-    let sg = match SgDev::open(dev) {
-        Ok(s) => s,
-        Err(_) => return ("capacity unknown".into(), 99),
-    };
-    let info = match read_disc_info(&sg) {
-        Ok(i) => i,
-        Err(_) => return ("capacity unknown".into(), 99),
-    };
-    let profile = get_current_profile(&sg).unwrap_or(0);
-    let max = max_sessions_for_profile(profile);
-    let used = info.sessions as u16;
-    let remaining = max.saturating_sub(used);
-    let name = profile_name(profile);
-    let summary = format!("{name}: {used} used, {remaining} remaining (max {max})");
-    (summary, remaining)
-}
-
 // ── Optical disc discovery ────────────────────────────────────────────────────
 
 /// Scan /sys/block/sr* for optical drives and return their /dev paths.
@@ -214,75 +192,87 @@ pub fn scan_optical_drives() -> Vec<PathBuf> {
     result
 }
 
-/// Return `Ok(())` if an appendable (blank or incomplete) write-once disc is present in `dev`.
-/// Returns `Err(reason)` with a human-readable explanation when a disc is present but rejected.
-pub fn disc_is_appendable(dev: &Path) -> Result<(), String> {
+// ── Single-pass disc scan ─────────────────────────────────────────────────────
+
+/// Everything the caller needs after scanning a disc.
+pub struct DiscScan {
+    /// Parsed session entries read back from disc (authoritative count).
+    pub sessions: Vec<SessionEntry>,
+    /// Human-readable capacity line, e.g. "BD-R: 2 used, 253 remaining (max 255)".
+    pub capacity_summary: String,
+    /// How many more sessions the disc can accept.
+    pub sessions_remaining: u16,
+}
+
+/// Open a device, verify it holds an appendable write-once disc, read back all
+/// sessions, and compute the capacity summary — all in a single device open.
+///
+/// Returns `Err(reason)` (human-readable) if the disc is absent, rewritable,
+/// or finalized.
+pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
     let sg = SgDev::open(dev).map_err(|e| format!("cannot open {}: {e}", dev.display()))?;
-    // Quick drive-status check first
+
+    // Drive-status gate
     match sg.drive_status() {
         Ok(s) if s != CDS_DISC_OK => return Err("no disc present".into()),
         Err(e) => return Err(format!("drive status error: {e}")),
         _ => {}
     }
-    // Reject rewritable media — erasable discs undermine the immutable-archive guarantee
-    if let Ok(profile) = get_current_profile(&sg) {
-        if profile_is_rewritable(profile) {
-            return Err(format!(
-                "rewritable media (profile {profile:#06x}) not allowed — \
-                 use write-once disc (BD-R, DVD-R, CD-R, or M-Disc)"
-            ));
+
+    // Reject rewritable media
+    let profile = get_current_profile(&sg).unwrap_or(0);
+    if profile_is_rewritable(profile) {
+        return Err(format!(
+            "rewritable media (profile {profile:#06x}) not allowed — \
+             use write-once disc (BD-R, DVD-R, CD-R, or M-Disc)"
+        ));
+    }
+
+    // Read disc info
+    let info = read_disc_info(&sg).map_err(|e| format!("cannot read disc info: {e}"))?;
+    if !info.status.is_appendable() {
+        return Err("disc is finalized — insert a blank or appendable write-once disc".into());
+    }
+
+    // Read sessions from tracks
+    let mut sessions: Vec<SessionEntry> = Vec::new();
+    if info.status != DiscStatus::Blank && info.sessions > 0 {
+        for track_num in 1..=info.sessions as u8 {
+            let track = match read_track_info(&sg, track_num) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let n_sectors = track.size_sectors.max(1) as usize;
+            let mut image = vec![0u8; n_sectors * iso9660::SECTOR];
+            if let Err(e) = read_sectors(&sg, track.start_lba, &mut image) {
+                tracing::warn!(
+                    "cannot read session {} at LBA {}: {e}",
+                    track_num,
+                    track.start_lba
+                );
+                continue;
+            }
+            match iso9660::parse_iso(&image) {
+                Ok(entries) => sessions.extend(entries),
+                Err(e) => tracing::warn!("cannot parse ISO for session {track_num}: {e}"),
+            }
         }
-    }
-    match read_disc_info(&sg) {
-        Ok(info) if info.status.is_appendable() => Ok(()),
-        Ok(_) => Err("disc is finalized — insert a blank or appendable write-once disc".into()),
-        Err(e) => Err(format!("cannot read disc info: {e}")),
-    }
-}
-
-// ── Session reading ───────────────────────────────────────────────────────────
-
-/// Read all existing sessions from a disc and return them in chronological order.
-/// Returns an empty Vec for a blank disc.
-pub fn read_disc_sessions(dev: &Path) -> Result<Vec<SessionEntry>> {
-    let sg = SgDev::open(dev).with_context(|| format!("open {}", dev.display()))?;
-
-    let info = read_disc_info(&sg).context("READ DISC INFORMATION")?;
-    if info.status == DiscStatus::Blank || info.sessions == 0 {
-        return Ok(vec![]);
+        sessions.sort_by(|a, b| a.dir_name.cmp(&b.dir_name));
+        sessions.dedup_by(|a, b| a.dir_name == b.dir_name);
     }
 
-    let mut all_sessions: Vec<SessionEntry> = Vec::new();
+    // Capacity — derive used count from actually-parsed sessions
+    let max = max_sessions_for_profile(profile);
+    let used = sessions.len() as u16;
+    let remaining = max.saturating_sub(used);
+    let name = profile_name(profile);
+    let capacity_summary = format!("{name}: {used} used, {remaining} remaining (max {max})");
 
-    for track_num in 1..=info.sessions as u8 {
-        let track = match read_track_info(&sg, track_num) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-
-        // Read the sectors for this track's ISO image
-        let n_sectors = track.size_sectors.max(1) as usize;
-        let mut image = vec![0u8; n_sectors * iso9660::SECTOR];
-        if let Err(e) = read_sectors(&sg, track.start_lba, &mut image) {
-            // Non-fatal: skip unreadable sessions
-            tracing::warn!(
-                "cannot read session {} at LBA {}: {e}",
-                track_num,
-                track.start_lba
-            );
-            continue;
-        }
-
-        match iso9660::parse_iso(&image) {
-            Ok(entries) => all_sessions.extend(entries),
-            Err(e) => tracing::warn!("cannot parse ISO for session {track_num}: {e}"),
-        }
-    }
-
-    // Deduplicate by dir_name (same session should not appear twice)
-    all_sessions.sort_by(|a, b| a.dir_name.cmp(&b.dir_name));
-    all_sessions.dedup_by(|a, b| a.dir_name == b.dir_name);
-    Ok(all_sessions)
+    Ok(DiscScan {
+        sessions,
+        capacity_summary,
+        sessions_remaining: remaining,
+    })
 }
 
 // ── Session write ─────────────────────────────────────────────────────────────
@@ -379,14 +369,14 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
 
     synchronize_cache(&sg).context("SYNCHRONIZE CACHE")?;
 
-    // For non-final sessions: omit CLOSE TRACK SESSION entirely.
-    // cdemu's WRITER-ISO treats Close Session (0x02) as a disc-finalizing
-    // operation, returning DiscStatus::Complete after the first session close
-    // and preventing further appends.  Real M-Disc drives handle multi-session
-    // correctly via the write parameters already set above.
+    // Close track + session after every write so the drive (and cdemu) commits
+    // a proper session boundary.  The multisession write parameter (set above)
+    // keeps the disc appendable.  For the final session, Disc close finalizes.
+    close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
     if is_final {
-        close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
         close_track_session(&sg, CloseTarget::Disc).context("CLOSE DISC")?;
+    } else {
+        close_track_session(&sg, CloseTarget::Session).context("CLOSE SESSION")?;
     }
 
     Ok(())
