@@ -501,6 +501,22 @@ impl App {
                 self.ceremony.set_state_wait_migrate_target();
                 self.set_status("Eject old disc. Insert blank new disc.");
             }
+            // Utilities sub-screens
+            Action::UtilScreen(idx) => {
+                use crate::modes::utilities::{UtilitiesMode, UtilScreen};
+                let screen = match idx {
+                    1 => UtilScreen::SystemInfo,
+                    2 => UtilScreen::AuditLog,
+                    3 => UtilScreen::HsmBrowser,
+                    _ => UtilScreen::Menu,
+                };
+                // Gather data while borrowing self immutably, then assign
+                let lines = UtilitiesMode::gather_for_screen(screen, self);
+                self.utilities.screen = screen;
+                self.utilities.set_cached_lines(lines);
+                self.content_scroll = 0;
+            }
+
             Action::ConfirmMigrateTarget => {
                 let ready = self.skip_disc
                     || (self.optical_dev.is_some()
@@ -591,7 +607,7 @@ impl App {
                 self.ceremony.op_label(),
                 self.ceremony.phase_index(),
             ),
-            Mode::Utilities => vec![],
+            Mode::Utilities => modes::utility_phases(&self.utilities.screen),
         };
         let phase_bar = PhaseBar {
             steps: &phase_steps,
@@ -602,7 +618,7 @@ impl App {
         match self.mode {
             Mode::Setup => self.render_setup_content(frame, chunks[3]),
             Mode::Ceremony => self.render_ceremony_content(frame, chunks[3]),
-            Mode::Utilities => self.utilities.render(frame, chunks[3]),
+            Mode::Utilities => self.utilities.render_with_app(frame, chunks[3], self),
         }
 
         // Hardware status bar
