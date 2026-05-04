@@ -36,15 +36,7 @@ let
       stty cols 220 rows 50 2>/dev/null || true
     fi
 
-    # Run the sentinel inside tmux so operators can scroll back through
-    # previous command output on the framebuffer console.
-    # Scrollback: Ctrl+B then [ to enter copy mode, PageUp/PageDown to
-    # scroll, q or Escape to exit copy mode.
-    if [ -z "''${TMUX:-}" ]; then
-      exec ${pkgs.tmux}/bin/tmux new-session -- /run/wrappers/bin/anodize-sentinel
-    else
-      exec /run/wrappers/bin/anodize-sentinel
-    fi
+    exec /run/wrappers/bin/anodize-sentinel
   '') // { shellPath = "/bin/ceremony-shell"; };
 
 in
@@ -126,7 +118,6 @@ in
     pkgs.yubihsm-shell        # YubiHSM 2 PKCS#11 module + shell utilities
     pkgs.softhsm              # SoftHSM2 PKCS#11 module (dev/testing)
     pkgs.opensc               # PKCS#11 utilities (pkcs11-tool, etc.)
-    pkgs.tmux                 # scrollback support for ceremony shell
   ];
 
   # Direct USB connection to YubiHSM 2 — no connector daemon required.
@@ -182,14 +173,6 @@ in
     pin_source   = "prompt"
   '';
 
-  # tmux configuration — large scrollback so operators can review ceremony
-  # output after returning to the sentinel menu.
-  # Scrollback: Ctrl+B then [ to enter copy mode, PageUp/PageDown to scroll,
-  # q or Escape to exit copy mode.
-  environment.etc."tmux.conf".text = ''
-    set-option -g history-limit 50000
-    set-option -g status off
-  '';
 
   # ── Sudo: passwordless for the appliance ──────────────────────────────────
 

@@ -77,8 +77,7 @@ Both binaries live in the `anodize-tui` crate and ship on the ISO:
 **Design invariant**: sensitive values and secrets must never be printed to the terminal. This includes HSM PINs, raw private key material, wrap keys, and any intermediate secret used during signing.
 
 Rationale:
-- The ceremony shell runs inside `tmux` with a 50,000-line scrollback buffer. Any value that reaches the terminal persists in the scrollback until reboot.
-- Future work will add `tmux pipe-pane` session logging for a complete audit trail of every terminal interaction. Secrets in the output would then be written to the audit log in cleartext.
+- The TUI mirrors its status log to tty2, providing a scrollable audit trail of every ceremony action that persists until reboot.
 - An operator photographing the screen (common during witnessed ceremonies) would capture any displayed secret.
 
 PIN entry uses masked input with random-length noise (see Phase 4). All other secret values are handled exclusively via the `Hsm` trait boundary — they never cross into the TUI layer.
