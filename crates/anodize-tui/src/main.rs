@@ -1558,7 +1558,7 @@ impl App {
     /// Build the SessionEntry for the current operation's disc burn.
     fn build_burn_session(&mut self, staging: &std::path::Path) -> Option<SessionEntry> {
         let ts = self.confirmed_time.unwrap_or_else(SystemTime::now);
-        let dir_name = media::session_dir_name(ts);
+        let dir_name = media::session_dir_name(ts) + "-record";
 
         match self.current_op.clone() {
             Some(Operation::GenerateRootCa) => {

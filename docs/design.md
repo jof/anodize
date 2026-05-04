@@ -94,21 +94,29 @@ The ceremony disc (BD-R, DVD-R, or any write-once optical media) is a permanent,
 Every session's ISO 9660 image contains timestamped subdirectories for **all** prior and current sessions (copy-in). The last session is always the complete, browsable view from a standard OS mount. Each session directory contains a full snapshot of the audit log at that point, independently verifiable without reading earlier sessions.
 
 ```
-Session 3 ISO (last written — what `mount` shows):
-  /20260425T143000Z/      ← session 1 (root init)
+Session 4 ISO (last written — what `mount` shows):
+  /20260425T143000Z-intent/  ← session 1 (root init intent)
+    AUDIT.LOG                ← log with intent entry only
+  /20260425T143000Z-record/  ← session 2 (root init record)
     ROOT.CRT
-    AUDIT.LOG             ← log at session 1 (1 entry: genesis)
-  /20260426T091500Z/      ← session 2 (sign intermediate)
+    ROOT.CRL
+    AUDIT.LOG                ← log through root init (genesis + intent + issue)
+  /20260426T091500Z-intent/  ← session 3 (sign intermediate intent)
+    AUDIT.LOG
+  /20260426T091500Z-record/  ← session 4 (sign intermediate record)
     ROOT.CRT
     INTCA1.CRT
-    AUDIT.LOG             ← log at session 2 (2 entries)
-  /20260510T110000Z/      ← session 3 (this operation)
-    ROOT.CRT
-    INTCA2.CRT
-    AUDIT.LOG             ← full log through session 3 (3 entries)
+    AUDIT.LOG                ← full log through session 4
 ```
 
-Directory naming: `YYYYMMDDTHHMMSSZ` (16 chars, UTC). ISO 9660 Level 2 (31-char directory names). File names are uppercase 8.3 for broad reader compatibility.
+Directory naming: `YYYYMMDDTHHMMSS_nnnnnnnnnZ` (27 chars, UTC timestamp with nanosecond fractional part). ISO 9660 Level 2 (31-char directory names). File names are uppercase 8.3 for broad reader compatibility.
+
+Each CA operation writes **two** sessions as a WAL pair:
+
+1. **`<timestamp>-intent`** — written *before* the HSM operation. Records the operator's declared intent (operation type, parameters) in the audit log. If the HSM operation fails or the machine loses power, the incomplete intent is visible on the disc for forensic review.
+2. **`<timestamp>-record`** — written *after* the HSM operation succeeds. Contains the signed artifacts (cert, CRL) and the completion audit entries.
+
+The suffixes are chosen so `-intent` sorts before `-record` lexicographically, matching chronological order on the disc. Both directories share the same timestamp, tying the pair together.
 
 All disc operations use SG_IO ioctl MMC commands — no external tools, no subprocesses. Key commands:
 
