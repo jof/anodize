@@ -152,19 +152,38 @@ pub fn find_profile_usb(
     let mut mount_errors: Vec<String> = Vec::new();
 
     for dev in candidates {
+        // Skip devices whose /dev node doesn't exist yet (avoids kernel "Can't open
+        // blockdev" spam when /sys/block/sd* appears before udev creates the node)
+        if !dev.exists() {
+            tracing::debug!("find_profile_usb: {} does not exist, skipping", dev.display());
+            continue;
+        }
         match mount_usb(dev, mountpoint) {
             Err(e) => {
+                tracing::debug!("find_profile_usb: mount {} failed: {e}", dev.display());
                 mount_errors.push(format!("{}: {e}", dev.display()));
                 continue;
             }
             Ok(()) => {
                 any_mounted = true;
+                // Log mountpoint contents for debugging
+                if let Ok(entries) = std::fs::read_dir(mountpoint) {
+                    let names: Vec<String> = entries
+                        .flatten()
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect();
+                    tracing::info!(
+                        "find_profile_usb: mounted {} at {}, contents: {:?}",
+                        dev.display(), mountpoint.display(), names
+                    );
+                }
             }
         }
         let profile = mountpoint.join("profile.toml");
         if profile.exists() {
             return Ok(Some((profile, dev.clone())));
         }
+        tracing::debug!("find_profile_usb: no profile.toml at {}", mountpoint.display());
         let _ = unmount(mountpoint);
     }
 

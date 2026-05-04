@@ -257,6 +257,23 @@ in
   # Disable root login; ceremony user is the only interactive account.
   users.users.root.hashedPassword = "!";
 
+  # ── Suppress kernel console messages after boot ──────────────────────────
+
+  # Lower printk console level to KERN_EMERG once boot is complete so dmesg
+  # spam (e.g. USB/block device probing) doesn't corrupt the TUI.  Boot
+  # messages remain visible; messages are still in the journal and 'dmesg'.
+  # Runs as root (has CAP_SYSLOG implicitly) before getty auto-login starts.
+  systemd.services.suppress-console-printk = {
+    description = "Suppress kernel console messages for TUI";
+    wantedBy    = [ "getty.target" ];
+    before      = [ "getty@tty1.service" "serial-getty@ttyS0.service" ];
+    serviceConfig = {
+      Type            = "oneshot";
+      RemainAfterExit = true;
+      ExecStart       = "${pkgs.util-linux}/bin/dmesg -n 1";
+    };
+  };
+
   # ── Auto-login → sentinel (tty1) ──────────────────────────────────────────
 
   # Getty on tty1 auto-logs in as ceremony → exec's ceremonyShell immediately.
