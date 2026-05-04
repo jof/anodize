@@ -40,7 +40,7 @@ impl UtilitiesMode {
         match screen {
             UtilScreen::Menu => Vec::new(),
             UtilScreen::SystemInfo => Self::gather_system_info(app),
-            UtilScreen::AuditLog => Self::gather_audit_log_with_usb(&app.usb_mountpoint),
+            UtilScreen::AuditLog => Self::gather_audit_log(app),
             UtilScreen::HsmBrowser => Self::gather_hsm_info(app),
         }
     }
@@ -148,72 +148,96 @@ impl UtilitiesMode {
 
     // ── Audit Log Browser ────────────────────────────────────────────────────
 
-    fn gather_audit_log_with_usb(usb_mount: &std::path::Path) -> Vec<String> {
+    fn gather_audit_log(app: &App) -> Vec<String> {
         let mut lines = Vec::new();
 
         // Try staging log first, then USB log
         let candidates = [
             std::path::PathBuf::from("/run/anodize/staging/audit.log"),
-            usb_mount.join("audit.log"),
+            app.usb_mountpoint.join("audit.log"),
         ];
-
         let log_path = candidates.iter().find(|p| p.exists());
 
-        let Some(path) = log_path else {
+        // Collect AUDIT.LOG content from disc sessions (prior_sessions)
+        let disc_audit: Vec<u8> = app
+            .prior_sessions
+            .iter()
+            .rev()
+            .find_map(|s| {
+                s.files
+                    .iter()
+                    .find(|f| f.name == "AUDIT.LOG")
+                    .map(|f| f.data.clone())
+            })
+            .unwrap_or_default();
+
+        if log_path.is_none() && disc_audit.is_empty() {
             lines.push("  No audit log found.".into());
             lines.push(String::new());
             lines.push("  Checked:".into());
             for c in &candidates {
                 lines.push(format!("    {}", c.display()));
             }
+            lines.push("    Disc sessions (AUDIT.LOG)".into());
             return lines;
-        };
-
-        lines.push(format!("  Log: {}", path.display()));
-        lines.push(String::new());
-
-        // Verify chain integrity
-        match anodize_audit::verify_log(path) {
-            Ok(count) => {
-                lines.push(format!("  Chain integrity: OK ({count} records)"));
-            }
-            Err(e) => {
-                lines.push(format!("  Chain integrity: FAILED — {e}"));
-            }
         }
-        lines.push(String::new());
 
-        // Read and display records
-        match std::fs::read_to_string(path) {
-            Ok(content) => {
-                for (i, line) in content.lines().enumerate() {
-                    match serde_json::from_str::<anodize_audit::Record>(line) {
-                        Ok(rec) => {
-                            lines.push(format!(
-                                "  #{:<4} {} {}",
-                                rec.seq, rec.timestamp, rec.event
-                            ));
-                            // Show op_data if it has content
-                            if !rec.op_data.is_null()
-                                && rec.op_data != serde_json::Value::Object(Default::default())
-                            {
-                                if let Ok(pretty) = serde_json::to_string(&rec.op_data) {
-                                    lines.push(format!("         {pretty}"));
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            lines.push(format!("  [line {i}] parse error: {e}"));
-                        }
-                    }
+        // Prefer filesystem log for integrity verification
+        if let Some(path) = log_path {
+            lines.push(format!("  Log: {}", path.display()));
+            lines.push(String::new());
+
+            match anodize_audit::verify_log(path) {
+                Ok(count) => {
+                    lines.push(format!("  Chain integrity: OK ({count} records)"));
+                }
+                Err(e) => {
+                    lines.push(format!("  Chain integrity: FAILED — {e}"));
                 }
             }
-            Err(e) => {
-                lines.push(format!("  Read error: {e}"));
+            lines.push(String::new());
+
+            match std::fs::read_to_string(path) {
+                Ok(content) => Self::append_audit_records(&mut lines, content.as_bytes()),
+                Err(e) => lines.push(format!("  Read error: {e}")),
             }
+        } else {
+            // Show disc-based audit log
+            lines.push(format!(
+                "  Source: disc ({} session(s))",
+                app.prior_sessions.len()
+            ));
+            lines.push(String::new());
+            Self::append_audit_records(&mut lines, &disc_audit);
         }
 
         lines
+    }
+
+    /// Parse audit log bytes (JSONL) and append formatted records to `lines`.
+    fn append_audit_records(lines: &mut Vec<String>, data: &[u8]) {
+        let content = String::from_utf8_lossy(data);
+        for (i, line) in content.lines().enumerate() {
+            match serde_json::from_str::<anodize_audit::Record>(line) {
+                Ok(rec) => {
+                    lines.push(format!(
+                        "  #{:<4} {} {}",
+                        rec.seq, rec.timestamp, rec.event
+                    ));
+                    // Show op_data if it has content
+                    if !rec.op_data.is_null()
+                        && rec.op_data != serde_json::Value::Object(Default::default())
+                    {
+                        if let Ok(pretty) = serde_json::to_string(&rec.op_data) {
+                            lines.push(format!("         {pretty}"));
+                        }
+                    }
+                }
+                Err(e) => {
+                    lines.push(format!("  [line {i}] parse error: {e}"));
+                }
+            }
+        }
     }
 
     // ── HSM Slot Browser ─────────────────────────────────────────────────────
