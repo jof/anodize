@@ -1,5 +1,22 @@
 {
   "nodes": {
+    "cdemu-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1777866306,
+        "narHash": "sha256-jhnWcBDTH4PGvN347HQZb7AuJc9JzyUxMv35QTPaC1w=",
+        "owner": "jof",
+        "repo": "cdemu",
+        "rev": "f339414dc3261c4ebf1ac1c67920bd92ffb4ef99",
+        "type": "github"
+      },
+      "original": {
+        "owner": "jof",
+        "ref": "anodize",
+        "repo": "cdemu",
+        "type": "github"
+      }
+    },
     "crane": {
       "locked": {
         "lastModified": 1776635034,
@@ -51,6 +68,7 @@
     },
     "root": {
       "inputs": {
+        "cdemu-src": "cdemu-src",
         "crane": "crane",
         "flake-utils": "flake-utils",
         "nixpkgs": "nixpkgs",

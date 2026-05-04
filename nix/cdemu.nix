@@ -1,5 +1,19 @@
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, cdemu-src, ... }:
+let
+  # Build cdemu-daemon from the custom fork (multi-session recording fixes).
+  # Reuses nixpkgs' cdemu-daemon derivation, only replacing the source tree.
+  cdemu-daemon = pkgs.cdemu-daemon.overrideAttrs (old: {
+    src = "${cdemu-src}/cdemu-daemon";
+  });
+in
 {
+  # Keep ceremony user's systemd --user alive across TTY session restarts so
+  # cdemu-daemon (and its in-memory disc state) survives getty respawns.
+  systemd.tmpfiles.rules = [
+    "f /var/lib/systemd/linger/ceremony"          # keep user manager alive across TTY restarts
+    "d /run/anodize/share 0775 root wheel -"      # 9p mount point for dev-disc
+  ];
+
   # Virtual SCSI HBA kernel module.
   # Creates /dev/sr0 (block) and /dev/sg0 (SCSI generic) for cdemu virtual drives.
   boot.kernelModules       = [ "vhba" ];
@@ -49,7 +63,7 @@
     wantedBy    = [ "default.target" ];
     serviceConfig = {
       Type       = "simple";
-      ExecStart  = "${pkgs.cdemu-daemon}/bin/cdemu-daemon --num-devices=1";
+      ExecStart  = "${cdemu-daemon}/bin/cdemu-daemon --num-devices=1";
       Restart    = "on-failure";
       RestartSec = "1s";
     };
@@ -68,38 +82,19 @@
         set -euo pipefail
         share=/run/anodize/share
 
-        # --- Pre-load diagnostics ---
-        echo "=== pre-load ===" >"$share/cdemu-status.txt"
-        echo "--- vhba module ---" >>"$share/cdemu-status.txt"
-        lsmod | grep vhba >>"$share/cdemu-status.txt" 2>&1 || echo "(vhba not in lsmod)" >>"$share/cdemu-status.txt"
-        echo "--- /dev/vhba_ctl ---" >>"$share/cdemu-status.txt"
-        ls -la /dev/vhba_ctl >>"$share/cdemu-status.txt" 2>&1 || echo "(not found)" >>"$share/cdemu-status.txt"
-        echo "--- id ---" >>"$share/cdemu-status.txt"
-        id >>"$share/cdemu-status.txt" 2>&1
-        echo "--- kernel messages (vhba) ---" >>"$share/cdemu-status.txt"
-        dmesg | grep -i vhba >>"$share/cdemu-status.txt" 2>&1 || echo "(no vhba in dmesg)" >>"$share/cdemu-status.txt"
-        echo "--- existing sr/sg devices ---" >>"$share/cdemu-status.txt"
-        ls -la /dev/sr* /dev/sg* >>"$share/cdemu-status.txt" 2>&1 || true
-
         # Wait for cdemu-daemon to register on the session D-Bus (up to 30 s).
         for i in $(seq 1 30); do
           if ${pkgs.glib}/bin/gdbus introspect --session \
                --dest net.sf.cdemu.CDEmuDaemon \
                --object-path /Daemon >/dev/null 2>&1; then
-            echo "cdemu-daemon ready after $i s" >>"$share/cdemu-status.txt"
             break
           fi
           if [ "$i" -eq 30 ]; then
-            echo "ERROR: cdemu-daemon not on session bus after 30s" \
-              >>"$share/cdemu-status.txt" >&2
+            echo "ERROR: cdemu-daemon not on session bus after 30s" >&2
             exit 1
           fi
           sleep 1
         done
-
-        # Dump cdemu-daemon journal before we call DeviceCreateBlank.
-        echo "--- cdemu-daemon journal ---" >>"$share/cdemu-status.txt"
-        journalctl --user -u cdemu-daemon --no-pager -n 50 >>"$share/cdemu-status.txt" 2>&1 || true
 
         # Create blank BD-R image at the 9p-shared path.
         ${pkgs.glib}/bin/gdbus call --session \
@@ -107,32 +102,12 @@
           --object-path /Daemon \
           --method net.sf.cdemu.CDEmuDaemon.DeviceCreateBlank \
           0 "$share/test-bdr.img" \
-          "{'writer-id': <'WRITER-ISO'>, 'medium-type': <'bdr'>}" \
-          >"$share/cdemu-load-result.txt" 2>&1
-        echo "DeviceCreateBlank exit=$?" >>"$share/cdemu-status.txt"
-
-        # --- Post-load diagnostics ---
-        echo "=== post-load ===" >>"$share/cdemu-status.txt"
-        ${pkgs.glib}/bin/gdbus call --session \
-          --dest net.sf.cdemu.CDEmuDaemon \
-          --object-path /Daemon \
-          --method net.sf.cdemu.CDEmuDaemon.DeviceGetStatus \
-          0 >>"$share/cdemu-status.txt" 2>&1 || true
-        ${pkgs.glib}/bin/gdbus call --session \
-          --dest net.sf.cdemu.CDEmuDaemon \
-          --object-path /Daemon \
-          --method net.sf.cdemu.CDEmuDaemon.DeviceGetMapping \
-          0 >>"$share/cdemu-status.txt" 2>&1 || true
-        echo "--- devices after load ---" >>"$share/cdemu-status.txt"
-        ls -la /dev/sr* /dev/sg* >>"$share/cdemu-status.txt" 2>&1 || true
-        echo "--- dmesg (vhba/cdemu) ---" >>"$share/cdemu-status.txt"
-        dmesg | grep -iE 'vhba|cdemu|scsi' >>"$share/cdemu-status.txt" 2>&1 || true
+          "{'writer-id': <'WRITER-ISO'>, 'medium-type': <'bdr'>}"
       '';
     };
   };
 
   # Mount point for the virtio-9p host share (dev-disc/ in the repo).
-  systemd.tmpfiles.rules = [ "d /run/anodize/share 0775 root wheel -" ];
   fileSystems."/run/anodize/share" = {
     device  = "dev-disc";
     fsType  = "9p";

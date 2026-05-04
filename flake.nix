@@ -12,9 +12,15 @@
     rust-overlay.inputs.nixpkgs.follows = "nixpkgs";
 
     flake-utils.url = "github:numtide/flake-utils";
+
+    # Custom cdemu fork with multi-session recording fixes (dev ISO only).
+    cdemu-src = {
+      url = "github:jof/cdemu/anodize";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, crane, rust-overlay, flake-utils }:
+  outputs = { self, nixpkgs, crane, rust-overlay, flake-utils, cdemu-src }:
     let
       # ---------------------------------------------------------------------------
       # Helpers shared across systems
@@ -66,19 +72,20 @@
           cargoExtraArgs = "--package anodize-tui";
         });
 
-        # dev-usb-disc + dev-softhsm-usb: USB sticks for disc and HSM in dev/QEMU.
+        # dev-softhsm-usb: SoftHSM2 on profile USB replaces YubiHSM2 in dev/QEMU.
+        # Exercises the real SG_IO MMC disc path via cdemu SCSI passthrough.
         # For development and testing only — never ship in a real ceremony ISO.
-        anodize-ceremony-dev = craneLib.buildPackage (commonArgs // {
+        anodize-ceremony-cdemu = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname         = "anodize-ceremony";
           version       = "0.1.0";
-          cargoExtraArgs = "--package anodize-tui --features dev-usb-disc,dev-softhsm-usb";
+          cargoExtraArgs = "--package anodize-tui --features dev-softhsm-usb";
         });
 
       in
       {
         packages = {
-          inherit anodize-ceremony anodize-ceremony-dev;
+          inherit anodize-ceremony anodize-ceremony-cdemu;
           default = anodize-ceremony;
 
           # nix build .#iso  →  bootable ceremony ISO image (x86_64-linux only).
@@ -96,6 +103,10 @@
           # nix build .#proddbg-iso  →  debug ISO with SSH/DHCP for hardware iteration.
           # Build this via Docker on any host: make anodize-proddbg.iso
           proddbg-iso = self.nixosConfigurations.ceremony-proddbg-iso.config.system.build.isoImage;
+
+          # nix build .#cdemu-iso  →  dev ISO with dev-softhsm-usb + cdemu BD-R.
+          # Build this via Docker on any host: make anodize-cdemu.iso
+          cdemu-iso = self.nixosConfigurations.ceremony-cdemu-iso.config.system.build.isoImage;
         };
 
         # Development shell — Rust toolchain comes from rustup (rust-toolchain.toml).
@@ -139,24 +150,25 @@
         ];
       };
 
-      # Dev ISO: same NixOS configuration but with the dev-usb-disc binary.
-      # Uses USB sticks instead of M-Disc optical writes for development testing.
-      nixosConfigurations.ceremony-dev-iso = nixpkgs.lib.nixosSystem {
+      # cdemu ISO: dev-softhsm-usb binary + real SG_IO path.
+      # Optical writes go through cdemu SCSI generic passthrough (real MMC commands).
+      nixosConfigurations.ceremony-cdemu-iso = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
 
         specialArgs = {
-          anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony-dev;
+          anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony-cdemu;
           serialPort = "ttyS0";
+          inherit cdemu-src;
         };
 
         modules = [
           "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
           ./nix/iso.nix
+          ./nix/cdemu.nix
           {
             system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
-            # Distinguish the dev ISO from the production ISO by name.
-            isoImage.isoName = nixpkgs.lib.mkForce "anodize-dev";
-            isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-DEV";
+            image.fileName    = nixpkgs.lib.mkForce "anodize-cdemu";
+            isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-CDEMU";
 
             # Route kernel + early-userspace output to ttyS0 so the dev warning
             # printed by anodize-ceremony (before TUI raw mode) appears on serial.
