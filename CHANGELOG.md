@@ -67,11 +67,12 @@ against a YubiHSM 2 in production.
   ttyS0, udev rules for YubiHSM 2 and optical drives, minimal capability
   wrappers (no setuid). Built via `nix build .#iso`.
 
-- **Dev ISO** (`nix build .#dev-iso`) — identical NixOS configuration with
-  `dev-usb-disc` and `dev-softhsm-usb` features enabled. USB sticks
-  substitute for the optical disc and the YubiHSM, making the full ceremony
-  flow testable in QEMU without specialised hardware. A red warning banner
-  in the TUI header distinguishes dev builds from production.
+- **Dev ISO** (`nix build .#cdemu-iso`) — identical NixOS configuration with
+  `dev-softhsm-usb` feature enabled. SoftHSM2 on a profile USB substitutes
+  for the YubiHSM. Optical disc writes go through cdemu SCSI generic
+  passthrough, exercising the real SG_IO MMC code path (`mmc.rs`,
+  `sgdev.rs`) end-to-end in QEMU. A red warning banner in the TUI header
+  distinguishes dev builds from production.
 
 - **CI** — GitHub Actions pipeline: `cargo fmt --check`, `cargo clippy`,
   `cargo test` (with SoftHSM2 integration), `cargo deny` (license +

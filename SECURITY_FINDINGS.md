@@ -221,7 +221,7 @@ all_sessions.dedup_by(|a, b| a.dir_name == b.dir_name);
 
 **File:** [crates/anodize-tui/src/main.rs:57–60](crates/anodize-tui/src/main.rs#L57), [main.rs:1254](crates/anodize-tui/src/main.rs#L1254)
 
-The `--skip-disc` CLI flag causes the ceremony to write ISO images to `/run/anodize/staging` (tmpfs, cleared on reboot) instead of the write-once optical disc. Dev feature flags (`dev-usb-disc`, `dev-softhsm-usb`) display a prominent red "DEV BUILD" banner; `--skip-disc` on a production binary shows no visual distinction. The state machine still transitions through `DiscDone → UsbWrite`, satisfying structural state checks, but no optical record is ever created.
+The `--skip-disc` CLI flag causes the ceremony to write ISO images to `/run/anodize/staging` (tmpfs, cleared on reboot) instead of the write-once optical disc. The dev feature flag (`dev-softhsm-usb`) displays a prominent red "DEV BUILD" banner; `--skip-disc` on a production binary shows no visual distinction. The state machine still transitions through `DiscDone → UsbWrite`, satisfying structural state checks, but no optical record is ever created.
 
 **Mitigating factor:** On the production NixOS ISO, `ceremony-shell` execs the sentinel with no arguments, and the sentinel execs `anodize-ceremony` with no arguments (`Command::new(CEREMONY_BIN).exec()`), making `--skip-disc` inaccessible through the normal boot path. A developer host running the binary directly, or any path that allows argument injection, would not have this protection.
 

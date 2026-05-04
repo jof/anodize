@@ -153,7 +153,6 @@ struct App {
     optical_dev: Option<PathBuf>,
     prior_sessions: Vec<SessionEntry>,
     burn_rx: Option<Receiver<Result<()>>>,
-    #[cfg_attr(feature = "dev-usb-disc", allow(dead_code))]
     skip_disc: bool,
     sessions_remaining: Option<u16>,
 
@@ -161,12 +160,6 @@ struct App {
     intent_session_dir_name: Option<String>,
     pending_key_action: Option<u8>, // 1=generate, 2=find-existing
     pending_intent_session: Option<SessionEntry>,
-
-    // Dev-mode disc USB
-    #[cfg(feature = "dev-usb-disc")]
-    disc_usb: Option<media::usb_disc::DiscUsb>,
-    #[cfg(feature = "dev-usb-disc")]
-    profile_dev: Option<PathBuf>,
 }
 
 impl App {
@@ -209,10 +202,6 @@ impl App {
             intent_session_dir_name: None,
             pending_key_action: None,
             pending_intent_session: None,
-            #[cfg(feature = "dev-usb-disc")]
-            disc_usb: None,
-            #[cfg(feature = "dev-usb-disc")]
-            profile_dev: None,
         }
     }
 
@@ -270,9 +259,6 @@ impl App {
 
             AppState::WaitDisc => {
                 if code == KeyCode::Char('1') {
-                    #[cfg(feature = "dev-usb-disc")]
-                    let ready = self.disc_usb.is_some();
-                    #[cfg(not(feature = "dev-usb-disc"))]
                     let ready = self.skip_disc
                         || (self.optical_dev.is_some()
                             && self.sessions_remaining.map(|r| r >= 2).unwrap_or(false));
@@ -418,10 +404,6 @@ impl App {
                     self.prior_sessions.clear();
                     self.optical_dev = None;
                     self.sessions_remaining = None;
-                    #[cfg(feature = "dev-usb-disc")]
-                    {
-                        self.disc_usb = None;
-                    }
                     self.state = AppState::WaitMigrateTarget;
                     self.set_status("Eject old disc. Insert blank new disc.");
                 }
@@ -429,9 +411,6 @@ impl App {
 
             AppState::WaitMigrateTarget => {
                 if code == KeyCode::Char('1') {
-                    #[cfg(feature = "dev-usb-disc")]
-                    let ready = self.disc_usb.is_some();
-                    #[cfg(not(feature = "dev-usb-disc"))]
                     let ready = self.skip_disc
                         || (self.optical_dev.is_some()
                             && self.sessions_remaining.map(|r| r >= 50).unwrap_or(false));
@@ -457,11 +436,6 @@ impl App {
                 }
                 match media::find_profile_usb(&candidates, &self.usb_mountpoint) {
                     Ok(Some((profile_path, dev_path))) => {
-                        #[cfg(feature = "dev-usb-disc")]
-                        {
-                            self.profile_dev = Some(dev_path);
-                        }
-                        #[cfg(not(feature = "dev-usb-disc"))]
                         let _ = dev_path;
                         #[cfg(feature = "dev-softhsm-usb")]
                         if let Err(e) = configure_softhsm_from_usb(&self.usb_mountpoint) {
@@ -508,45 +482,6 @@ impl App {
             }
 
             AppState::WaitDisc | AppState::WaitMigrateTarget => {
-                #[cfg(feature = "dev-usb-disc")]
-                {
-                    let probe = std::path::Path::new("/tmp/anodize-disc-usb-probe");
-                    let profile_dev = self.profile_dev.as_deref();
-                    match media::usb_disc::find_disc_usb(profile_dev, probe) {
-                        Some(disc) => {
-                            let same_uuid = self
-                                .disc_usb
-                                .as_ref()
-                                .map(|d| d.uuid == disc.uuid)
-                                .unwrap_or(false);
-                            if !same_uuid {
-                                self.prior_sessions =
-                                    media::usb_disc::read_disc_usb_sessions(&disc, probe);
-                            }
-                            let n = self.prior_sessions.len();
-                            let label = if self.state == AppState::WaitMigrateTarget {
-                                "target disc USB"
-                            } else {
-                                "disc USB"
-                            };
-                            self.set_status(format!(
-                                "{label} ready ({}, {n} session(s)). Press [1].",
-                                disc.uuid
-                            ));
-                            self.disc_usb = Some(disc);
-                        }
-                        None => {
-                            self.disc_usb = None;
-                            let label = if self.state == AppState::WaitMigrateTarget {
-                                "blank target disc USB"
-                            } else {
-                                "disc USB"
-                            };
-                            self.set_status(format!("No {label} found. Insert USB with ANODIZE_DISC_ID."));
-                        }
-                    }
-                }
-                #[cfg(not(feature = "dev-usb-disc"))]
                 {
                     if self.skip_disc {
                         self.optical_dev = Some(PathBuf::from("/run/anodize/staging"));
@@ -564,11 +499,11 @@ impl App {
                     let mut rw_rejection: Option<String> = None;
                     let need_blank = self.state == AppState::WaitMigrateTarget;
                     for dev in &drives {
-                        match media::disc_is_appendable(dev) {
-                            Ok(()) => {
-                                let prior = media::read_disc_sessions(dev).unwrap_or_default();
-                                let n = prior.len();
-                                let (cap_summary, remaining) = media::disc_capacity_summary(dev);
+                        match media::scan_disc(dev) {
+                            Ok(scan) => {
+                                let n = scan.sessions.len();
+                                let cap_summary = &scan.capacity_summary;
+                                let remaining = scan.sessions_remaining;
                                 self.sessions_remaining = Some(remaining);
                                 if need_blank && n > 0 {
                                     self.set_status(format!(
@@ -587,7 +522,7 @@ impl App {
                                 }
                                 self.optical_dev = Some(dev.clone());
                                 if !need_blank {
-                                    self.prior_sessions = prior;
+                                    self.prior_sessions = scan.sessions;
                                 }
                                 self.set_status(if need_blank {
                                     format!(
@@ -635,10 +570,6 @@ impl App {
                                 self.set_status(format!("Intent disc write failed: {e}"));
                                 self.state = AppState::WaitDisc;
                                 self.optical_dev = None;
-                                #[cfg(feature = "dev-usb-disc")]
-                                {
-                                    self.disc_usb = None;
-                                }
                             }
                             Ok(()) => {
                                 if let Some(intent) = self.pending_intent_session.take() {
@@ -677,13 +608,6 @@ impl App {
                         match result {
                             Ok(()) => {
                                 self.state = AppState::DiscDone;
-                                #[cfg(feature = "dev-usb-disc")]
-                                let disc_label = self
-                                    .disc_usb
-                                    .as_ref()
-                                    .map(|d| d.uuid.clone())
-                                    .unwrap_or_else(|| "disc USB".into());
-                                #[cfg(not(feature = "dev-usb-disc"))]
                                 let disc_label = self
                                     .optical_dev
                                     .as_deref()
@@ -703,10 +627,6 @@ impl App {
                                 self.set_status(format!("Burn failed: {e} — reinsert disc and retry."));
                                 self.state = AppState::WaitDisc;
                                 self.optical_dev = None;
-                                #[cfg(feature = "dev-usb-disc")]
-                                {
-                                    self.disc_usb = None;
-                                }
                             }
                         }
                     }
@@ -744,11 +664,7 @@ impl App {
         }
         self.actor = Some(actor);
         self.state = AppState::WaitDisc;
-        self.set_status(if cfg!(feature = "dev-usb-disc") {
-            "Logged in. Insert disc USB with ANODIZE_DISC_ID (separate from profile USB)."
-        } else {
-            "Logged in. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc) and press [1]."
-        });
+        self.set_status("Logged in. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc) and press [1].");
     }
 
     // ── Mode 2: Load CSR ───────────────────────────────────────────────────────
@@ -1281,7 +1197,6 @@ impl App {
             }
         };
 
-        #[cfg(not(feature = "dev-usb-disc"))]
         if !self.skip_disc && self.sessions_remaining.map(|r| r < 2).unwrap_or(false) {
             self.set_status("Disc full — cannot write intent session. Insert new disc.");
             return;
@@ -1290,10 +1205,7 @@ impl App {
         let ts = self.confirmed_time.unwrap_or_else(SystemTime::now);
         let dir_name = media::session_dir_name(ts) + "-intent";
 
-        #[cfg(not(feature = "dev-usb-disc"))]
         let staging = PathBuf::from("/run/anodize/staging");
-        #[cfg(feature = "dev-usb-disc")]
-        let staging = PathBuf::from("/tmp/anodize-staging");
         if let Err(e) = std::fs::create_dir_all(&staging) {
             self.set_status(format!("Cannot create staging dir: {e}"));
             return;
@@ -1344,25 +1256,6 @@ impl App {
         self.burn_rx = Some(rx);
         self.pending_intent_session = Some(intent_session);
 
-        #[cfg(feature = "dev-usb-disc")]
-        {
-            let disc = match self.disc_usb.clone() {
-                Some(d) => d,
-                None => {
-                    self.set_status("No disc USB — cannot write intent");
-                    self.burn_rx = None;
-                    self.pending_intent_session = None;
-                    return;
-                }
-            };
-            let iso = media::iso9660::build_iso(&all_sessions);
-            std::thread::spawn(move || {
-                tx.send(media::usb_disc::write_iso_to_disc_usb(&disc, &iso))
-                    .ok();
-            });
-        }
-
-        #[cfg(not(feature = "dev-usb-disc"))]
         {
             if self.skip_disc {
                 let iso = media::iso9660::build_iso(&all_sessions);
@@ -1487,10 +1380,7 @@ impl App {
     // ── Disc burn ──────────────────────────────────────────────────────────────
 
     fn do_start_burn(&mut self) {
-        #[cfg(not(feature = "dev-usb-disc"))]
         let staging = PathBuf::from("/run/anodize/staging");
-        #[cfg(feature = "dev-usb-disc")]
-        let staging = PathBuf::from("/tmp/anodize-staging");
 
         // Build session based on current operation
         let new_session = match self.build_burn_session(&staging) {
@@ -1510,26 +1400,6 @@ impl App {
         let (tx, rx) = mpsc::channel();
         self.burn_rx = Some(rx);
 
-        #[cfg(feature = "dev-usb-disc")]
-        {
-            let disc = match self.disc_usb.clone() {
-                Some(d) => d,
-                None => {
-                    self.set_status("No disc USB — cannot write");
-                    self.burn_rx = None;
-                    return;
-                }
-            };
-            let iso = media::iso9660::build_iso(&all_sessions);
-            std::thread::spawn(move || {
-                tx.send(media::usb_disc::write_iso_to_disc_usb(&disc, &iso))
-                    .ok();
-            });
-            self.state = AppState::BurningDisc;
-            self.set_status("Writing ISO to disc USB…");
-        }
-
-        #[cfg(not(feature = "dev-usb-disc"))]
         {
             if self.skip_disc {
                 let iso = media::iso9660::build_iso(&all_sessions);
@@ -1837,10 +1707,7 @@ impl App {
 
         let usb = self.usb_mountpoint.clone();
 
-        #[cfg(not(feature = "dev-usb-disc"))]
         let staging_log = PathBuf::from("/run/anodize/staging/audit.log");
-        #[cfg(feature = "dev-usb-disc")]
-        let staging_log = PathBuf::from("/tmp/anodize-staging/audit.log");
 
         match self.current_op.clone() {
             Some(Operation::GenerateRootCa) => {
@@ -2098,7 +1965,7 @@ fn render(frame: &mut Frame, app: &App) {
 
     // Build header lines dynamically so runtime flags (skip_disc) and
     // compile-time flags (dev features) both contribute warning rows.
-    let is_dev = cfg!(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"));
+    let is_dev = cfg!(feature = "dev-softhsm-usb");
     let mut header_lines: Vec<Line> = vec![Line::from("ANODIZE ROOT CA CEREMONY")];
     if is_dev {
         header_lines.push(Line::from(Span::styled(
@@ -2147,13 +2014,7 @@ fn render(frame: &mut Frame, app: &App) {
         AppState::WaitUsb => "Waiting for USB",
         AppState::ProfileLoaded => "Profile Loaded",
         AppState::EnterPin => "HSM Authentication",
-        AppState::WaitDisc => {
-            if cfg!(feature = "dev-usb-disc") {
-                "Insert Disc USB"
-            } else {
-                "Insert Disc"
-            }
-        }
+        AppState::WaitDisc => "Insert Disc",
         AppState::OperationSelect => "Select Operation",
         AppState::KeyAction => "Key Management",
         AppState::WritingIntent => "Committing Intent to Disc\u{2026}",
@@ -2163,20 +2024,8 @@ fn render(frame: &mut Frame, app: &App) {
         AppState::RevokeInput => "Revoke Certificate",
         AppState::RevokePreview => "Revocation Preview \u{2014} VERIFY BEFORE COMMITTING",
         AppState::CrlPreview => "CRL Issuance Preview",
-        AppState::BurningDisc => {
-            if cfg!(feature = "dev-usb-disc") {
-                "Writing Session to Disc USB\u{2026}"
-            } else {
-                "Writing Session\u{2026}"
-            }
-        }
-        AppState::DiscDone => {
-            if cfg!(feature = "dev-usb-disc") {
-                "Disc USB Written"
-            } else {
-                "Disc Session Written"
-            }
-        }
+        AppState::BurningDisc => "Writing Session\u{2026}",
+        AppState::DiscDone => "Disc Session Written",
         AppState::MigrateConfirm => "Disc Migration \u{2014} Verify Chain",
         AppState::WaitMigrateTarget => "Insert Blank Target Disc",
         AppState::Done => "Ceremony Complete",
@@ -2253,16 +2102,6 @@ fn build_body(app: &App) -> Text<'static> {
         }
 
         AppState::WaitDisc => {
-            #[cfg(feature = "dev-usb-disc")]
-            let disc_info = match &app.disc_usb {
-                Some(disc) => format!(
-                    "  Disc USB ready ({})  ({} prior session(s))",
-                    disc.uuid,
-                    app.prior_sessions.len()
-                ),
-                None => "  No disc USB found. Insert USB with ANODIZE_DISC_ID.".into(),
-            };
-            #[cfg(not(feature = "dev-usb-disc"))]
             let disc_info = match &app.optical_dev {
                 Some(dev) => {
                     let cap = app
@@ -2487,12 +2326,7 @@ fn build_body(app: &App) -> Text<'static> {
 
         AppState::BurningDisc => vec![
             String::new(),
-            if cfg!(feature = "dev-usb-disc") {
-                "  Writing ISO 9660 session to disc USB\u{2026}"
-            } else {
-                "  Writing ISO 9660 session to optical disc\u{2026}"
-            }
-            .into(),
+            "  Writing ISO 9660 session to optical disc\u{2026}".into(),
             String::new(),
             "  Please wait. Do not remove the disc or USB.".into(),
         ],
@@ -2553,12 +2387,6 @@ fn build_body(app: &App) -> Text<'static> {
 
         AppState::WaitMigrateTarget => {
             let session_count = app.migrate_sessions.len();
-            #[cfg(feature = "dev-usb-disc")]
-            let disc_info = match &app.disc_usb {
-                Some(disc) => format!("  Blank disc USB ready ({}). Press [1].", disc.uuid),
-                None => "  Waiting for blank disc USB…".into(),
-            };
-            #[cfg(not(feature = "dev-usb-disc"))]
             let disc_info = match &app.optical_dev {
                 Some(dev) => format!("  Blank disc in {}. Press [1].", dev.display()),
                 None => "  Waiting for blank write-once disc…".into(),
@@ -2585,12 +2413,7 @@ fn build_body(app: &App) -> Text<'static> {
                 _ => format!("  USB  : {}  \u{2713}", app.usb_mountpoint.display()),
             },
             String::new(),
-            if cfg!(feature = "dev-usb-disc") {
-                "  Remove and store both disc USB and profile USB separately."
-            } else {
-                "  Remove and store both disc and USB separately."
-            }
-            .into(),
+            "  Remove and store both disc and USB separately.".into(),
             "  The HSM holds the private key; no key material was written to disk.".into(),
             String::new(),
             "  [q]  Quit".into(),
@@ -2661,16 +2484,13 @@ fn run(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>, app: &mut App
 
 // ── Dev build serial warning ──────────────────────────────────────────────────
 
-#[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
+#[cfg(feature = "dev-softhsm-usb")]
 fn warn_dev_serial() {
     use std::io::Write;
     if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/ttyS0") {
         let _ = writeln!(tty);
         let _ = writeln!(tty, "*** ANODIZE DEV BUILD — NOT FOR PRODUCTION USE ***");
-        let _ = writeln!(
-            tty,
-            "*** dev-usb-disc and/or dev-softhsm-usb features enabled  ***"
-        );
+        let _ = writeln!(tty, "*** dev-softhsm-usb feature enabled              ***");
         let _ = writeln!(tty);
     }
 }
@@ -2680,7 +2500,7 @@ fn warn_dev_serial() {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    #[cfg(any(feature = "dev-usb-disc", feature = "dev-softhsm-usb"))]
+    #[cfg(feature = "dev-softhsm-usb")]
     warn_dev_serial();
 
     enable_raw_mode()?;

@@ -13,19 +13,21 @@ make ci      # full CI job locally via act + Docker
 ```
 
 ```sh
-# Build ceremony binary with all dev features (never use in a real ceremony)
+# Build ceremony binary with dev features (never use in a real ceremony)
 make build-dev
 
 # ISO builds — Nix in Docker, first run 10–30 min, cached after
-make anodize.iso      # production ISO
-make anodize-dev.iso  # dev ISO (USB-as-disc via dev-usb-disc feature)
+make anodize.iso       # production ISO (YubiHSM + real optical drive)
+make anodize-cdemu.iso # dev ISO (SoftHSM2 USB + cdemu inside the VM)
 
-# QEMU dev loop — requires dev ISO and fake USB images
-make fake-usb.img       # 64 MiB FAT profile USB, SoftHSM2 token, PIN: 123456
-make fake-disc-usb.img  # 64 MiB FAT disc-substitute USB (ANODIZE_DISC_ID marker)
-make qemu-dev-curses    # boot dev ISO in terminal curses mode (Ctrl-A X to quit)
-make qemu-dev-sdl       # same with SDL graphics window
-make qemu-curses        # boot production ISO in curses
+# QEMU dev loop — requires dev ISO and fake USB; no host cdemu setup needed
+make fake-usb.img          # 64 MiB FAT profile USB, SoftHSM2 token, PIN: 123456
+make qemu-cdemu-nographic  # boot dev ISO (Ctrl-A X to quit)
+make qemu-cdemu-sdl        # same with SDL graphics window
+make qemu-nographic        # boot production ISO (no-graphics)
+
+# After a dev session, inspect the BD-R disc image on the host:
+ls dev-disc/test-bdr.img
 ```
 
 `--test-threads=1` is used in `make test` as a safe default. It is required for `anodize-hsm` and `anodize-ca` integration tests because `init_test_token()` uses a shared `target/test-softhsm/` directory (rm-rf + recreate). Pure-logic crates (`anodize-config`, `anodize-audit`) do not need it.
@@ -92,9 +94,8 @@ Two binaries ship on the ISO:
 
 **Media layer** (`src/media/`): pure-Rust ISO 9660 Level 2 writer (`iso9660.rs`), typed MMC/SCSI disc commands over SG_IO ioctl (`mmc.rs`, `sgdev.rs`), USB partition scanning via sysfs and `nix::mount` (`mod.rs`).
 
-**Dev compile features** (never enable in a real ceremony):
-- `dev-usb-disc`: accepts a FAT USB containing an `ANODIZE_DISC_ID` marker file as disc substitute; reads/writes `ceremony.iso` on the USB instead of SG_IO SAO burns
-- `dev-softhsm-usb`: loads a SoftHSM2 token directory from the profile USB instead of the YubiHSM 2
+**Dev compile feature** (never enable in a real ceremony):
+- `dev-softhsm-usb`: loads a SoftHSM2 token directory from the profile USB instead of the YubiHSM 2. The disc write path (SG_IO MMC via mmc.rs/sgdev.rs) is unchanged — dev testing uses cdemu SCSI generic passthrough so the real write code is exercised.
 - Dev builds display a red "DEV BUILD" warning banner so production and dev environments are visually distinct
 
 ### Security invariants to preserve
@@ -109,25 +110,33 @@ Two binaries ship on the ISO:
 
 ### QEMU dev loop
 
-All TUI feature testing happens through QEMU + the dev ISO + curses mode. `cargo test` covers library crate logic. There is no standalone CLI for ad-hoc HSM operations.
+All TUI feature testing happens through QEMU + the cdemu dev ISO. `cargo test` covers library crate logic. There is no standalone CLI for ad-hoc HSM operations.
+
+The cdemu dev ISO exercises the real SG_IO MMC disc write path (mmc.rs + sgdev.rs) via cdemu SCSI generic passthrough — the same code path used in production, unlike any USB-based substitute.
 
 **One-time setup** (delete files to regenerate):
 
 ```sh
-make fake-usb.img       # profile USB with SoftHSM2 token (dev PIN: 123456)
-make fake-disc-usb.img  # disc-substitute USB
-make anodize-dev.iso    # dev ISO — first run is slow, cached after
+make fake-usb.img        # profile USB with SoftHSM2 token (dev PIN: 123456)
+make anodize-cdemu.iso   # dev ISO — first run is slow, cached after
 ```
 
-**Each dev session**:
+**Each dev session** (no host cdemu/vhba setup needed — runs inside the VM):
 
 ```sh
-make qemu-dev-curses    # Ctrl-A X to quit
+make qemu-cdemu-nographic     # Ctrl-A X to quit
 # or
-make qemu-dev-sdl       # SDL window
+make qemu-cdemu-sdl           # SDL window
 ```
 
-The dev ISO runs `anodize-sentinel` on tty1 and ttyS0. Sentinel execs `anodize-ceremony` built with `dev-usb-disc,dev-softhsm-usb` features. The ceremony binary shows a red "DEV BUILD" banner.
+**After a session**, inspect the BD-R image on your laptop:
+
+```sh
+ls -lh dev-disc/test-bdr.img
+# isoinfo, cdemu (if installed), or anodize's own read path for analysis
+```
+
+The dev ISO runs `anodize-sentinel` on tty1 and ttyS0. Sentinel execs `anodize-ceremony` built with `dev-softhsm-usb`. The ceremony binary shows a red "DEV BUILD" banner. Inside the guest, vhba + cdemu-daemon start automatically and expose a blank BD-R as `/dev/sr0`.
 
 ### Tests as you go
 

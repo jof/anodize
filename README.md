@@ -99,24 +99,25 @@ cargo test -p anodize-tui iso9660
 
 ### Dev features (never enable in a real ceremony)
 
-Two compile-time features enable full end-to-end testing without optical hardware:
+One compile-time feature enables full end-to-end testing without YubiHSM hardware:
 
 | Feature | Replaces |
 |---|---|
-| `dev-usb-disc` | Optical disc: scans for a FAT USB partition marked with `ANODIZE_DISC_ID`, reads/writes `ceremony.iso` in place of SG_IO SAO burns |
 | `dev-softhsm-usb` | YubiHSM: reads a SoftHSM2 token directory from the profile USB partition |
+
+The optical disc write path (SG_IO MMC via `mmc.rs`/`sgdev.rs`) is **unchanged** in dev builds — dev testing uses cdemu SCSI generic passthrough so the real write code is exercised end-to-end.
 
 ```sh
 # Set up a fake profile USB with an embedded SoftHSM2 token:
-scripts/init-softhsm-usb.sh
+make fake-usb.img
 
-make build-dev          # cargo build --features dev-usb-disc,dev-softhsm-usb
-make fake-disc-usb.img  # 64 MiB FAT image pre-marked with ANODIZE_DISC_ID
+# Build dev ISO and run in QEMU — no host cdemu setup needed:
+make anodize-cdemu.iso     # dev ISO (NixOS, dev-softhsm-usb, cdemu inside VM)
+make qemu-cdemu-nographic  # boot: vhba + cdemu-daemon start inside the guest
+make qemu-cdemu-sdl        # same but SDL window
 
-# Boot the dev ISO in QEMU with both fake USB images attached:
-make dev-iso            # build anodize-dev.iso (NixOS, dev features)
-make qemu-dev           # QEMU SDL — fake-usb.img (profile) + fake-disc-usb.img (disc)
-make qemu-dev-curses    # same but curses display
+# After a session, the BD-R disc image is available on the host:
+ls dev-disc/test-bdr.img
 ```
 
 ## Reproducible builds
