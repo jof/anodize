@@ -378,14 +378,16 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
     }
 
     synchronize_cache(&sg).context("SYNCHRONIZE CACHE")?;
-    close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
 
-    let session_target = if is_final {
-        CloseTarget::Disc
-    } else {
-        CloseTarget::Session
-    };
-    close_track_session(&sg, session_target).context("CLOSE SESSION")?;
+    // For non-final sessions: omit CLOSE TRACK SESSION entirely.
+    // cdemu's WRITER-ISO treats Close Session (0x02) as a disc-finalizing
+    // operation, returning DiscStatus::Complete after the first session close
+    // and preventing further appends.  Real M-Disc drives handle multi-session
+    // correctly via the write parameters already set above.
+    if is_final {
+        close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
+        close_track_session(&sg, CloseTarget::Disc).context("CLOSE DISC")?;
+    }
 
     Ok(())
 }
