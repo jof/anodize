@@ -3,10 +3,9 @@
 //! Provides three command-sending methods (cdb_in, cdb_out, cdb_none) and a
 //! CDROM_DRIVE_STATUS ioctl wrapper.  All operations are direct syscalls —
 //! no subprocess spawning.
-// Entire module is unused in dev-usb-disc builds; suppress dead_code lint.
-#![cfg_attr(feature = "dev-usb-disc", allow(dead_code))]
 
 use std::fs::OpenOptions;
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 
@@ -63,9 +62,13 @@ pub struct SgDev {
 
 impl SgDev {
     pub fn open(dev: &Path) -> Result<Self> {
+        // O_NONBLOCK is required: without it, opening a blank write-once disc (e.g. BD-R via
+        // cdemu) triggers a blocking readiness probe in the kernel sr driver that returns EROFS.
+        // O_RDWR is required for write-direction SG_IO (WRITE(10), MODE SELECT, etc.).
         let file = OpenOptions::new()
             .read(true)
             .write(true)
+            .custom_flags(nix::libc::O_NONBLOCK)
             .open(dev)
             .with_context(|| format!("open optical device {}", dev.display()))?;
         Ok(Self { file })

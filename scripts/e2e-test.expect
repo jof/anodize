@@ -1,0 +1,209 @@
+#!/usr/bin/expect -f
+# End-to-end ceremony test via SSH.
+# Drives the anodize-ceremony TUI through a full GenerateRootCa ceremony.
+# Connects over SSH (not serial console) so terminal size is handled correctly.
+#
+# Usage: expect scripts/e2e-test.expect
+# (Run from the anodize repo root after building anodize-cdemu.iso and fake-usb.img)
+#
+# Pattern matching note: ratatui renders with cursor positioning between words,
+# so multi-word phrases do not appear as contiguous bytes in the terminal stream.
+# All patterns match single distinctive tokens.
+
+set repo [file dirname [file dirname [info script]]]
+set iso     "$repo/anodize-cdemu.iso"
+set usb     "$repo/fake-usb.img"
+set devdisc "$repo/dev-disc"
+set ssh_port 2222
+
+# Prepare host environment
+file mkdir $devdisc
+file copy -force /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/anodize-ovmf-vars.fd
+
+log_user 1
+
+# Capture all terminal output for post-mortem analysis
+log_file -noappend /tmp/anodize-e2e.log
+
+puts "=== Launching QEMU ==="
+spawn qemu-system-x86_64 \
+    -enable-kvm -machine pc -cpu host -m 2G -smp 2 \
+    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
+    -drive if=pflash,format=raw,file=/tmp/anodize-ovmf-vars.fd \
+    -cdrom $iso -no-reboot \
+    -drive file=$usb,format=raw,if=none,id=usb0 \
+    -device usb-ehci,id=ehci \
+    -device usb-storage,drive=usb0,bus=ehci.0 \
+    -fsdev local,security_model=none,id=devdisc,path=$devdisc \
+    -device virtio-9p-pci,id=fs0,fsdev=devdisc,mount_tag=dev-disc \
+    -netdev user,id=net0,hostfwd=tcp::$ssh_port-:22 \
+    -device virtio-net-pci,netdev=net0 \
+    -nographic
+
+set qemu_spawn_id $spawn_id
+
+# Poll for SSH readiness (boot takes 60-120 s).
+# Uses Tcl's built-in socket — no nc dependency.
+puts "=== Polling for SSH on localhost:$ssh_port ==="
+set timeout 180
+set ssh_ready 0
+for {set i 1} {$i <= 180} {incr i} {
+    if {[catch {set fd [socket localhost $ssh_port]} err] == 0} {
+        close $fd
+        puts "=== SSH up after ${i}s ==="
+        set ssh_ready 1
+        break
+    }
+    after 1000
+}
+if {!$ssh_ready} {
+    puts "\n\[FAIL\] SSH not available after 180s"
+    exit 1
+}
+
+# SSH into the ceremony user using the committed dev key.
+# ceremony-shell → sentinel → TUI launches automatically as the login shell.
+spawn ssh \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o BatchMode=yes \
+    -i $repo/scripts/dev-ssh-key \
+    -p $ssh_port ceremony@localhost
+
+# --- Sentinel screen ---
+set timeout 30
+expect {
+    timeout { puts "\n\[FAIL\] Sentinel: timed out waiting for sentinel banner"; exit 1 }
+    "Press Enter to begin the ceremony" {
+        puts "\n\[PASS\] Sentinel banner appeared"
+    }
+}
+
+# --- Sentinel screen ---
+# Sentinel uses raw mode — Enter is \r
+send "\r"
+
+# --- ClockCheck TUI ---
+# Match "correct" from "[1]  Time is correct — continue"
+set timeout 60
+expect {
+    timeout { puts "\n\[FAIL\] ClockCheck: timed out waiting for TUI"; exit 1 }
+    "correct" {
+        puts "\n\[PASS\] ClockCheck screen appeared"
+    }
+}
+send "1"
+
+# --- WaitUsb -> ProfileLoaded (auto-advance with USB attached) ---
+# Match "Begin" from "[1]  Begin ceremony (HSM PIN entry)"
+set timeout 60
+expect {
+    timeout { puts "\n\[FAIL\] ProfileLoaded: timed out"; exit 1 }
+    "Begin" {
+        puts "\n\[PASS\] Profile loaded"
+    }
+}
+send "1"
+
+# --- EnterPin ---
+# Match "cancel" from "Press Enter to log in, Esc to cancel."
+set timeout 30
+expect {
+    timeout { puts "\n\[FAIL\] EnterPin: timed out"; exit 1 }
+    "cancel" {
+        puts "\n\[PASS\] PIN prompt appeared"
+    }
+}
+# dev PIN from fake-usb.img SoftHSM token
+send "123456\r"
+
+# --- WaitDisc ---
+# cdemu-daemon (user service) creates blank BD-R after session D-Bus is ready.
+# Match "ready" from "Blank disc in /dev/sr0  (BD-R: 0 used, 255 remaining)"
+set timeout 120
+expect {
+    timeout { puts "\n\[FAIL\] WaitDisc: timed out — cdemu/vhba may not have initialized"; exit 1 }
+    "ready" {
+        puts "\n\[PASS\] Disc detected (cdemu BD-R ready)"
+    }
+}
+send "1"
+
+# --- OperationSelect: GenerateRootCa ---
+# Match "Generate" from "[1]  Generate new root CA (fresh or resume key)"
+set timeout 30
+expect {
+    timeout { puts "\n\[FAIL\] OperationSelect: timed out"; exit 1 }
+    "Generate" {
+        puts "\n\[PASS\] OperationSelect appeared"
+    }
+}
+send "1"
+
+# --- KeyAction: generate new P-384 keypair ---
+# Match "P-384" from "[1]  Generate new P-384 keypair (fresh ceremony)"
+set timeout 30
+expect {
+    timeout { puts "\n\[FAIL\] KeyAction: timed out"; exit 1 }
+    "P-384" {
+        puts "\n\[PASS\] KeyAction prompt appeared"
+    }
+}
+send "1"
+
+# --- WritingIntent (auto) -> HSM keygen -> CertPreview ---
+# Intent burn + SoftHSM P-384 keygen; allow up to 2 minutes.
+# Match "Proceed" from "[1]  Proceed to disc write"
+set timeout 120
+expect {
+    timeout { puts "\n\[FAIL\] CertPreview: timed out after intent burn + HSM keygen"; exit 1 }
+    "Proceed" {
+        puts "\n\[PASS\] CertPreview appeared — fingerprint visible"
+    }
+}
+send "1"
+
+# --- BurningDisc (auto) -> DiscDone ---
+# TAO session write via cdemu SCSI generic; allow 3 minutes.
+# Match "successfully" from "  {op_label} written to disc successfully."
+set timeout 180
+expect {
+    timeout { puts "\n\[FAIL\] DiscDone: timed out after disc burn"; exit 1 }
+    "successfully" {
+        puts "\n\[PASS\] Disc session written"
+    }
+}
+
+# Snapshot disc image size before continuing
+puts "\n\[CHECK\] dev-disc/test-bdr.img on host:"
+catch { exec ls -lh $devdisc/test-bdr.img } img_info
+puts "  $img_info"
+
+# Copy artifacts to USB
+send "1"
+
+# --- Done ---
+# Match "complete" from "  Ceremony complete."
+set timeout 60
+expect {
+    timeout { puts "\n\[WARN\] Done: timed out waiting for ceremony complete screen" }
+    "complete" {
+        puts "\n\[PASS\] Ceremony complete!"
+    }
+}
+
+puts "\n=== Test finished — sending q to quit ==="
+send "q"
+
+set timeout 30
+expect {
+    eof     { puts "SSH session ended." }
+    timeout { puts "SSH did not exit in time." }
+}
+
+# Final summary
+puts "\n=== dev-disc contents ==="
+catch { exec ls -lh $devdisc } dirlist
+puts $dirlist
+
+puts "\n=== DONE — full log at /tmp/anodize-e2e.log ==="

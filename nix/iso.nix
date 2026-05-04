@@ -27,6 +27,15 @@ let
   # /run/wrappers/bin/anodize-ceremony, preventing two terminals from running
   # the ceremony simultaneously.
   ceremonyShell = (pkgs.writeShellScriptBin "ceremony-shell" ''
+    # ttyS0 (serial port) reports 0×0 terminal size by default; the ratatui
+    # TUI renders nothing in a zero-size frame.  Only override size when the
+    # terminal has no dimensions — SSH and VT sessions already carry the
+    # correct size from the connecting terminal.
+    _sz=$(stty size 2>/dev/null || echo "0 0")
+    if [ "$_sz" = "0 0" ]; then
+      stty cols 220 rows 50 2>/dev/null || true
+    fi
+
     # Run the sentinel inside tmux so operators can scroll back through
     # previous command output on the framebuffer console.
     # Scrollback: Ctrl+B then [ to enter copy mode, PageUp/PageDown to
@@ -227,8 +236,9 @@ in
   # ── tmpfiles: runtime directories for the ceremony binary ─────────────────
 
   systemd.tmpfiles.rules = [
-    "d /run/anodize     0755 ceremony ceremony -"
-    "d /run/anodize/usb 0700 ceremony ceremony -"
+    "d /run/anodize         0755 ceremony ceremony -"
+    "d /run/anodize/usb     0700 ceremony ceremony -"
+    "d /run/anodize/staging 0700 ceremony ceremony -"
   ];
 
   # ── Ceremony user ─────────────────────────────────────────────────────────

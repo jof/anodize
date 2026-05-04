@@ -3,14 +3,10 @@
 //! USB mounting uses nix::mount::mount(2) directly (requires CAP_SYS_ADMIN).
 //! Disc operations use SG_IO MMC commands via the sgdev/mmc modules.
 //! No external tool subprocesses.
-// Optical drive functions are unused in dev-usb-disc builds.
-#![cfg_attr(feature = "dev-usb-disc", allow(dead_code, unused_imports))]
 
 pub mod iso9660;
 pub mod mmc;
 pub mod sgdev;
-#[cfg(feature = "dev-usb-disc")]
-pub mod usb_disc;
 
 pub use iso9660::{IsoFile, SessionEntry};
 
@@ -181,7 +177,7 @@ pub fn find_profile_usb(
 /// Returns a human-readable disc capacity summary and the number of sessions still writable.
 /// Opens the device, reads disc info and MMC profile, then closes.
 /// On any error returns a conservative summary assuming CD-R limits.
-/// Not gated on dev-usb-disc — only called from non-dev WaitDisc tick.
+/// Called from the WaitDisc background tick.
 pub fn disc_capacity_summary(dev: &Path) -> (String, u16) {
     let sg = match SgDev::open(dev) {
         Ok(s) => s,
@@ -291,7 +287,7 @@ pub fn read_disc_sessions(dev: &Path) -> Result<Vec<SessionEntry>> {
 
 // ── Session write ─────────────────────────────────────────────────────────────
 
-/// Write a new SAO session to `dev`.
+/// Write a new TAO session to `dev`.
 /// `all_sessions` is prior sessions + the new one (last element = newest).
 /// Set `is_final` to close the disc after this session.
 /// Designed to be called from a background thread; sends result via `done`.
@@ -334,27 +330,30 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
             .unwrap_or(info.nwa)
     };
 
-    // OPC calibration
-    send_opc(&sg).context("OPC")?;
+    // OPC calibration — optional; virtual drives (cdemu) return ILLEGAL_REQUEST for this
+    // physical laser calibration command. Real M-Disc drives either support it or handle
+    // power calibration internally. Silently ignore failures.
+    let _ = send_opc(&sg);
 
-    // Configure SAO write parameters
+    // Configure TAO write parameters — optional; cdemu virtual drives may return
+    // ILLEGAL_REQUEST for MODE SELECT. Physical drives that don't support it use
+    // their own defaults. Silently ignore failures.
     let multi = if is_final {
         MultiSession::FinalSession
     } else {
         MultiSession::Open
     };
-    set_write_parameters(
+    let _ = set_write_parameters(
         &sg,
         &WriteParams {
-            write_type: WriteType::Sao,
+            write_type: WriteType::Tao,
             multi_session: multi,
             bufe: true,
         },
-    )
-    .context("SET WRITE PARAMETERS")?;
+    );
 
-    // Reserve track
-    reserve_track(&sg).context("RESERVE TRACK")?;
+    // Reserve track — optional; cdemu virtual drives may not require this.
+    let _ = reserve_track(&sg);
 
     // Build ISO image in memory (all sessions including new one)
     let image = iso9660::build_iso(sessions);

@@ -1,4 +1,4 @@
-.PHONY: ci nix-check iso dev-iso dev-iso-aarch64 proddbg-iso qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic list-usb write-usb write-usb-proddbg hash-iso verify-iso clean test fmt lint deny build-dev
+.PHONY: ci nix-check iso dev-iso dev-iso-aarch64 proddbg-iso qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-cdemu qemu-cdemu-sdl qemu-cdemu-nographic ssh-cdemu list-usb write-usb write-usb-proddbg hash-iso verify-iso clean test fmt lint deny build-dev
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -80,10 +80,16 @@ anodize-dev-aarch64.iso: $(NIX_SOURCES)
 anodize-proddbg.iso: $(NIX_SOURCES)
 	$(call nix-iso-build,proddbg-iso,anodize-proddbg.iso,linux/amd64,amd64)
 
+# cdemu dev ISO: dev-softhsm-usb + real SG_IO MMC path via cdemu SCSI passthrough.
+# Primary dev/CI testing ISO — exercises the same disc write code path as production.
+anodize-cdemu.iso: $(NIX_SOURCES)
+	$(call nix-iso-build,cdemu-iso,anodize-cdemu.iso,linux/amd64,amd64)
+
 iso:             anodize.iso
 dev-iso:         anodize-dev.iso
 dev-iso-aarch64: anodize-dev-aarch64.iso
 proddbg-iso:     anodize-proddbg.iso
+cdemu-iso:       anodize-cdemu.iso
 
 # Create a 64 MiB FAT USB image pre-loaded with a SoftHSM2 profile and a
 # pre-initialized SoftHSM2 token for dev-softhsm-usb testing.
@@ -179,13 +185,6 @@ QEMU_AARCH64_BASE = qemu-system-aarch64 \
 	  -no-reboot \
 	  -serial stdio
 
-# QEMU base with a second USB stick for dev-usb-disc testing.
-# fake-usb.img  → profile USB (/dev/sda in guest)
-# fake-disc-usb.img → disc USB (/dev/sdb in guest)
-QEMU_DEV_BASE = $(QEMU_BASE) \
-	  -drive file=fake-disc-usb.img,format=raw,if=none,id=usb1 \
-	  -device usb-storage,drive=usb1,bus=ehci.0
-
 qemu: qemu-sdl
 
 # SDL graphical window.  Serial console output also appears in the terminal
@@ -206,28 +205,6 @@ qemu-aarch64: anodize-dev-aarch64.iso fake-usb.img
 # aarch64 serial console only.  Ctrl-A X to quit.
 qemu-aarch64-nographic: anodize-dev-aarch64.iso fake-usb.img
 	$(subst -serial stdio,-nographic,$(QEMU_AARCH64_BASE))
-
-# Dev-mode QEMU targets: boot the dev ISO with both profile USB and disc USB attached.
-QEMU_DEV_BASE_ISO = $(subst -cdrom anodize.iso,-cdrom anodize-dev.iso,$(QEMU_DEV_BASE))
-
-qemu-dev: qemu-dev-sdl
-
-qemu-dev-sdl: anodize-dev.iso fake-usb.img fake-disc-usb.img
-	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
-	$(QEMU_DEV_BASE_ISO) -display $(QEMU_DISPLAY) -vga std
-
-# No-graphic mode — serial console only, no VGA rendering.  Ctrl-A X to quit.
-qemu-dev-nographic: anodize-dev.iso fake-usb.img fake-disc-usb.img
-	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
-	$(subst -serial stdio,-nographic,$(QEMU_DEV_BASE_ISO))
-
-# 64 MiB FAT image pre-marked as a disc USB for dev-usb-disc testing.
-# Requires mtools (mcopy).  Only built once — delete to recreate.
-fake-disc-usb.img:
-	truncate -s 64M $@
-	mkfs.vfat $@
-	printf 'disc-usb-dev' | mcopy -i $@ - ::ANODIZE_DISC_ID
-	@echo "$@ ready"
 
 # ---------------------------------------------------------------------------
 # USB write target — write anodize.iso to a USB stick identified by serial
@@ -319,19 +296,78 @@ verify-iso: anodize.iso.sha256
 		echo "FAIL: expected $$expected, got $$actual" >&2; exit 1; \
 	fi
 
-# Build anodize-ceremony and anodize-sentinel with all dev features enabled
-# (never use in a real ceremony).
-# dev-usb-disc:    USB stick as M-Disc substitute
-# dev-softhsm-usb: SoftHSM2 token directory on profile USB as HSM backend
+# ── cdemu-based dev targets ───────────────────────────────────────────────────
 #
-# To run the sentinel locally without a full ISO boot:
-#   mkdir -p /tmp/anodize
-#   ./target/debug/anodize-sentinel --lock-file /tmp/anodize/ceremony.lock
+# Primary dev/CI testing path.  The entire cdemu stack (vhba kernel module +
+# cdemu-daemon + blank BD-R setup) runs *inside* the QEMU guest — no host
+# modifications or daemons required.
+#
+# QEMU user-mode networking forwards host localhost:2222 → guest :22 so the
+# dev ISO's SSH server is reachable without any host tap/bridge setup.
+# Connect with: make ssh-cdemu  (or: ssh -p 2222 ceremony@localhost)
+#
+# The BD-R image is stored on a virtio-9p share: dev-disc/test-bdr.img
+#
+# One-time setup:
+#   make fake-usb.img        # SoftHSM2 profile USB (PIN: 123456)
+#   make anodize-cdemu.iso   # dev ISO — first build slow, cached after
+#
+# Each dev session:
+#   make qemu-cdemu          # start VM in SDL window
+#   make ssh-cdemu           # (separate terminal) SSH into the running VM
+
+# Host directory shared into the guest via virtio-9p.
+# Inspect dev-disc/test-bdr.img after a ceremony session.
+DEV_DISC_DIR ?= $(CURDIR)/dev-disc
+
+# SSH port forwarded from host localhost to guest sshd.
+CDEMU_SSH_PORT ?= 2222
+
+# cdemu QEMU: cdemu ISO + SoftHSM USB + 9p share + user-mode networking.
+# The cdemu stack runs inside the guest — no host setup required.
+# Serial output also goes to stdio so boot messages are visible.
+QEMU_CDEMU_BASE = qemu-system-x86_64 -enable-kvm -machine pc -cpu host -m 2G -smp 2 \
+	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+	  -drive if=pflash,format=raw,file=/tmp/anodize-ovmf-vars.fd \
+	  -cdrom anodize-cdemu.iso -no-reboot \
+	  -drive file=fake-usb.img,format=raw,if=none,id=usb0 \
+	  -device usb-ehci,id=ehci \
+	  -device usb-storage,drive=usb0,bus=ehci.0 \
+	  -fsdev local,security_model=none,id=devdisc,path=$(DEV_DISC_DIR) \
+	  -device virtio-9p-pci,id=fs0,fsdev=devdisc,mount_tag=dev-disc \
+	  -netdev user,id=net0,hostfwd=tcp::$(CDEMU_SSH_PORT)-:22 \
+	  -device virtio-net-pci,netdev=net0 \
+	  -serial stdio
+
+qemu-cdemu: qemu-cdemu-sdl
+
+qemu-cdemu-sdl: anodize-cdemu.iso fake-usb.img
+	mkdir -p $(DEV_DISC_DIR)
+	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
+	$(QEMU_CDEMU_BASE) -display sdl -vga std
+
+qemu-cdemu-nographic: anodize-cdemu.iso fake-usb.img
+	mkdir -p $(DEV_DISC_DIR)
+	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
+	$(subst -serial stdio,-nographic,$(QEMU_CDEMU_BASE))
+
+# Wait for SSH to be ready, then open an interactive session as the ceremony user.
+# Run this in a second terminal while qemu-cdemu-sdl is running.
+# Uses scripts/dev-ssh-key (committed dev-only keypair, localhost access only).
+ssh-cdemu:
+	@echo "Waiting for SSH on localhost:$(CDEMU_SSH_PORT)..."
+	@until nc -z localhost $(CDEMU_SSH_PORT) 2>/dev/null; do sleep 1; done
+	@echo "Connected."
+	ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+	    -i $(CURDIR)/scripts/dev-ssh-key \
+	    -p $(CDEMU_SSH_PORT) ceremony@localhost
+
+# Build anodize-ceremony with dev-softhsm-usb (never use in a real ceremony).
 build-dev:
-	cargo build -p anodize-tui --features dev-usb-disc,dev-softhsm-usb
+	cargo build -p anodize-tui --features dev-softhsm-usb
 
 clean:
-	rm -f anodize.iso anodize-dev.iso anodize-dev-aarch64.iso anodize-proddbg.iso anodize.iso.sha256 fake-usb.img fake-disc-usb.img /tmp/anodize-ovmf-vars.fd
+	rm -rf anodize.iso anodize-dev.iso anodize-dev-aarch64.iso anodize-proddbg.iso anodize-cdemu.iso anodize.iso.sha256 fake-usb.img dev-disc /tmp/anodize-ovmf-vars.fd
 
 # Inner-loop shortcuts (no Docker overhead)
 fmt:
