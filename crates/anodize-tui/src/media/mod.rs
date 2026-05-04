@@ -160,8 +160,8 @@ pub fn find_profile_usb(
         }
         match mount_usb(dev, mountpoint) {
             Err(e) => {
-                tracing::debug!("find_profile_usb: mount {} failed: {e}", dev.display());
-                mount_errors.push(format!("{}: {e}", dev.display()));
+                tracing::debug!("find_profile_usb: mount {} failed: {e:#}", dev.display());
+                mount_errors.push(format!("{}: {e:#}", dev.display()));
                 continue;
             }
             Ok(()) => {
