@@ -236,9 +236,9 @@ in
   # ── tmpfiles: runtime directories for the ceremony binary ─────────────────
 
   systemd.tmpfiles.rules = [
-    "d /run/anodize         0755 ceremony ceremony -"
-    "d /run/anodize/usb     0700 ceremony ceremony -"
-    "d /run/anodize/staging 0700 ceremony ceremony -"
+    "d /run/anodize         0755 ceremony users -"
+    "d /run/anodize/usb     0700 ceremony users -"
+    "d /run/anodize/staging 0700 ceremony users -"
   ];
 
   # ── Ceremony user ─────────────────────────────────────────────────────────
