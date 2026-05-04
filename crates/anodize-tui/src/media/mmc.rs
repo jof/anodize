@@ -2,8 +2,6 @@
 //!
 //! References: MMC-6 (INCITS 505), ECMA-365.
 //! Timeouts are generous — write operations on BD-R can be slow.
-// Entire module is unused in dev-usb-disc builds; suppress dead_code lint.
-#![cfg_attr(feature = "dev-usb-disc", allow(dead_code))]
 
 use anyhow::{bail, Context, Result};
 
@@ -53,13 +51,19 @@ pub fn read_disc_info(dev: &SgDev) -> Result<DiscInfo> {
         2 => DiscStatus::Complete,
         x => DiscStatus::Other(x),
     };
-    let sessions_lo = buf[3];
-    let first_track = buf[4];
-    let last_track_l = buf[5];
-    let sessions = if n >= 35 {
+    let first_track = buf[3];
+    let sessions_lo = buf[4];
+    let last_track_l = buf[6];
+    let raw_sessions = if n >= 35 {
         (buf[9] as u16) << 8 | sessions_lo as u16
     } else {
         sessions_lo as u16
+    };
+    // MMC includes the incomplete/empty "next" session in the count for
+    // non-finalized discs.  Subtract it so `sessions` = complete sessions only.
+    let sessions = match disc_status {
+        DiscStatus::Complete => raw_sessions,
+        _ => raw_sessions.saturating_sub(1),
     };
 
     // Last Session Lead-in Start Address / Next Writable Address
@@ -116,7 +120,10 @@ pub fn read_track_info(dev: &SgDev, track: u8) -> Result<TrackInfo> {
 
 #[derive(Debug, Clone, Copy)]
 pub enum WriteType {
-    Sao = 0x01,
+    /// Track-at-Once (TAO): write_type=0x01 in MMC mode page 0x05.
+    /// Tracks are written one at a time; sessions are closed explicitly via
+    /// CLOSE TRACK SESSION. This is the correct value for multi-session BD-R.
+    Tao = 0x01,
     #[allow(dead_code)]
     Dao = 0x02,
 }
@@ -138,12 +145,13 @@ pub struct WriteParams {
 }
 
 /// SET WRITE PARAMETERS via MODE SELECT 10 (0x55) with page 0x05.
+/// Configures TAO/DAO write type and multi-session behaviour before each session write.
 pub fn set_write_parameters(dev: &SgDev, p: &WriteParams) -> Result<()> {
-    // Mode parameter header (8 bytes) + mode page 0x05 (50 bytes) = 58 bytes
-    let mut data = [0u8; 58];
+    // Mode parameter header (8 bytes) + mode page 0x05 (2 hdr + 50 content = 52) = 60 bytes
+    let mut data = [0u8; 60];
 
     // Mode Parameter Header (10-byte form)
-    let param_len: u16 = 56; // total data length minus 2-byte length field
+    let param_len: u16 = 58; // total data length minus 2-byte length field
     data[0] = (param_len >> 8) as u8;
     data[1] = (param_len & 0xFF) as u8;
     // bytes 2-7: reserved
@@ -152,11 +160,10 @@ pub fn set_write_parameters(dev: &SgDev, p: &WriteParams) -> Result<()> {
     let page = &mut data[8..];
     page[0] = 0x05; // page code
     page[1] = 0x32; // page length = 50 bytes
-    page[2] = (if p.bufe { 0x40 } else { 0x00 })   // BUFE bit
-            | ((p.multi_session as u8) << 6)         // LS_V + multi-session
-            | (p.write_type as u8); // write type
-                                    // byte 3: test write=0, fgm=0, copy=0, track mode
-    page[3] = 0x09; // track mode = 0x09 for data (mode 1)
+    page[2] = (if p.bufe { 0x40 } else { 0x00 })   // BUFE bit (bit 6)
+            | (p.write_type as u8);                   // write type (bits 0-3)
+    page[3] = ((p.multi_session as u8) << 6)          // multisession (bits 6-7)
+            | 0x09;                                    // track mode (bits 0-3)
                     // byte 4: data block type = 0x08 (2048-byte mode-1 data)
     page[4] = 0x08;
     // bytes 5-7: reserved
@@ -237,23 +244,34 @@ pub fn write_sectors(dev: &SgDev, lba: u32, sectors: &[u8]) -> Result<()> {
 // ── Read ─────────────────────────────────────────────────────────────────────
 
 /// READ (10) (0x28) — read a contiguous run of 2048-byte sectors.
+/// Large reads are split into 64-sector (128 KiB) chunks to stay within
+/// the SG_IO / VHBA maximum transfer size.
 pub fn read_sectors(dev: &SgDev, lba: u32, buf: &mut [u8]) -> Result<()> {
     assert_eq!(buf.len() % 2048, 0);
-    let count = (buf.len() / 2048) as u16;
-    let cdb: [u8; 10] = [
-        0x28,
-        0x00,
-        (lba >> 24) as u8,
-        (lba >> 16) as u8,
-        (lba >> 8) as u8,
-        (lba & 0xFF) as u8,
-        0x00,
-        (count >> 8) as u8,
-        (count & 0xFF) as u8,
-        0x00,
-    ];
-    dev.cdb_in(cdb.as_ref(), buf, 60_000)
-        .with_context(|| format!("READ(10) lba={lba} count={count}"))?;
+    const CHUNK: usize = 64; // sectors per READ(10)
+    let total = buf.len() / 2048;
+    let mut off = 0usize;
+    while off < total {
+        let n = CHUNK.min(total - off) as u16;
+        let cur_lba = lba + off as u32;
+        let cdb: [u8; 10] = [
+            0x28,
+            0x00,
+            (cur_lba >> 24) as u8,
+            (cur_lba >> 16) as u8,
+            (cur_lba >> 8) as u8,
+            (cur_lba & 0xFF) as u8,
+            0x00,
+            (n >> 8) as u8,
+            (n & 0xFF) as u8,
+            0x00,
+        ];
+        let start = off * 2048;
+        let end = start + n as usize * 2048;
+        dev.cdb_in(&cdb, &mut buf[start..end], 60_000)
+            .with_context(|| format!("READ(10) lba={cur_lba} count={n}"))?;
+        off += n as usize;
+    }
     Ok(())
 }
 
