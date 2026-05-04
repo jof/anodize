@@ -119,11 +119,15 @@ send "123456\r"
 
 # --- WaitDisc ---
 # cdemu-daemon (user service) creates blank BD-R after session D-Bus is ready.
-# Match "ready" from "Blank disc in /dev/sr0  (BD-R: 0 used, 255 remaining)"
+# Match "/dev/sr" from "  Disc ready in /dev/sr1  (0 prior session(s), ...)"
+# Note: ratatui differential rendering skips unchanged chars — "ready" is NOT
+# contiguous in the byte stream (the 'e' and 'd' in "appendable" survive from
+# the prior "No appendable disc detected." render).  "/dev/sr" is safe because
+# all 7 bytes differ from the old content at those positions.
 set timeout 120
 expect {
     timeout { puts "\n\[FAIL\] WaitDisc: timed out — cdemu/vhba may not have initialized"; exit 1 }
-    "ready" {
+    "/dev/sr" {
         puts "\n\[PASS\] Disc detected (cdemu BD-R ready)"
     }
 }

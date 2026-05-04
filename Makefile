@@ -342,12 +342,12 @@ QEMU_CDEMU_BASE = qemu-system-x86_64 -enable-kvm -machine pc -cpu host -m 2G -sm
 qemu-cdemu: qemu-cdemu-sdl
 
 qemu-cdemu-sdl: anodize-cdemu.iso fake-usb.img
-	mkdir -p $(DEV_DISC_DIR)
+	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_CDEMU_BASE) -display sdl -vga std
 
 qemu-cdemu-nographic: anodize-cdemu.iso fake-usb.img
-	mkdir -p $(DEV_DISC_DIR)
+	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(subst -serial stdio,-nographic,$(QEMU_CDEMU_BASE))
 
