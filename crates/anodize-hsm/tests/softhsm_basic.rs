@@ -60,7 +60,8 @@ fn list_slots_returns_at_least_one() {
 
     init_test_token("anodize-test");
 
-    let slots = Pkcs11Hsm::list_slots(&module).expect("list_slots failed");
+    let hsm = Pkcs11Hsm::new(&module, "anodize-test").expect("open session");
+    let slots = hsm.list_slots().expect("list_slots failed");
 
     assert!(!slots.is_empty(), "expected at least one slot with a token");
     println!("Found {} slot(s) with token", slots.len());

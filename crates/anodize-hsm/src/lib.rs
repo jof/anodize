@@ -29,6 +29,21 @@ pub enum HsmError {
 
 pub type Result<T> = std::result::Result<T, HsmError>;
 
+/// Diagnostic info for a single PKCS#11 slot + token pair.
+#[derive(Debug, Clone)]
+pub struct SlotTokenInfo {
+    pub slot_id: u64,
+    pub token_label: String,
+    pub model: String,
+    pub serial_number: String,
+    pub login_required: bool,
+    pub user_pin_initialized: bool,
+    pub user_pin_locked: bool,
+    pub min_pin_len: usize,
+    pub max_pin_len: usize,
+    pub token_initialized: bool,
+}
+
 /// Opaque handle to a key pair on the HSM.
 ///
 /// Stores the private key handle (always present) and, when the pair was
@@ -83,7 +98,6 @@ pub trait Hsm: Send {
 // ---------------------------------------------------------------------------
 
 pub struct Pkcs11Hsm {
-    #[allow(dead_code)]
     ctx: Pkcs11,
     session: Option<Session>,
 }
@@ -124,17 +138,31 @@ impl Pkcs11Hsm {
     }
 
     /// List all slots with a token present — useful for diagnostics and tests.
-    pub fn list_slots(module_path: &std::path::Path) -> Result<Vec<cryptoki::slot::Slot>> {
-        let ctx = Pkcs11::new(module_path)?;
-        match ctx.initialize(CInitializeArgs::OsThreads) {
-            Ok(())
-            | Err(cryptoki::error::Error::Pkcs11(
-                cryptoki::error::RvError::CryptokiAlreadyInitialized,
-                _,
-            )) => {}
-            Err(e) => return Err(HsmError::Pkcs11(e)),
+    pub fn list_slots(&self) -> Result<Vec<cryptoki::slot::Slot>> {
+        Ok(self.ctx.get_slots_with_token()?)
+    }
+
+    /// Return detailed slot + token info for every populated slot.
+    pub fn list_slot_details(&self) -> Result<Vec<SlotTokenInfo>> {
+        let slots = self.ctx.get_slots_with_token()?;
+        let mut result = Vec::new();
+        for slot in slots {
+            if let Ok(ti) = self.ctx.get_token_info(slot) {
+                result.push(SlotTokenInfo {
+                    slot_id: slot.id(),
+                    token_label: ti.label().trim().to_string(),
+                    model: ti.model().trim().to_string(),
+                    serial_number: ti.serial_number().trim().to_string(),
+                    login_required: ti.login_required(),
+                    user_pin_initialized: ti.user_pin_initialized(),
+                    user_pin_locked: ti.user_pin_locked(),
+                    min_pin_len: ti.min_pin_length(),
+                    max_pin_len: ti.max_pin_length(),
+                    token_initialized: ti.token_initialized(),
+                });
+            }
         }
-        Ok(ctx.get_slots_with_token()?)
+        Ok(result)
     }
 
     fn session(&self) -> &Session {
@@ -450,6 +478,9 @@ enum HsmRequest {
         key: KeyHandle,
         tx: std::sync::mpsc::SyncSender<Result<Vec<u8>>>,
     },
+    ListSlotDetails {
+        tx: std::sync::mpsc::SyncSender<Result<Vec<SlotTokenInfo>>>,
+    },
 }
 
 fn actor_loop(mut hsm: Pkcs11Hsm, rx: std::sync::mpsc::Receiver<HsmRequest>) {
@@ -478,6 +509,9 @@ fn actor_loop(mut hsm: Pkcs11Hsm, rx: std::sync::mpsc::Receiver<HsmRequest>) {
             HsmRequest::PublicKeyDer { key, tx } => {
                 let _ = tx.send(hsm.public_key_der(key));
             }
+            HsmRequest::ListSlotDetails { tx } => {
+                let _ = tx.send(hsm.list_slot_details());
+            }
         }
     }
 }
@@ -502,6 +536,12 @@ impl HsmActor {
             .spawn(move || actor_loop(hsm, rx))
             .expect("failed to spawn HSM actor thread");
         Self { tx }
+    }
+
+    /// Return detailed slot + token info for every populated slot,
+    /// routed through the actor thread.
+    pub fn list_slot_details(&self) -> Result<Vec<SlotTokenInfo>> {
+        self.call(|tx| HsmRequest::ListSlotDetails { tx })
     }
 
     fn call<T: Send + 'static>(
