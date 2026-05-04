@@ -250,30 +250,84 @@ impl UtilitiesMode {
             return lines;
         };
 
+        let cfg_token = profile.hsm.token_label.as_str();
+        let cfg_key = profile.hsm.key_label.as_str();
+        let cfg_spec = format!("{:?}", profile.hsm.key_spec);
+        let logged_in = app.actor.is_some();
+
         lines.push(format!("  Module: {}", profile.hsm.module_path.display()));
-        lines.push(format!("  Token label: {}", profile.hsm.token_label));
-        lines.push(format!("  Key label: {}", profile.hsm.key_label));
-        lines.push(format!("  Key spec: {:?}", profile.hsm.key_spec));
         lines.push(String::new());
 
-        // List slots
-        match anodize_hsm::Pkcs11Hsm::list_slots(&profile.hsm.module_path) {
+        let Some(ref actor) = app.actor else {
+            lines.push("  HSM not connected — log in first to browse slots.".into());
+            return lines;
+        };
+
+        match actor.list_slot_details() {
             Ok(slots) => {
-                lines.push(format!("  Slots with tokens: {}", slots.len()));
-                for (i, slot) in slots.iter().enumerate() {
-                    lines.push(format!("    Slot {i}: {:?}", slot));
+                if slots.is_empty() {
+                    lines.push("  (no slots with tokens found)".into());
+                }
+                for (i, si) in slots.iter().enumerate() {
+                    let is_active = si.token_label == cfg_token;
+                    let tag = if is_active { "  ★ " } else { "    " };
+
+                    lines.push(format!("{tag}Slot {i}  (id {}):", si.slot_id));
+                    lines.push(format!("{tag}└─ Token: \"{}\"", si.token_label));
+
+                    if !si.model.is_empty() {
+                        lines.push(format!("{tag}   ├─ Model: {}", si.model));
+                    }
+                    if !si.serial_number.is_empty() {
+                        lines.push(format!("{tag}   ├─ Serial: {}", si.serial_number));
+                    }
+
+                    // PIN status
+                    let pin_status = if si.user_pin_locked {
+                        "LOCKED"
+                    } else if si.user_pin_initialized {
+                        "initialized"
+                    } else {
+                        "not initialized"
+                    };
+                    lines.push(format!(
+                        "{tag}   ├─ User PIN: {}  ({}-{} chars)",
+                        pin_status, si.min_pin_len, si.max_pin_len
+                    ));
+                    lines.push(format!(
+                        "{tag}   ├─ Login required: {}",
+                        if si.login_required { "yes" } else { "no" }
+                    ));
+
+                    if is_active {
+                        lines.push(format!(
+                            "{tag}   ├─ Session: {}",
+                            if logged_in {
+                                "logged in"
+                            } else {
+                                "not logged in"
+                            }
+                        ));
+                        lines.push(format!(
+                            "{tag}   └─ Key: \"{}\" ({})",
+                            cfg_key, cfg_spec
+                        ));
+                        lines.push(format!(
+                            "{tag}      └─ Private key protected by User PIN"
+                        ));
+                    } else {
+                        lines.push(format!("{tag}   └─ (not the configured token)"));
+                    }
+
+                    if i + 1 < slots.len() {
+                        lines.push(String::new());
+                    }
                 }
             }
             Err(e) => {
                 lines.push(format!("  Slot enumeration failed: {e}"));
             }
         }
-
-        lines.push(String::new());
-        lines.push(format!(
-            "  HSM actor active: {}",
-            if app.actor.is_some() { "yes" } else { "no" }
-        ));
 
         lines
     }
