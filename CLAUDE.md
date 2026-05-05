@@ -17,14 +17,18 @@ make ci      # full CI job locally via act + Docker
 make build-dev
 
 # ISO builds — Nix in Docker, first run 10–30 min, cached after
-make anodize.iso       # production ISO (YubiHSM + real optical drive)
-make anodize-cdemu.iso # dev ISO (SoftHSM2 USB + cdemu inside the VM)
+# Two types (prod / dev) × two architectures (amd64 / arm64)
+make prod-amd64        # production ISO (YubiHSM + real optical drive)
+make dev-amd64         # dev ISO (SoftHSM2 USB + cdemu inside the VM)
+make dev-arm64         # dev ISO for Apple Silicon
 
 # QEMU dev loop — requires dev ISO and fake USB; no host cdemu setup needed
 make fake-usb.img          # 64 MiB FAT profile USB, SoftHSM2 token, PIN: 123456
-make qemu-cdemu-nographic  # boot dev ISO (Ctrl-A X to quit)
-make qemu-cdemu-sdl        # same with SDL graphics window
+make qemu-dev-nographic    # boot dev ISO amd64 (Ctrl-A X to quit)
+make qemu-dev-sdl          # same with SDL graphics window
+make qemu-aarch64          # boot dev ISO arm64 (Apple Silicon via HVF)
 make qemu-nographic        # boot production ISO (no-graphics)
+make ssh-dev               # SSH into running dev VM
 
 # After a dev session, inspect the BD-R disc image on the host:
 ls dev-disc/test-bdr.img
@@ -118,15 +122,18 @@ The cdemu dev ISO exercises the real SG_IO MMC disc write path (mmc.rs + sgdev.r
 
 ```sh
 make fake-usb.img        # profile USB with SoftHSM2 token (dev PIN: 123456)
-make anodize-cdemu.iso   # dev ISO — first run is slow, cached after
+make dev-amd64           # dev ISO — first run is slow, cached after
+# or: make dev-arm64     # for Apple Silicon
 ```
 
 **Each dev session** (no host cdemu/vhba setup needed — runs inside the VM):
 
 ```sh
-make qemu-cdemu-nographic     # Ctrl-A X to quit
+make qemu-dev-nographic       # Ctrl-A X to quit
 # or
-make qemu-cdemu-sdl           # SDL window
+make qemu-dev-sdl             # SDL window
+# Apple Silicon:
+make qemu-aarch64             # near-native speed via HVF
 ```
 
 **After a session**, inspect the BD-R image on your laptop:

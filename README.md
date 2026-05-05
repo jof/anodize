@@ -72,7 +72,8 @@ anodize/
 │   └── anodize-tui/              # ceremony binary (anodize-ceremony) + terminal gatekeeper (anodize-sentinel), ship on ISO
 │       └── src/media/            # ISO 9660 writer, SG_IO MMC, USB/optical discovery
 ├── nix/
-│   └── iso.nix                   # NixOS module for the live image
+│   ├── iso.nix                   # NixOS base module for all ISO images
+│   └── cdemu.nix                 # Dev ISO overlay — cdemu, SSH, networking
 ├── tests/
 │   └── softhsm-fixtures/         # softhsm2.conf template for integration tests
 └── docs/
@@ -112,9 +113,14 @@ The optical disc write path (SG_IO MMC via `mmc.rs`/`sgdev.rs`) is **unchanged**
 make fake-usb.img
 
 # Build dev ISO and run in QEMU — no host cdemu setup needed:
-make anodize-cdemu.iso     # dev ISO (NixOS, dev-softhsm-usb, cdemu inside VM)
-make qemu-cdemu-nographic  # boot: vhba + cdemu-daemon start inside the guest
-make qemu-cdemu-sdl        # same but SDL window
+make dev-amd64             # dev ISO (NixOS, dev-softhsm-usb, cdemu inside VM)
+make qemu-dev-nographic    # boot: vhba + cdemu-daemon start inside the guest
+make qemu-dev-sdl          # same but SDL window
+make dev-arm64             # arm64 dev ISO (native Apple Silicon via HVF)
+make qemu-aarch64          # boot arm64 dev ISO — near-native speed on M-series
+
+# SSH into the running dev VM (works for both amd64 and arm64):
+make ssh-dev
 
 # After a session, the BD-R disc image is available on the host:
 ls dev-disc/test-bdr.img
@@ -122,13 +128,21 @@ ls dev-disc/test-bdr.img
 
 ## Reproducible builds
 
-`nix build .#iso` produces a bootable NixOS ISO. The Nix store is content-addressed, so two machines building from the same flake lock produce byte-identical images.
+Two image types, each built for amd64 and arm64:
 
-The ISO is intentionally minimal: no network drivers, no SSH, no package manager at runtime. It boots directly to the ceremony TUI. The binary auto-discovers USB sticks and optical drives — no arguments needed.
+| Image | Description | Make target |
+|---|---|---|
+| **prod** | Minimal, security-focused: no network, no SSH, no cdemu | `make prod-amd64`, `make prod-arm64` |
+| **dev** | Feature-rich: cdemu, SSH, DHCP, 9p share, SoftHSM2 | `make dev-amd64`, `make dev-arm64` |
+
+The Nix store is content-addressed, so two machines building from the same flake lock produce byte-identical images. Production ISOs require a clean git tree (override with `ALLOW_DIRTY=1`).
+
+The prod ISO is intentionally minimal: no network drivers, no SSH, no package manager at runtime. It boots directly to the ceremony TUI. The binary auto-discovers USB sticks and optical drives — no arguments needed.
 
 ```sh
 make nix-check      # nix build .#anodize-ceremony  (via act + Docker, same as make ci)
-make nix-iso        # nix build .#iso               (nixos/nix image, --privileged, release-only)
+make prod-amd64     # production ISO (amd64)
+make dev-arm64      # dev ISO for Apple Silicon
 ```
 
 ## Status
