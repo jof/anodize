@@ -1,6 +1,9 @@
-# Anodize ceremony ISO — NixOS-based appliance image.
+# Anodize ceremony ISO — NixOS-based appliance image (base module).
 #
-# Security properties enforced here:
+# Shared by both prod and dev ISO configurations in flake.nix.
+# Dev ISOs layer cdemu.nix on top, which enables networking, SSH, and cdemu.
+#
+# Security properties enforced here (prod configuration):
 #   - No network stack at runtime
 #   - Ephemeral /tmp in RAM (tmpfs); no writable persistent storage
 #   - Read-only squashfs root (inherent to ISO image builds)

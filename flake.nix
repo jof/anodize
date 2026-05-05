@@ -72,10 +72,10 @@
           cargoExtraArgs = "--package anodize-tui";
         });
 
-        # dev-softhsm-usb: SoftHSM2 on profile USB replaces YubiHSM2 in dev/QEMU.
+        # Dev binary: SoftHSM2 on profile USB replaces YubiHSM2 in dev/QEMU.
         # Exercises the real SG_IO MMC disc path via cdemu SCSI passthrough.
-        # For development and testing only — never ship in a real ceremony ISO.
-        anodize-ceremony-cdemu = craneLib.buildPackage (commonArgs // {
+        # For development and testing only — never ship in a production ISO.
+        anodize-ceremony-dev = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname         = "anodize-ceremony";
           version       = "0.1.0";
@@ -85,28 +85,15 @@
       in
       {
         packages = {
-          inherit anodize-ceremony anodize-ceremony-cdemu;
+          inherit anodize-ceremony anodize-ceremony-dev;
           default = anodize-ceremony;
 
-          # nix build .#iso  →  bootable ceremony ISO image (x86_64-linux only).
-          # Build this via Docker on any host: make anodize.iso
-          iso = self.nixosConfigurations.ceremony-iso.config.system.build.isoImage;
-
-          # nix build .#dev-iso  →  dev ISO with dev-usb-disc feature (USB as disc).
-          # Build this via Docker on any host: make anodize-dev.iso
-          dev-iso = self.nixosConfigurations.ceremony-dev-iso.config.system.build.isoImage;
-
-          # nix build .#dev-iso-aarch64  →  dev ISO for Apple Silicon (aarch64).
-          # Build this via Docker on any host: make anodize-dev-aarch64.iso
-          dev-iso-aarch64 = self.nixosConfigurations.ceremony-dev-iso-aarch64.config.system.build.isoImage;
-
-          # nix build .#proddbg-iso  →  debug ISO with SSH/DHCP for hardware iteration.
-          # Build this via Docker on any host: make anodize-proddbg.iso
-          proddbg-iso = self.nixosConfigurations.ceremony-proddbg-iso.config.system.build.isoImage;
-
-          # nix build .#cdemu-iso  →  dev ISO with dev-softhsm-usb + cdemu BD-R.
-          # Build this via Docker on any host: make anodize-cdemu.iso
-          cdemu-iso = self.nixosConfigurations.ceremony-cdemu-iso.config.system.build.isoImage;
+          # Two image types (prod / dev) × two architectures (amd64 / arm64).
+          # Build via Docker on any host: make prod-amd64, make dev-arm64, etc.
+          prod-amd64 = self.nixosConfigurations.ceremony-prod-amd64.config.system.build.isoImage;
+          prod-arm64 = self.nixosConfigurations.ceremony-prod-arm64.config.system.build.isoImage;
+          dev-amd64  = self.nixosConfigurations.ceremony-dev-amd64.config.system.build.isoImage;
+          dev-arm64  = self.nixosConfigurations.ceremony-dev-arm64.config.system.build.isoImage;
         };
 
         # Development shell — Rust toolchain comes from rustup (rust-toolchain.toml).
@@ -127,13 +114,17 @@
     )
 
     # ---------------------------------------------------------------------------
-    # NixOS configuration for the bootable ceremony ISO
+    # NixOS ISO configurations — prod (locked-down) and dev (feature-rich)
+    #
+    # Prod: no network, no SSH, no cdemu, no debug tools.
+    # Dev:  cdemu (virtual BD-R), SSH, DHCP, 9p share, diagnostic tools.
     # ---------------------------------------------------------------------------
     // {
-      nixosConfigurations.ceremony-iso = nixpkgs.lib.nixosSystem {
+      # ── Production ISOs ──────────────────────────────────────────────────────
+
+      nixosConfigurations.ceremony-prod-amd64 = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
 
-        # Pass the compiled ceremony binary into the NixOS module.
         specialArgs = {
           anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony;
           serialPort = "ttyS0";
@@ -143,20 +134,43 @@
           "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
           ./nix/iso.nix
           {
-            # Pin the NixOS revision to the git commit so the system closure
-            # is identical across builds from the same commit.
             system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
+            image.fileName = nixpkgs.lib.mkForce "anodize-prod-amd64";
           }
         ];
       };
 
-      # cdemu ISO: dev-softhsm-usb binary + real SG_IO path.
-      # Optical writes go through cdemu SCSI generic passthrough (real MMC commands).
-      nixosConfigurations.ceremony-cdemu-iso = nixpkgs.lib.nixosSystem {
+      nixosConfigurations.ceremony-prod-arm64 = nixpkgs.lib.nixosSystem {
+        system = "aarch64-linux";
+
+        specialArgs = {
+          anodize-ceremony = self.packages.aarch64-linux.anodize-ceremony;
+          serialPort = "ttyAMA0";
+        };
+
+        modules = [
+          "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
+          ./nix/iso.nix
+          {
+            system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
+            image.fileName    = nixpkgs.lib.mkForce "anodize-prod-arm64";
+            isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-PROD-A64";
+
+            # aarch64 QEMU virt machine exposes a PL011 UART at ttyAMA0.
+            boot.kernelParams = [ "console=ttyAMA0,115200" ];
+          }
+        ];
+      };
+
+      # ── Development ISOs ─────────────────────────────────────────────────────
+      # Built with dev-softhsm-usb so SoftHSM2 on the profile USB replaces
+      # YubiHSM2.  cdemu provides virtual BD-R via SCSI generic passthrough.
+
+      nixosConfigurations.ceremony-dev-amd64 = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
 
         specialArgs = {
-          anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony-cdemu;
+          anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony-dev;
           serialPort = "ttyS0";
           inherit cdemu-src;
         };
@@ -167,12 +181,9 @@
           ./nix/cdemu.nix
           {
             system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
-            image.fileName    = nixpkgs.lib.mkForce "anodize-cdemu";
-            isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-CDEMU";
+            image.fileName    = nixpkgs.lib.mkForce "anodize-dev-amd64";
+            isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-DEV-AMD";
 
-            # Route kernel + early-userspace output to ttyS0 so the dev warning
-            # printed by anodize-ceremony (before TUI raw mode) appears on serial.
-            # console=tty0 keeps framebuffer output as well.
             boot.kernelParams = [ "console=ttyS0,115200" "console=tty0" ];
 
             environment.variables.ANODIZE_BUILD_TYPE = "dev";
@@ -180,78 +191,25 @@
         ];
       };
 
-      # Production debug ISO — real hardware support (YubiHSM 2) with DHCP
-      # networking and SSH for remote iteration from a development workstation.
-      # SSH as ceremony → sentinel menu.  SSH as root → bash shell.
-      # Default password: anodize-debug (override via Crusoe/downstream branch).
-      nixosConfigurations.ceremony-proddbg-iso = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-
-        specialArgs = {
-          anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony;
-          serialPort = "ttyS0";
-        };
-
-        modules = [
-          "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
-          ./nix/iso.nix
-          {
-            system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
-            image.fileName    = nixpkgs.lib.mkForce "anodize-proddbg.iso";
-            isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-DBG";
-            boot.kernelParams = [ "console=tty0" "console=ttyS0,115200" ];
-
-            environment.variables.ANODIZE_BUILD_TYPE = "proddbg";
-
-            # Extra tools for network debugging.
-            environment.systemPackages = with nixpkgs.legacyPackages.x86_64-linux; [
-              iproute2   # ip addr, ip route
-              iputils    # ping
-            ];
-
-            # ── Network: DHCP on all discovered wired interfaces ──
-            networking.useDHCP = nixpkgs.lib.mkForce true;
-
-            # ── SSH: password auth for remote debugging ──
-            services.openssh = {
-              enable = nixpkgs.lib.mkForce true;
-              settings = {
-                PermitRootLogin = "yes";
-                PasswordAuthentication = true;
-              };
-            };
-
-            # ── Debug credentials ──
-            # ceremony → sentinel menu, root → bash shell.
-            users.users.ceremony.password = nixpkgs.lib.mkForce "anodize-debug";
-            users.users.root = {
-              hashedPassword = nixpkgs.lib.mkForce null;
-              password = "anodize-debug";
-            };
-          }
-        ];
-      };
-
-      # Development ISO for Apple Silicon Macs — runs at near-native speed via HVF.
-      # aarch64 QEMU virt machine exposes a PL011 UART at ttyAMA0, not a 16550 at ttyS0.
-      nixosConfigurations.ceremony-dev-iso-aarch64 = nixpkgs.lib.nixosSystem {
+      nixosConfigurations.ceremony-dev-arm64 = nixpkgs.lib.nixosSystem {
         system = "aarch64-linux";
 
         specialArgs = {
           anodize-ceremony = self.packages.aarch64-linux.anodize-ceremony-dev;
           serialPort = "ttyAMA0";
+          inherit cdemu-src;
         };
 
         modules = [
           "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
           ./nix/iso.nix
+          ./nix/cdemu.nix
           {
             system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
-            image.fileName    = nixpkgs.lib.mkForce "anodize-dev-aarch64.iso";
+            image.fileName    = nixpkgs.lib.mkForce "anodize-dev-arm64";
             isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-DEV-A64";
 
-            # Single console so all output reaches ttyAMA0 (PL011 UART) in
-            # QEMU nographic mode.
+            # aarch64 QEMU virt machine exposes a PL011 UART at ttyAMA0.
             boot.kernelParams = [ "console=ttyAMA0,115200" ];
 
             environment.variables.ANODIZE_BUILD_TYPE = "dev";

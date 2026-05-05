@@ -1,3 +1,10 @@
+# Dev ISO module — cdemu virtual optical drive + SSH + networking.
+#
+# Included by the dev ISO configurations in flake.nix (both amd64 and arm64).
+# Provides a virtual BD-R via cdemu SCSI generic passthrough so the real
+# SG_IO MMC disc write code path is exercised end-to-end without hardware.
+# Also enables SSH (key-based), DHCP networking, and a debug user.
+
 { config, lib, pkgs, cdemu-src, ... }:
 let
   # Build cdemu-daemon from the custom fork (multi-session recording fixes).
@@ -26,10 +33,10 @@ in
     SUBSYSTEM=="misc", KERNEL=="vhba_ctl", MODE="0660", GROUP="wheel"
   '';
 
-  # ── Networking (dev ISO only) ─────────────────────────────────────────────
+  # ── Networking (dev ISOs) ──────────────────────────────────────────────────
   networking.useDHCP = lib.mkForce true;
 
-  # ── SSH (dev ISO only) ────────────────────────────────────────────────────
+  # ── SSH (dev ISOs) ─────────────────────────────────────────────────────────
   services.openssh = {
     enable = lib.mkForce true;
     settings = {
@@ -53,7 +60,7 @@ in
     openssh.authorizedKeys.keyFiles = [ ../scripts/dev-ssh-key.pub ];
   };
 
-  # ── Diagnostic packages (dev ISO only) ───────────────────────────────────
+  # ── Diagnostic packages (dev ISOs) ────────────────────────────────────────
 
   environment.systemPackages = [ pkgs.sg3_utils ];
 
