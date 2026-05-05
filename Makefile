@@ -1,4 +1,4 @@
-.PHONY: ci nix-check iso dev-iso dev-iso-aarch64 proddbg-iso qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-cdemu qemu-cdemu-sdl qemu-cdemu-nographic ssh-cdemu list-usb write-usb write-usb-proddbg hash-iso verify-iso clean test fmt lint deny build-dev
+.PHONY: ci nix-check prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev list-usb write-usb hash-iso verify-iso clean test fmt lint deny build-dev
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -17,7 +17,7 @@ nix-check:
 # because Nix store paths are architecture-specific.
 #
 # On Apple Silicon the amd64 builds run under QEMU emulation inside Docker
-# and will be slow.  Use dev-iso-aarch64 + qemu-aarch64 for fast iteration.
+# and will be slow.  Use dev-arm64 + qemu-aarch64 for fast iteration.
 # ---------------------------------------------------------------------------
 
 # Pin the Docker image so builds use the same Nix binary across machines.
@@ -35,7 +35,7 @@ NIX_SANDBOX_FLAG :=
 endif
 
 # Source files that affect the ISO build — changing any of these triggers a rebuild.
-NIX_SOURCES := flake.nix flake.lock nix/iso.nix
+NIX_SOURCES := flake.nix flake.lock nix/iso.nix nix/cdemu.nix
 
 # $(call nix-iso-build, <flake-output>, <dest-file>, <docker-platform>, <arch-tag>)
 define nix-iso-build
@@ -55,10 +55,10 @@ define nix-iso-build
 	@echo "ISO ready: $(2)"
 endef
 
-# Production ISO (x86_64).
+# Production ISO (amd64).
 # Requires a clean git tree for bit-for-bit reproducibility.  Override with
 # ALLOW_DIRTY=1 during development.
-anodize.iso: $(NIX_SOURCES)
+anodize-prod-amd64.iso: $(NIX_SOURCES)
 ifeq ($(ALLOW_DIRTY),)
 	@if ! git diff --quiet HEAD 2>/dev/null; then \
 		echo "ERROR: Tracked files are modified.  Commit changes before building" >&2; \
@@ -66,30 +66,31 @@ ifeq ($(ALLOW_DIRTY),)
 		exit 1; \
 	fi
 endif
-	$(call nix-iso-build,iso,anodize.iso,linux/amd64,amd64)
+	$(call nix-iso-build,prod-amd64,anodize-prod-amd64.iso,linux/amd64,amd64)
 
-# Development ISO (x86_64), boots well in QEMU.
-anodize-dev.iso: $(NIX_SOURCES)
-	$(call nix-iso-build,dev-iso,anodize-dev.iso,linux/amd64,amd64)
+# Production ISO (arm64).
+anodize-prod-arm64.iso: $(NIX_SOURCES)
+ifeq ($(ALLOW_DIRTY),)
+	@if ! git diff --quiet HEAD 2>/dev/null; then \
+		echo "ERROR: Tracked files are modified.  Commit changes before building" >&2; \
+		echo "       the production ISO, or set ALLOW_DIRTY=1 to override." >&2; \
+		exit 1; \
+	fi
+endif
+	$(call nix-iso-build,prod-arm64,anodize-prod-arm64.iso,linux/arm64,arm64)
 
-# Development ISO (aarch64) — runs natively on Apple Silicon.
-anodize-dev-aarch64.iso: $(NIX_SOURCES)
-	$(call nix-iso-build,dev-iso-aarch64,anodize-dev-aarch64.iso,linux/arm64,arm64)
+# Development ISO (amd64) — cdemu, SSH, DHCP, 9p share.
+anodize-dev-amd64.iso: $(NIX_SOURCES)
+	$(call nix-iso-build,dev-amd64,anodize-dev-amd64.iso,linux/amd64,amd64)
 
-# Production debug ISO — real hardware + SSH/DHCP for remote debugging (x86_64).
-anodize-proddbg.iso: $(NIX_SOURCES)
-	$(call nix-iso-build,proddbg-iso,anodize-proddbg.iso,linux/amd64,amd64)
+# Development ISO (arm64) — runs natively on Apple Silicon via HVF.
+anodize-dev-arm64.iso: $(NIX_SOURCES)
+	$(call nix-iso-build,dev-arm64,anodize-dev-arm64.iso,linux/arm64,arm64)
 
-# cdemu dev ISO: dev-softhsm-usb + real SG_IO MMC path via cdemu SCSI passthrough.
-# Primary dev/CI testing ISO — exercises the same disc write code path as production.
-anodize-cdemu.iso: $(NIX_SOURCES)
-	$(call nix-iso-build,cdemu-iso,anodize-cdemu.iso,linux/amd64,amd64)
-
-iso:             anodize.iso
-dev-iso:         anodize-dev.iso
-dev-iso-aarch64: anodize-dev-aarch64.iso
-proddbg-iso:     anodize-proddbg.iso
-cdemu-iso:       anodize-cdemu.iso
+prod-amd64: anodize-prod-amd64.iso
+prod-arm64: anodize-prod-arm64.iso
+dev-amd64:  anodize-dev-amd64.iso
+dev-arm64:  anodize-dev-arm64.iso
 
 # Create a 64 MiB FAT USB image pre-loaded with a SoftHSM2 profile and a
 # pre-initialized SoftHSM2 token for dev-softhsm-usb testing.
@@ -120,13 +121,17 @@ fake-usb.img:
 	@echo "$@ ready (dev PIN: 123456)"
 
 # ---------------------------------------------------------------------------
-# QEMU development targets — boot a dev ISO locally.
+# QEMU targets — boot ISOs locally for testing and development.
 #
 # Firmware paths are auto-detected across macOS (Homebrew) and Linux (distro
 # packages).  Override OVMF_CODE / OVMF_VARS / AAVMF_CODE if your paths differ.
 #
 # x86_64 uses software emulation (tcg) on macOS and KVM on Linux by default.
 # Prefer qemu-aarch64 for day-to-day testing on Apple Silicon.
+#
+# Prod targets (qemu-sdl, qemu-nographic): boot the production ISO.
+# Dev targets  (qemu-dev-*, qemu-aarch64): boot the dev ISO with cdemu,
+#   SSH (port 2222), and a 9p share at dev-disc/.
 # ---------------------------------------------------------------------------
 
 OVMF_CODE ?= $(firstword $(wildcard \
@@ -159,56 +164,86 @@ QEMU_CPU     ?= host
 QEMU_DISPLAY ?= sdl
 endif
 
+# Host directory shared into the guest via virtio-9p (dev ISOs only).
+# Inspect dev-disc/test-bdr.img after a ceremony session.
+DEV_DISC_DIR ?= $(CURDIR)/dev-disc
+
+# SSH port forwarded from host localhost to guest sshd (dev ISOs only).
+DEV_SSH_PORT ?= 2222
+
+# Prod amd64 QEMU base command.
 QEMU_BASE = qemu-system-x86_64 \
 	  -machine pc,accel=$(QEMU_ACCEL) \
 	  -cpu $(QEMU_CPU) \
 	  -m 2G -smp 2 \
 	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 	  -drive if=pflash,format=raw,file=/tmp/anodize-ovmf-vars.fd \
-	  -cdrom anodize.iso -no-reboot \
+	  -cdrom anodize-prod-amd64.iso -no-reboot \
 	  -drive file=fake-usb.img,format=raw,if=none,id=usb0 \
 	  -device usb-ehci,id=ehci \
 	  -device usb-storage,drive=usb0,bus=ehci.0 \
 	  -serial stdio
 
-# aarch64 with HVF hardware acceleration — near-native speed on Apple Silicon.
+# Dev amd64 QEMU: dev ISO + SoftHSM USB + 9p share + user-mode networking.
+# The cdemu stack runs inside the guest — no host setup required.
+QEMU_DEV_BASE = qemu-system-x86_64 -enable-kvm -machine pc -cpu host -m 2G -smp 2 \
+	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+	  -drive if=pflash,format=raw,file=/tmp/anodize-ovmf-vars.fd \
+	  -cdrom anodize-dev-amd64.iso -no-reboot \
+	  -drive file=fake-usb.img,format=raw,if=none,id=usb0 \
+	  -device usb-ehci,id=ehci \
+	  -device usb-storage,drive=usb0,bus=ehci.0 \
+	  -fsdev local,security_model=none,id=devdisc,path=$(DEV_DISC_DIR) \
+	  -device virtio-9p-pci,id=fs0,fsdev=devdisc,mount_tag=dev-disc \
+	  -netdev user,id=net0,hostfwd=tcp::$(DEV_SSH_PORT)-:22 \
+	  -device virtio-net-pci,netdev=net0 \
+	  -serial stdio
+
+# Dev arm64 QEMU with HVF — near-native speed on Apple Silicon.
+# Includes 9p share and SSH port forwarding (same as amd64 dev QEMU).
 QEMU_AARCH64_BASE = qemu-system-aarch64 \
 	  -machine virt,accel=hvf \
 	  -cpu host \
 	  -m 2G -smp 2 \
 	  -bios $(AAVMF_CODE) \
 	  -device nec-usb-xhci,id=xhci \
-	  -drive if=none,id=usbiso,format=raw,readonly=on,file=anodize-dev-aarch64.iso \
+	  -drive if=none,id=usbiso,format=raw,readonly=on,file=anodize-dev-arm64.iso \
 	  -device usb-storage,bus=xhci.0,drive=usbiso \
 	  -drive file=fake-usb.img,format=raw,if=none,id=usb0 \
 	  -device usb-storage,bus=xhci.0,drive=usb0 \
+	  -fsdev local,security_model=none,id=devdisc,path=$(DEV_DISC_DIR) \
+	  -device virtio-9p-pci,id=fs0,fsdev=devdisc,mount_tag=dev-disc \
+	  -netdev user,id=net0,hostfwd=tcp::$(DEV_SSH_PORT)-:22 \
+	  -device virtio-net-pci,netdev=net0 \
 	  -no-reboot \
 	  -serial stdio
 
 qemu: qemu-sdl
 
-# SDL graphical window.  Serial console output also appears in the terminal
-# that launched make (via -serial stdio) — useful when SDL shows nothing.
-qemu-sdl: anodize.iso fake-usb.img
+# Boot production ISO in SDL graphical window.
+qemu-sdl: anodize-prod-amd64.iso fake-usb.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_BASE) -display $(QEMU_DISPLAY) -vga std
 
-# No-graphic mode — serial console only, no VGA rendering.  Ctrl-A X to quit.
-qemu-nographic: anodize.iso fake-usb.img
+# Boot production ISO — serial console only.  Ctrl-A X to quit.
+qemu-nographic: anodize-prod-amd64.iso fake-usb.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(subst -serial stdio,-nographic,$(QEMU_BASE))
 
-# aarch64 with graphical window — near-native speed via HVF on Apple Silicon.
-qemu-aarch64: anodize-dev-aarch64.iso fake-usb.img
+# Dev arm64 with graphical window — near-native speed via HVF on Apple Silicon.
+qemu-aarch64: anodize-dev-arm64.iso fake-usb.img
+	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	$(QEMU_AARCH64_BASE) -display cocoa -device virtio-gpu-pci
 
-# aarch64 serial console only.  Ctrl-A X to quit.
-qemu-aarch64-nographic: anodize-dev-aarch64.iso fake-usb.img
+# Dev arm64 serial console only.  Ctrl-A X to quit.
+qemu-aarch64-nographic: anodize-dev-arm64.iso fake-usb.img
+	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	$(subst -serial stdio,-nographic,$(QEMU_AARCH64_BASE))
 
 # ---------------------------------------------------------------------------
-# USB write target — write anodize.iso to a USB stick identified by serial
-# number.  This avoids hardcoding /dev/diskN which can shift between plugs.
+# USB write target — write a production ISO to a USB stick identified by
+# serial number.  This avoids hardcoding /dev/diskN which can shift between
+# plugs.
 # macOS only (uses ioreg + diskutil).
 #
 # Usage:
@@ -235,7 +270,7 @@ list-usb:
 	  (data[data.rfind("+-o ", 0, pos):pos], data[pos:]))) for s, pos in serials.items()]; \
 	(lambda: [print(f"  {s:<{max(len(x) for x,_ in rows)}}  {d:<{max(len(y) for _,(_, y) in rows)}}  {n}") for s, (n, d) in rows])() if rows else print("No USB storage devices found.")'
 
-write-usb: anodize.iso
+write-usb: anodize-prod-amd64.iso
 ifndef USB_SERIAL
 	$(error USB_SERIAL is required — set it to your USB stick serial number)
 endif
@@ -251,52 +286,32 @@ endif
 	fi && \
 	echo "Found serial $(USB_SERIAL) at /dev/$$disk" && \
 	diskutil unmountDisk /dev/$$disk && \
-	sudo dd if=anodize.iso of=/dev/r$$disk bs=1m && \
-	diskutil eject /dev/$$disk && \
-	echo "Done — safe to remove the USB stick."
-
-write-usb-proddbg: anodize-proddbg.iso
-ifndef USB_SERIAL
-	$(error USB_SERIAL is required — set it to your USB stick serial number)
-endif
-	@disk=$$(ioreg -r -c IOUSBHostDevice -l | \
-		python3 -c 'import sys, re; \
-		data = sys.stdin.read(); \
-		serial = "$(USB_SERIAL)"; \
-		pos = data.find("\"USB Serial Number\" = \"" + serial + "\""); \
-		match = re.search(r"\"BSD Name\"\s*=\s*\"(disk\d+)\"", data[pos:]) if pos >= 0 else None; \
-		print(match.group(1)) if match else sys.exit(1)') && \
-	if [ -z "$$disk" ]; then \
-		echo "No disk found with serial $(USB_SERIAL)" >&2; exit 1; \
-	fi && \
-	echo "Found serial $(USB_SERIAL) at /dev/$$disk" && \
-	diskutil unmountDisk /dev/$$disk && \
-	sudo dd if=anodize-proddbg.iso of=/dev/r$$disk bs=1m && \
+	sudo dd if=anodize-prod-amd64.iso of=/dev/r$$disk bs=1m && \
 	diskutil eject /dev/$$disk && \
 	echo "Done — safe to remove the USB stick."
 
 # ---------------------------------------------------------------------------
 # ISO hash and verification — for reproducibility assurance.
 #
-# hash-iso:   Record the ISO checksum + git commit to anodize.iso.sha256.
+# hash-iso:   Record the ISO checksum + git commit to anodize-prod-amd64.iso.sha256.
 # verify-iso: Rebuild from the same commit and compare checksums.
 # ---------------------------------------------------------------------------
 
-hash-iso: anodize.iso
+hash-iso: anodize-prod-amd64.iso
 	@commit=$$(git rev-parse --short HEAD 2>/dev/null || echo unknown); \
-	sha=$$(shasum -a 256 anodize.iso | cut -d' ' -f1); \
-	echo "$$sha  anodize.iso  # git:$$commit" | tee anodize.iso.sha256
+	sha=$$(shasum -a 256 anodize-prod-amd64.iso | cut -d' ' -f1); \
+	echo "$$sha  anodize-prod-amd64.iso  # git:$$commit" | tee anodize-prod-amd64.iso.sha256
 
-verify-iso: anodize.iso.sha256
-	@expected=$$(awk '{print $$1}' anodize.iso.sha256); \
-	actual=$$(shasum -a 256 anodize.iso | cut -d' ' -f1); \
+verify-iso: anodize-prod-amd64.iso.sha256
+	@expected=$$(awk '{print $$1}' anodize-prod-amd64.iso.sha256); \
+	actual=$$(shasum -a 256 anodize-prod-amd64.iso | cut -d' ' -f1); \
 	if [ "$$expected" = "$$actual" ]; then \
-		echo "PASS: anodize.iso matches anodize.iso.sha256"; \
+		echo "PASS: anodize-prod-amd64.iso matches anodize-prod-amd64.iso.sha256"; \
 	else \
 		echo "FAIL: expected $$expected, got $$actual" >&2; exit 1; \
 	fi
 
-# ── cdemu-based dev targets ───────────────────────────────────────────────────
+# ── Dev amd64 QEMU targets ─────────────────────────────────────────────────────
 #
 # Primary dev/CI testing path.  The entire cdemu stack (vhba kernel module +
 # cdemu-daemon + blank BD-R setup) runs *inside* the QEMU guest — no host
@@ -304,70 +319,47 @@ verify-iso: anodize.iso.sha256
 #
 # QEMU user-mode networking forwards host localhost:2222 → guest :22 so the
 # dev ISO's SSH server is reachable without any host tap/bridge setup.
-# Connect with: make ssh-cdemu  (or: ssh -p 2222 ceremony@localhost)
+# Connect with: make ssh-dev  (or: ssh -p 2222 ceremony@localhost)
 #
 # The BD-R image is stored on a virtio-9p share: dev-disc/test-bdr.img
 #
 # One-time setup:
-#   make fake-usb.img        # SoftHSM2 profile USB (PIN: 123456)
-#   make anodize-cdemu.iso   # dev ISO — first build slow, cached after
+#   make fake-usb.img     # SoftHSM2 profile USB (PIN: 123456)
+#   make dev-amd64        # dev ISO — first build slow, cached after
 #
 # Each dev session:
-#   make qemu-cdemu          # start VM in SDL window
-#   make ssh-cdemu           # (separate terminal) SSH into the running VM
+#   make qemu-dev         # start VM in SDL window
+#   make ssh-dev          # (separate terminal) SSH into the running VM
 
-# Host directory shared into the guest via virtio-9p.
-# Inspect dev-disc/test-bdr.img after a ceremony session.
-DEV_DISC_DIR ?= $(CURDIR)/dev-disc
+qemu-dev: qemu-dev-sdl
 
-# SSH port forwarded from host localhost to guest sshd.
-CDEMU_SSH_PORT ?= 2222
-
-# cdemu QEMU: cdemu ISO + SoftHSM USB + 9p share + user-mode networking.
-# The cdemu stack runs inside the guest — no host setup required.
-# Serial output also goes to stdio so boot messages are visible.
-QEMU_CDEMU_BASE = qemu-system-x86_64 -enable-kvm -machine pc -cpu host -m 2G -smp 2 \
-	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
-	  -drive if=pflash,format=raw,file=/tmp/anodize-ovmf-vars.fd \
-	  -cdrom anodize-cdemu.iso -no-reboot \
-	  -drive file=fake-usb.img,format=raw,if=none,id=usb0 \
-	  -device usb-ehci,id=ehci \
-	  -device usb-storage,drive=usb0,bus=ehci.0 \
-	  -fsdev local,security_model=none,id=devdisc,path=$(DEV_DISC_DIR) \
-	  -device virtio-9p-pci,id=fs0,fsdev=devdisc,mount_tag=dev-disc \
-	  -netdev user,id=net0,hostfwd=tcp::$(CDEMU_SSH_PORT)-:22 \
-	  -device virtio-net-pci,netdev=net0 \
-	  -serial stdio
-
-qemu-cdemu: qemu-cdemu-sdl
-
-qemu-cdemu-sdl: anodize-cdemu.iso fake-usb.img
+qemu-dev-sdl: anodize-dev-amd64.iso fake-usb.img
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
-	$(QEMU_CDEMU_BASE) -display sdl -vga std
+	$(QEMU_DEV_BASE) -display sdl -vga std
 
-qemu-cdemu-nographic: anodize-cdemu.iso fake-usb.img
+qemu-dev-nographic: anodize-dev-amd64.iso fake-usb.img
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
-	$(subst -serial stdio,-nographic,$(QEMU_CDEMU_BASE))
+	$(subst -serial stdio,-nographic,$(QEMU_DEV_BASE))
 
 # Wait for SSH to be ready, then open an interactive session as the ceremony user.
-# Run this in a second terminal while qemu-cdemu-sdl is running.
+# Run this in a second terminal while qemu-dev or qemu-aarch64 is running.
 # Uses scripts/dev-ssh-key (committed dev-only keypair, localhost access only).
-ssh-cdemu:
-	@echo "Waiting for SSH on localhost:$(CDEMU_SSH_PORT)..."
-	@until nc -z localhost $(CDEMU_SSH_PORT) 2>/dev/null; do sleep 1; done
+ssh-dev:
+	@echo "Waiting for SSH on localhost:$(DEV_SSH_PORT)..."
+	@until nc -z localhost $(DEV_SSH_PORT) 2>/dev/null; do sleep 1; done
 	@echo "Connected."
 	ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 	    -i $(CURDIR)/scripts/dev-ssh-key \
-	    -p $(CDEMU_SSH_PORT) ceremony@localhost
+	    -p $(DEV_SSH_PORT) ceremony@localhost
 
 # Build anodize-ceremony with dev-softhsm-usb (never use in a real ceremony).
 build-dev:
 	cargo build -p anodize-tui --features dev-softhsm-usb
 
 clean:
-	rm -rf anodize.iso anodize-dev.iso anodize-dev-aarch64.iso anodize-proddbg.iso anodize-cdemu.iso anodize.iso.sha256 fake-usb.img dev-disc /tmp/anodize-ovmf-vars.fd
+	rm -rf anodize-prod-amd64.iso anodize-prod-arm64.iso anodize-dev-amd64.iso anodize-dev-arm64.iso anodize-prod-amd64.iso.sha256 fake-usb.img dev-disc /tmp/anodize-ovmf-vars.fd
 
 # Inner-loop shortcuts (no Docker overhead)
 fmt:
