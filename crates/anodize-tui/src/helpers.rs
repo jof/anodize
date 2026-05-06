@@ -44,6 +44,31 @@ pub fn sha256_fingerprint(der: &[u8]) -> String {
 
 // ── Disc session helpers ──────────────────────────────────────────────────────
 
+/// Load the most recent STATE.JSON from disc sessions (latest session first).
+pub fn load_session_state_from_sessions(
+    sessions: &[SessionEntry],
+) -> Option<anodize_config::state::SessionState> {
+    for session in sessions.iter().rev() {
+        if let Some(file) = session
+            .files
+            .iter()
+            .find(|f| f.name == anodize_config::state::STATE_FILENAME)
+        {
+            match anodize_config::state::SessionState::from_json(&file.data) {
+                Ok(state) => return Some(state),
+                Err(e) => {
+                    tracing::warn!(
+                        session = %session.dir_name,
+                        error = %e,
+                        "STATE.JSON parse/validation failed, trying older session"
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Load ROOT.CRT DER bytes from the first session on disc that contains it.
 pub fn load_root_cert_der_from_sessions(sessions: &[SessionEntry]) -> Option<Vec<u8>> {
     sessions.iter().find_map(|s| {
@@ -150,11 +175,11 @@ pub fn clock_drift_ok(confirmed: SystemTime) -> bool {
     drift.map(|d| d.as_secs() <= 300).unwrap_or(false)
 }
 
-// ── SoftHSM2 USB backend (dev-softhsm-usb feature) ───────────────────────────
+// ── SoftHSM2 shuttle backend (dev-softhsm-usb feature) ───────────────────────
 
 #[cfg(feature = "dev-softhsm-usb")]
-pub fn configure_softhsm_from_usb(usb_mountpoint: &std::path::Path) -> anyhow::Result<()> {
-    let token_dir = usb_mountpoint.join("softhsm2/tokens");
+pub fn configure_softhsm_from_shuttle(shuttle_mount: &std::path::Path) -> anyhow::Result<()> {
+    let token_dir = shuttle_mount.join("softhsm2/tokens");
     if !token_dir.exists() {
         return Ok(());
     }
