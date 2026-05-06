@@ -1,4 +1,4 @@
-use std::io::{self, Stdout, stdout};
+use std::io::{self, stdout, Stdout};
 
 use crossterm::{
     execute,

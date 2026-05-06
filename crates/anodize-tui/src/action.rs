@@ -31,8 +31,8 @@ pub enum Action {
     // Ceremony flow
     SetupComplete,
     SelectOperation(Operation),
-    SelectKeyAction(u8),       // 1=generate, 2=find-existing
-    SelectCertProfile(usize),  // 0-indexed profile index
+    SelectKeyAction(u8),      // 1=generate, 2=find-existing
+    SelectCertProfile(usize), // 0-indexed profile index
     // Disc + Shuttle
     ConfirmDisc,
     DoWriteIntent,

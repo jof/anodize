@@ -31,9 +31,7 @@ impl EventHandler {
     pub fn next(&self) -> std::io::Result<Event> {
         if event::poll(self.tick_rate)? {
             match event::read()? {
-                CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
-                    Ok(Event::Key(key))
-                }
+                CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => Ok(Event::Key(key)),
                 CrosstermEvent::Resize(w, h) => Ok(Event::Resize(w, h)),
                 // Ignore non-press key events (Release, Repeat) and mouse/focus/paste
                 _ => Ok(Event::Tick),

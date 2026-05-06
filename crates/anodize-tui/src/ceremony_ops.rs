@@ -9,9 +9,7 @@ use std::time::SystemTime;
 
 use anodize_audit::{genesis_hash, AuditLog};
 use anodize_ca::{build_root_cert, issue_crl, sign_intermediate_csr, P384HsmSigner};
-use anodize_config::{
-    load as load_profile, serialize_revocation_list, PinSource, RevocationEntry,
-};
+use anodize_config::{load as load_profile, serialize_revocation_list, PinSource, RevocationEntry};
 use anodize_hsm::{Hsm, HsmActor, KeySpec, Pkcs11Hsm};
 use der::{Decode, Encode};
 use ratatui::{layout::Rect, Frame};
@@ -229,7 +227,8 @@ impl App {
                     Ok(()) => {
                         self.ceremony.state = CeremonyPhase::DiscDone;
                         let disc_label = self
-                            .disc.optical_dev
+                            .disc
+                            .optical_dev
                             .as_deref()
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "/run/anodize/staging".into());
@@ -246,9 +245,7 @@ impl App {
                         self.set_status(format!("{op_label} written to disc: {disc_label}"));
                     }
                     Err(e) => {
-                        self.set_status(format!(
-                            "Burn failed: {e} — reinsert disc and retry."
-                        ));
+                        self.set_status(format!("Burn failed: {e} — reinsert disc and retry."));
                         self.ceremony.state = CeremonyPhase::OperationSelect;
                         self.disc.optical_dev = None;
                     }
@@ -297,7 +294,9 @@ impl App {
         match op {
             Operation::InitRoot => {
                 if self.disc.session_state.is_some() {
-                    self.set_status("Root already initialized on this disc. Use RekeyShares to change PIN.");
+                    self.set_status(
+                        "Root already initialized on this disc. Use RekeyShares to change PIN.",
+                    );
                     self.current_op = None;
                     self.ceremony.state = CeremonyPhase::OperationSelect;
                     return;
@@ -342,9 +341,8 @@ impl App {
                 }
                 // Enter quorum phase: custodians re-enter shares
                 let sss = self.disc.session_state.as_ref().unwrap().sss.clone();
-                self.sss.share_input = Some(
-                    crate::components::share_input::ShareInput::new(sss, 32),
-                );
+                self.sss.share_input =
+                    Some(crate::components::share_input::ShareInput::new(sss, 32));
                 self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyQuorum);
                 self.set_status("Enter threshold shares to reconstruct the PIN.");
             }
@@ -359,7 +357,8 @@ impl App {
     pub(crate) fn do_init_root_confirm_custodians(&mut self) {
         // Parse custodian names from comma-separated input
         let names: Vec<String> = self
-            .sss.custodian_buf
+            .sss
+            .custodian_buf
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -426,7 +425,7 @@ impl App {
         let state = SessionState {
             version: STATE_VERSION,
             root_cert_sha256: "0".repeat(64), // placeholder, updated after keygen
-            root_cert_der_b64: String::new(),  // placeholder
+            root_cert_der_b64: String::new(), // placeholder
             sss: SssMetadata {
                 threshold,
                 total,
@@ -445,8 +444,7 @@ impl App {
 
         // Create ShareReveal component
         self.sss.share_reveal = Some(crate::components::share_reveal::ShareReveal::new(
-            shares,
-            &names,
+            shares, &names,
         ));
 
         self.ceremony.state = CeremonyPhase::Planning(PlanningState::ShareReveal);
@@ -467,7 +465,8 @@ impl App {
     pub(crate) fn do_rekey_quorum_complete(&mut self) {
         // Collect shares from the input component
         let shares: Vec<anodize_sss::Share> = self
-            .sss.share_input
+            .sss
+            .share_input
             .as_ref()
             .map(|si| si.collected.iter().map(|c| c.share.clone()).collect())
             .unwrap_or_default();
@@ -475,7 +474,8 @@ impl App {
 
         // Reconstruct PIN
         let threshold = self
-            .disc.session_state
+            .disc
+            .session_state
             .as_ref()
             .map(|s| s.sss.threshold)
             .unwrap_or(2);
@@ -495,7 +495,8 @@ impl App {
             hex::encode(Sha256::digest(&pin_bytes))
         };
         let expected = self
-            .disc.session_state
+            .disc
+            .session_state
             .as_ref()
             .map(|s| s.sss.pin_verify_hash.as_str())
             .unwrap_or("");
@@ -520,7 +521,8 @@ impl App {
     pub(crate) fn do_rekey_confirm_custodians(&mut self) {
         // Parse new custodian names
         let names: Vec<String> = self
-            .sss.custodian_buf
+            .sss
+            .custodian_buf
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -586,8 +588,7 @@ impl App {
 
         // Create ShareReveal component
         self.sss.share_reveal = Some(crate::components::share_reveal::ShareReveal::new(
-            shares,
-            &names,
+            shares, &names,
         ));
 
         self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyShareReveal);
@@ -727,7 +728,8 @@ impl App {
 
     fn do_migrate_confirm(&mut self) {
         let total_bytes: u64 = self
-            .disc.prior_sessions
+            .disc
+            .prior_sessions
             .iter()
             .flat_map(|s| s.files.iter())
             .map(|f| f.data.len() as u64)
@@ -745,7 +747,11 @@ impl App {
 
         self.data.migrate_chain_ok = verify_audit_chain(&self.disc.prior_sessions);
         self.ceremony.state = CeremonyPhase::Planning(PlanningState::MigrateConfirm);
-        let chain_status = if self.data.migrate_chain_ok { "OK" } else { "FAIL" };
+        let chain_status = if self.data.migrate_chain_ok {
+            "OK"
+        } else {
+            "FAIL"
+        };
         self.set_status(format!(
             "Chain: {chain_status}  {} session(s)  {} bytes. [1] to proceed, [q] to abort.",
             self.disc.prior_sessions.len(),
@@ -893,8 +899,7 @@ impl App {
                 hex::encode(Sha256::digest(&cert_der))
             };
             state.root_cert_sha256 = cert_hash;
-            state.root_cert_der_b64 =
-                base64::engine::general_purpose::STANDARD.encode(&cert_der);
+            state.root_cert_der_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
         }
 
         self.data.cert_der = Some(cert_der);
@@ -1093,7 +1098,8 @@ impl App {
 
         // Convert RevocationEntry list to (serial, SystemTime, reason) triples
         let revoked: Vec<(u64, SystemTime, Option<anodize_ca::CrlReason>)> = self
-            .data.revocation_list
+            .data
+            .revocation_list
             .iter()
             .map(|e| {
                 let t = parse_rfc3339_to_system_time(&e.revocation_time)
@@ -1231,10 +1237,7 @@ impl App {
     }
 
     /// Build the intent audit event (name, data) for the current operation.
-    fn build_intent_audit_event(
-        &self,
-        genesis_hex: &str,
-    ) -> Option<(String, serde_json::Value)> {
+    fn build_intent_audit_event(&self, genesis_hex: &str) -> Option<(String, serde_json::Value)> {
         match &self.current_op {
             Some(Operation::InitRoot) | Some(Operation::GenerateRootCa) => {
                 let (cn, org, country) = self
@@ -1273,7 +1276,8 @@ impl App {
             }
             Some(Operation::SignCsr) => {
                 let csr_hex = self
-                    .data.csr_der
+                    .data
+                    .csr_der
                     .as_ref()
                     .map(|b| {
                         b.iter()
@@ -1285,7 +1289,8 @@ impl App {
                     .profile
                     .as_ref()
                     .and_then(|p| {
-                        self.data.selected_profile_idx
+                        self.data
+                            .selected_profile_idx
                             .map(|i| p.cert_profiles[i].name.clone())
                     })
                     .unwrap_or_default();
@@ -1392,7 +1397,10 @@ impl App {
             .rev()
             .find(|line| !line.is_empty())
             .and_then(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
-            .and_then(|v| v.get("entry_hash").and_then(|h| h.as_str().map(String::from)))
+            .and_then(|v| {
+                v.get("entry_hash")
+                    .and_then(|h| h.as_str().map(String::from))
+            })
             .unwrap_or_default();
 
         if let Some(ref mut state) = self.disc.session_state {
@@ -1426,12 +1434,14 @@ impl App {
                     }
                 };
                 let new_total = self
-                    .disc.session_state
+                    .disc
+                    .session_state
                     .as_ref()
                     .map(|s| s.sss.total)
                     .unwrap_or(0);
                 let new_threshold = self
-                    .disc.session_state
+                    .disc
+                    .session_state
                     .as_ref()
                     .map(|s| s.sss.threshold)
                     .unwrap_or(0);
@@ -1563,7 +1573,8 @@ impl App {
                     .profile
                     .as_ref()
                     .and_then(|p| {
-                        self.data.selected_profile_idx
+                        self.data
+                            .selected_profile_idx
                             .map(|i| p.cert_profiles[i].name.clone())
                     })
                     .unwrap_or_default();
@@ -1612,7 +1623,8 @@ impl App {
 
             Some(Operation::RevokeCert) => {
                 let crl_der = self.data.crl_der.clone()?;
-                let revoked_toml = serialize_revocation_list(&self.data.revocation_list).into_bytes();
+                let revoked_toml =
+                    serialize_revocation_list(&self.data.revocation_list).into_bytes();
                 let crl_number = self.data.crl_number.unwrap_or(0);
 
                 let log_path = staging.join("audit.log");
@@ -1742,13 +1754,11 @@ impl App {
                 })
             }
 
-            Some(Operation::MigrateDisc) => {
-                Some(SessionEntry {
-                    dir_name,
-                    timestamp: ts,
-                    files: vec![],
-                })
-            }
+            Some(Operation::MigrateDisc) => Some(SessionEntry {
+                dir_name,
+                timestamp: ts,
+                files: vec![],
+            }),
 
             None => {
                 self.set_status("No operation set");
@@ -1840,7 +1850,8 @@ impl App {
     pub(crate) fn render_ceremony_content(&self, frame: &mut Frame, area: Rect) {
         // ShareReveal / ShareInput overlay for InitRoot and Rekey states
         match self.ceremony.state {
-            CeremonyPhase::Planning(PlanningState::ShareReveal) | CeremonyPhase::Planning(PlanningState::RekeyShareReveal) => {
+            CeremonyPhase::Planning(PlanningState::ShareReveal)
+            | CeremonyPhase::Planning(PlanningState::RekeyShareReveal) => {
                 if let Some(ref reveal) = self.sss.share_reveal {
                     reveal.render(frame, area);
                     return;

@@ -123,7 +123,10 @@ pub fn run(args: InitArgs) -> Result<()> {
             &args.softhsm_pin,
             &args.softhsm_so_pin,
         )?;
-        eprintln!("  Initialized SoftHSM2 token (label={:?})", args.token_label);
+        eprintln!(
+            "  Initialized SoftHSM2 token (label={:?})",
+            args.token_label
+        );
     }
 
     // Step 5: Validate by loading the profile
@@ -183,13 +186,7 @@ fn format_device(device: &str, volume_label: &str) -> Result<()> {
         // macOS: diskutil eraseDisk
         eprintln!("Formatting {device} as FAT32 ({volume_label})...");
         let status = Command::new("diskutil")
-            .args([
-                "eraseDisk",
-                "FAT32",
-                volume_label,
-                "MBRFormat",
-                device,
-            ])
+            .args(["eraseDisk", "FAT32", volume_label, "MBRFormat", device])
             .status()
             .context("diskutil eraseDisk")?;
         if !status.success() {
@@ -287,9 +284,7 @@ impl Drop for UnmountGuard {
                 .args(["unmount", &self.0.to_string_lossy()])
                 .status();
         } else {
-            let _ = Command::new("umount")
-                .arg(&self.0)
-                .status();
+            let _ = Command::new("umount").arg(&self.0).status();
         }
     }
 }

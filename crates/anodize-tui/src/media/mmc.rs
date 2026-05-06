@@ -161,9 +161,9 @@ pub fn set_write_parameters(dev: &SgDev, p: &WriteParams) -> Result<()> {
     page[0] = 0x05; // page code
     page[1] = 0x32; // page length = 50 bytes
     page[2] = (if p.bufe { 0x40 } else { 0x00 })   // BUFE bit (bit 6)
-            | (p.write_type as u8);                   // write type (bits 0-3)
+            | (p.write_type as u8); // write type (bits 0-3)
     page[3] = ((p.multi_session as u8) << 6)          // multisession (bits 6-7)
-            | 0x09;                                    // track mode (bits 0-3)
+            | 0x09; // track mode (bits 0-3)
                     // byte 4: data block type = 0x08 (2048-byte mode-1 data)
     page[4] = 0x08;
     // bytes 5-7: reserved

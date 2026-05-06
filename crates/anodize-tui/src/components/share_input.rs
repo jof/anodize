@@ -20,15 +20,9 @@ use ratatui::{
 #[derive(Debug, Clone)]
 pub enum ShareVerifyResult {
     /// Share decoded and commitment verified.
-    Accepted {
-        custodian_name: String,
-        index: u8,
-    },
+    Accepted { custodian_name: String, index: u8 },
     /// Share decoded but commitment mismatch.
-    CommitmentFailed {
-        custodian_name: String,
-        index: u8,
-    },
+    CommitmentFailed { custodian_name: String, index: u8 },
     /// Index not found in custodian roster.
     UnknownIndex(u8),
     /// Wordlist/checksum decode error.

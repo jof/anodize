@@ -89,7 +89,11 @@ impl ConfirmDialog {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow))
             .title(self.title.as_str())
-            .title_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            .title_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
 
         let inner = block.inner(dialog_area);
         frame.render_widget(block, dialog_area);
@@ -105,7 +109,12 @@ impl ConfirmDialog {
             Stage::First => {
                 lines.push(Line::from(vec![
                     Span::styled("  Press ", Style::default().fg(Color::White)),
-                    Span::styled("[1]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "[1]",
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(" to begin confirmation", Style::default().fg(Color::White)),
                 ]));
             }
@@ -114,7 +123,12 @@ impl ConfirmDialog {
                     Span::styled("  Step 1 ", Style::default().fg(Color::Green)),
                     Span::styled("\u{2714}", Style::default().fg(Color::Green)),
                     Span::styled("  Now press ", Style::default().fg(Color::White)),
-                    Span::styled("[Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                    Span::styled(
+                        "[Enter]",
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
                     Span::styled(" to confirm", Style::default().fg(Color::White)),
                 ]));
             }

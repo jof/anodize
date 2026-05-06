@@ -155,7 +155,10 @@ pub fn find_profile_usb(
         // Skip devices whose /dev node doesn't exist yet (avoids kernel "Can't open
         // blockdev" spam when /sys/block/sd* appears before udev creates the node)
         if !dev.exists() {
-            tracing::debug!("find_profile_usb: {} does not exist, skipping", dev.display());
+            tracing::debug!(
+                "find_profile_usb: {} does not exist, skipping",
+                dev.display()
+            );
             continue;
         }
         match mount_usb(dev, mountpoint) {
@@ -174,7 +177,9 @@ pub fn find_profile_usb(
                         .collect();
                     tracing::info!(
                         "find_profile_usb: mounted {} at {}, contents: {:?}",
-                        dev.display(), mountpoint.display(), names
+                        dev.display(),
+                        mountpoint.display(),
+                        names
                     );
                 }
             }
@@ -183,7 +188,10 @@ pub fn find_profile_usb(
         if profile.exists() {
             return Ok(Some((profile, dev.clone())));
         }
-        tracing::debug!("find_profile_usb: no profile.toml at {}", mountpoint.display());
+        tracing::debug!(
+            "find_profile_usb: no profile.toml at {}",
+            mountpoint.display()
+        );
         let _ = unmount(mountpoint);
     }
 

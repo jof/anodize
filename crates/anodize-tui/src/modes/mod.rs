@@ -1,5 +1,5 @@
-pub mod setup;
 pub mod ceremony;
+pub mod setup;
 pub mod utilities;
 
 use crate::components::phase_bar::{PhaseStatus, PhaseStep};

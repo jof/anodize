@@ -271,7 +271,10 @@ impl Hsm for Pkcs11Hsm {
 
         match mech {
             SignMech::EcdsaSha384 => {
-                match self.session().sign(&Mechanism::EcdsaSha384, key.priv_handle, data) {
+                match self
+                    .session()
+                    .sign(&Mechanism::EcdsaSha384, key.priv_handle, data)
+                {
                     Ok(sig) => Ok(sig),
                     Err(ref e) if is_mech_invalid(e) => {
                         let digest = sha2::Sha384::digest(data).to_vec();
@@ -283,7 +286,10 @@ impl Hsm for Pkcs11Hsm {
                 }
             }
             SignMech::EcdsaSha256 => {
-                match self.session().sign(&Mechanism::EcdsaSha256, key.priv_handle, data) {
+                match self
+                    .session()
+                    .sign(&Mechanism::EcdsaSha256, key.priv_handle, data)
+                {
                     Ok(sig) => Ok(sig),
                     Err(ref e) if is_mech_invalid(e) => {
                         let digest = sha2::Sha256::digest(data).to_vec();

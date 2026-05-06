@@ -105,7 +105,10 @@ impl UtilitiesMode {
         lines.push(format!("  USB mount: {}", app.shuttle_mount.display()));
         lines.push(format!("  Skip disc: {}", app.skip_disc));
         if let Some(ref p) = app.profile {
-            lines.push(format!("  Profile: {} / {}", p.ca.common_name, p.ca.organization));
+            lines.push(format!(
+                "  Profile: {} / {}",
+                p.ca.common_name, p.ca.organization
+            ));
             lines.push(format!("  HSM module: {}", p.hsm.module_path.display()));
             lines.push(format!("  Token label: {}", p.hsm.token_label));
         } else {
@@ -160,7 +163,8 @@ impl UtilitiesMode {
 
         // Collect AUDIT.LOG content from disc sessions (prior_sessions)
         let disc_audit: Vec<u8> = app
-            .disc.prior_sessions
+            .disc
+            .prior_sessions
             .iter()
             .rev()
             .find_map(|s| {
@@ -220,10 +224,7 @@ impl UtilitiesMode {
         for (i, line) in content.lines().enumerate() {
             match serde_json::from_str::<anodize_audit::Record>(line) {
                 Ok(rec) => {
-                    lines.push(format!(
-                        "  #{:<4} {} {}",
-                        rec.seq, rec.timestamp, rec.event
-                    ));
+                    lines.push(format!("  #{:<4} {} {}", rec.seq, rec.timestamp, rec.event));
                     // Show op_data if it has content
                     if !rec.op_data.is_null()
                         && rec.op_data != serde_json::Value::Object(Default::default())
@@ -308,13 +309,8 @@ impl UtilitiesMode {
                                 "not logged in"
                             }
                         ));
-                        lines.push(format!(
-                            "{tag}   └─ Key: \"{}\" ({})",
-                            cfg_key, cfg_spec
-                        ));
-                        lines.push(format!(
-                            "{tag}      └─ Private key protected by User PIN"
-                        ));
+                        lines.push(format!("{tag}   └─ Key: \"{}\" ({})", cfg_key, cfg_spec));
+                        lines.push(format!("{tag}      └─ Private key protected by User PIN"));
                     } else {
                         lines.push(format!("{tag}   └─ (not the configured token)"));
                     }
@@ -336,9 +332,7 @@ impl UtilitiesMode {
     pub fn render_with_app(&self, frame: &mut Frame, area: Rect, app: &App) {
         match self.screen {
             UtilScreen::Menu => {
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .title("Utilities");
+                let block = Block::default().borders(Borders::ALL).title("Utilities");
                 let content = vec![
                     "",
                     "  [1]  System Info",
@@ -418,9 +412,7 @@ impl Component for UtilitiesMode {
 
     fn render(&self, frame: &mut Frame, area: Rect) {
         // Fallback — render_with_app is preferred
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title("Utilities");
+        let block = Block::default().borders(Borders::ALL).title("Utilities");
         let para = Paragraph::new(Text::from("  Press F3 to enter Utilities"))
             .block(block)
             .wrap(Wrap { trim: false });

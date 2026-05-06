@@ -42,13 +42,9 @@ impl Widget for ModeBar {
                     .bg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else if is_locked {
-                Style::default()
-                    .fg(Color::Gray)
-                    .bg(Color::DarkGray)
+                Style::default().fg(Color::Gray).bg(Color::DarkGray)
             } else {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::DarkGray)
+                Style::default().fg(Color::White).bg(Color::DarkGray)
             };
 
             let key_style = if is_locked {

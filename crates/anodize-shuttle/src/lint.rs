@@ -109,8 +109,7 @@ pub fn run(args: LintArgs) -> Result<()> {
                 ));
                 if profile.hsm.pin_source != anodize_config::PinSource::Prompt {
                     warnings.push(
-                        "profile.toml: pin_source is not 'prompt' — unsuitable for ceremony"
-                            .into(),
+                        "profile.toml: pin_source is not 'prompt' — unsuitable for ceremony".into(),
                     );
                 }
                 if profile.ca.cdp_url.is_none() {
@@ -212,7 +211,11 @@ pub fn run(args: LintArgs) -> Result<()> {
         let tokens_dir = softhsm_dir.join("tokens");
         if tokens_dir.exists() {
             let token_count = std::fs::read_dir(&tokens_dir)
-                .map(|rd| rd.flatten().filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false)).count())
+                .map(|rd| {
+                    rd.flatten()
+                        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+                        .count()
+                })
                 .unwrap_or(0);
             info.push(format!("softhsm2/tokens/: {token_count} token slot(s)"));
         } else {
@@ -223,8 +226,8 @@ pub fn run(args: LintArgs) -> Result<()> {
     // ── Extraneous file check ────────────────────────────────────────────────
 
     for rel in &relative_files {
-        let is_known = KNOWN_FILES.iter().any(|k| rel == *k)
-            || KNOWN_DIRS.iter().any(|d| rel.starts_with(d));
+        let is_known =
+            KNOWN_FILES.iter().any(|k| rel == *k) || KNOWN_DIRS.iter().any(|d| rel.starts_with(d));
 
         // macOS metadata files
         let is_system = rel.starts_with(".Spotlight-")
@@ -373,13 +376,8 @@ fn enumerate_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(result)
 }
 
-fn enumerate_files_recursive(
-    root: &Path,
-    dir: &Path,
-    out: &mut Vec<PathBuf>,
-) -> Result<()> {
-    let entries = std::fs::read_dir(dir)
-        .with_context(|| format!("read_dir {}", dir.display()))?;
+fn enumerate_files_recursive(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    let entries = std::fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))?;
 
     for entry in entries.flatten() {
         let path = entry.path();
@@ -428,8 +426,8 @@ fn validate_audit_log(path: &Path) -> Result<(usize, bool)> {
         if line.is_empty() {
             continue;
         }
-        let record: serde_json::Value = serde_json::from_slice(line)
-            .context("audit.log: line is not valid JSON")?;
+        let record: serde_json::Value =
+            serde_json::from_slice(line).context("audit.log: line is not valid JSON")?;
 
         if let Some(expected) = &prev_hash {
             let actual = record

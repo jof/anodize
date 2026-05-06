@@ -71,7 +71,14 @@ impl Widget for StatusBar<'_> {
     }
 }
 
-fn render_hw_entry(buf: &mut Buffer, x: &mut u16, y: u16, label: &str, state: &HwState, max_x: u16) {
+fn render_hw_entry(
+    buf: &mut Buffer,
+    x: &mut u16,
+    y: u16,
+    label: &str,
+    state: &HwState,
+    max_x: u16,
+) {
     let label_style = Style::default()
         .fg(Color::White)
         .bg(Color::Black)
@@ -118,4 +125,3 @@ fn render_hw_entry(buf: &mut Buffer, x: &mut u16, y: u16, label: &str, state: &H
     );
     *x += detail.len() as u16;
 }
-

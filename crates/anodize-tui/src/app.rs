@@ -17,7 +17,6 @@ use ratatui::{
 
 use crate::action::{Action, Mode, Operation};
 use crate::components::confirm_dialog::ConfirmDialog;
-use crate::modes::ceremony::{CeremonyPhase, PlanningState};
 use crate::components::mode_bar::ModeBar;
 use crate::components::phase_bar::PhaseBar;
 use crate::components::status_bar::{HwState, StatusBar};
@@ -25,6 +24,7 @@ use crate::components::Component;
 use crate::media::SessionEntry;
 use crate::modes;
 use crate::modes::ceremony::CeremonyMode;
+use crate::modes::ceremony::{CeremonyPhase, PlanningState};
 use crate::modes::setup::{SetupMode, SetupPhase};
 use crate::modes::utilities::UtilitiesMode;
 
@@ -344,15 +344,16 @@ impl App {
                         // All shares revealed → advance to verification round
                         self.sss.share_reveal = None;
                         if let Some(ref state) = self.disc.session_state {
-                            self.sss.share_input = Some(
-                                crate::components::share_input::ShareInput::new(
+                            self.sss.share_input =
+                                Some(crate::components::share_input::ShareInput::new(
                                     state.sss.clone(),
                                     32, // PIN is 32 bytes
-                                ),
-                            );
+                                ));
                         }
                         self.ceremony.state = CeremonyPhase::Planning(PlanningState::ShareVerify);
-                        self.set_status("Verification round: each custodian re-enters their share.");
+                        self.set_status(
+                            "Verification round: each custodian re-enters their share.",
+                        );
                     }
                 }
                 return Action::Noop;
@@ -398,14 +399,14 @@ impl App {
                     if reveal.handle_key(key) {
                         self.sss.share_reveal = None;
                         if let Some(ref state) = self.disc.session_state {
-                            self.sss.share_input = Some(
-                                crate::components::share_input::ShareInput::new(
+                            self.sss.share_input =
+                                Some(crate::components::share_input::ShareInput::new(
                                     state.sss.clone(),
                                     32,
-                                ),
-                            );
+                                ));
                         }
-                        self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyShareVerify);
+                        self.ceremony.state =
+                            CeremonyPhase::Planning(PlanningState::RekeyShareVerify);
                         self.set_status("Verify new shares: each custodian re-enters their share.");
                     }
                 }
@@ -541,7 +542,11 @@ impl App {
             Action::ConfirmDisc => {
                 let ready = self.skip_disc
                     || (self.disc.optical_dev.is_some()
-                        && self.disc.sessions_remaining.map(|r| r >= 2).unwrap_or(false));
+                        && self
+                            .disc
+                            .sessions_remaining
+                            .map(|r| r >= 2)
+                            .unwrap_or(false));
                 if ready {
                     self.update(Action::SetupComplete);
                 }
@@ -678,7 +683,7 @@ impl App {
             }
             // Utilities sub-screens
             Action::UtilScreen(idx) => {
-                use crate::modes::utilities::{UtilitiesMode, UtilScreen};
+                use crate::modes::utilities::{UtilScreen, UtilitiesMode};
                 let screen = match idx {
                     1 => UtilScreen::SystemInfo,
                     2 => UtilScreen::AuditLog,
@@ -695,7 +700,11 @@ impl App {
             Action::ConfirmMigrateTarget => {
                 let ready = self.skip_disc
                     || (self.disc.optical_dev.is_some()
-                        && self.disc.sessions_remaining.map(|r| r >= 50).unwrap_or(false));
+                        && self
+                            .disc
+                            .sessions_remaining
+                            .map(|r| r >= 50)
+                            .unwrap_or(false));
                 if ready {
                     self.do_start_burn();
                 }
@@ -778,9 +787,7 @@ impl App {
         // Phase bar
         let phase_steps = match self.mode {
             Mode::Setup => modes::setup_phases(self.setup.phase.index()),
-            Mode::Ceremony => modes::ceremony_phases(
-                self.ceremony.phase_index(),
-            ),
+            Mode::Ceremony => modes::ceremony_phases(self.ceremony.phase_index()),
             Mode::Utilities => modes::utility_phases(&self.utilities.screen),
         };
         let phase_bar = PhaseBar {
@@ -816,12 +823,7 @@ impl App {
     }
 
     /// Show a two-key confirmation dialog for a critical action.
-    pub fn show_confirm(
-        &mut self,
-        title: impl Into<String>,
-        body: Vec<String>,
-        action: Action,
-    ) {
+    pub fn show_confirm(&mut self, title: impl Into<String>, body: Vec<String>, action: Action) {
         self.confirm_dialog = Some(ConfirmDialog::new(title, body, action));
     }
 }

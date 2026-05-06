@@ -13,38 +13,38 @@ use std::fmt;
 /// 256 words, indexed by byte value. Selected for phonetic distinctness
 /// and ease of transcription.
 const WORDLIST: [&str; 256] = [
-    "able",   "acid",   "aged",   "also",   "arch",   "area",   "army",   "atom",   // 0x00
-    "aunt",   "away",   "back",   "bake",   "band",   "bank",   "bark",   "base",   // 0x08
-    "bath",   "bead",   "beam",   "bear",   "beat",   "beef",   "bell",   "belt",   // 0x10
-    "bend",   "best",   "bike",   "bird",   "bite",   "blow",   "blue",   "blur",   // 0x18
-    "boat",   "body",   "bold",   "bolt",   "bomb",   "bond",   "bone",   "book",   // 0x20
-    "born",   "boss",   "bowl",   "bulk",   "bump",   "burn",   "bush",   "busy",   // 0x28
-    "buzz",   "cafe",   "cage",   "cake",   "calm",   "came",   "camp",   "cane",   // 0x30
-    "cape",   "card",   "care",   "cart",   "case",   "cash",   "cast",   "cave",   // 0x38
-    "cell",   "chat",   "chef",   "chin",   "chip",   "chop",   "city",   "clad",   // 0x40
-    "clam",   "clan",   "claw",   "clay",   "clip",   "club",   "clue",   "coal",   // 0x48
-    "coat",   "code",   "coil",   "coin",   "cold",   "colt",   "come",   "cook",   // 0x50
-    "cool",   "cope",   "copy",   "cord",   "core",   "corn",   "cost",   "crew",   // 0x58
-    "crop",   "crow",   "cube",   "cult",   "cups",   "curb",   "cure",   "curl",   // 0x60
-    "cute",   "damp",   "dare",   "dark",   "dart",   "dash",   "data",   "dawn",   // 0x68
-    "days",   "dead",   "deaf",   "deal",   "dear",   "deck",   "deed",   "deem",   // 0x70
-    "deep",   "deer",   "demo",   "dent",   "deny",   "desk",   "dial",   "dice",   // 0x78
-    "diet",   "dine",   "dirt",   "disc",   "dish",   "dock",   "does",   "dome",   // 0x80
-    "done",   "door",   "dose",   "down",   "drag",   "draw",   "drip",   "drop",   // 0x88
-    "drum",   "dual",   "duck",   "dude",   "duel",   "duet",   "duke",   "dull",   // 0x90
-    "dune",   "dusk",   "dust",   "duty",   "each",   "earn",   "ease",   "east",   // 0x98
-    "easy",   "edge",   "edit",   "else",   "emit",   "ends",   "envy",   "epic",   // 0xA0
-    "even",   "evil",   "exam",   "exit",   "face",   "fact",   "fade",   "fail",   // 0xA8
-    "fair",   "fake",   "fall",   "fame",   "fang",   "farm",   "fast",   "fate",   // 0xB0
-    "fawn",   "fear",   "feat",   "feed",   "feel",   "fell",   "felt",   "fern",   // 0xB8
-    "file",   "fill",   "film",   "find",   "fine",   "fire",   "firm",   "fish",   // 0xC0
-    "fist",   "five",   "flag",   "flat",   "fled",   "flew",   "flex",   "flip",   // 0xC8
-    "flow",   "foam",   "fold",   "folk",   "fond",   "font",   "food",   "foot",   // 0xD0
-    "fork",   "form",   "fort",   "foul",   "four",   "free",   "frog",   "from",   // 0xD8
-    "fuel",   "full",   "fund",   "fury",   "fuse",   "gait",   "gale",   "game",   // 0xE0
-    "gang",   "gate",   "gave",   "gaze",   "gear",   "gene",   "gift",   "gild",   // 0xE8
-    "girl",   "give",   "glad",   "glow",   "glue",   "goat",   "goes",   "gold",   // 0xF0
-    "golf",   "gone",   "good",   "grab",   "gray",   "grew",   "grid",   "grim",   // 0xF8
+    "able", "acid", "aged", "also", "arch", "area", "army", "atom", // 0x00
+    "aunt", "away", "back", "bake", "band", "bank", "bark", "base", // 0x08
+    "bath", "bead", "beam", "bear", "beat", "beef", "bell", "belt", // 0x10
+    "bend", "best", "bike", "bird", "bite", "blow", "blue", "blur", // 0x18
+    "boat", "body", "bold", "bolt", "bomb", "bond", "bone", "book", // 0x20
+    "born", "boss", "bowl", "bulk", "bump", "burn", "bush", "busy", // 0x28
+    "buzz", "cafe", "cage", "cake", "calm", "came", "camp", "cane", // 0x30
+    "cape", "card", "care", "cart", "case", "cash", "cast", "cave", // 0x38
+    "cell", "chat", "chef", "chin", "chip", "chop", "city", "clad", // 0x40
+    "clam", "clan", "claw", "clay", "clip", "club", "clue", "coal", // 0x48
+    "coat", "code", "coil", "coin", "cold", "colt", "come", "cook", // 0x50
+    "cool", "cope", "copy", "cord", "core", "corn", "cost", "crew", // 0x58
+    "crop", "crow", "cube", "cult", "cups", "curb", "cure", "curl", // 0x60
+    "cute", "damp", "dare", "dark", "dart", "dash", "data", "dawn", // 0x68
+    "days", "dead", "deaf", "deal", "dear", "deck", "deed", "deem", // 0x70
+    "deep", "deer", "demo", "dent", "deny", "desk", "dial", "dice", // 0x78
+    "diet", "dine", "dirt", "disc", "dish", "dock", "does", "dome", // 0x80
+    "done", "door", "dose", "down", "drag", "draw", "drip", "drop", // 0x88
+    "drum", "dual", "duck", "dude", "duel", "duet", "duke", "dull", // 0x90
+    "dune", "dusk", "dust", "duty", "each", "earn", "ease", "east", // 0x98
+    "easy", "edge", "edit", "else", "emit", "ends", "envy", "epic", // 0xA0
+    "even", "evil", "exam", "exit", "face", "fact", "fade", "fail", // 0xA8
+    "fair", "fake", "fall", "fame", "fang", "farm", "fast", "fate", // 0xB0
+    "fawn", "fear", "feat", "feed", "feel", "fell", "felt", "fern", // 0xB8
+    "file", "fill", "film", "find", "fine", "fire", "firm", "fish", // 0xC0
+    "fist", "five", "flag", "flat", "fled", "flew", "flex", "flip", // 0xC8
+    "flow", "foam", "fold", "folk", "fond", "font", "food", "foot", // 0xD0
+    "fork", "form", "fort", "foul", "four", "free", "frog", "from", // 0xD8
+    "fuel", "full", "fund", "fury", "fuse", "gait", "gale", "game", // 0xE0
+    "gang", "gate", "gave", "gaze", "gear", "gene", "gift", "gild", // 0xE8
+    "girl", "give", "glad", "glow", "glue", "goat", "goes", "gold", // 0xF0
+    "golf", "gone", "good", "grab", "gray", "grew", "grid", "grim", // 0xF8
 ];
 
 #[derive(Debug)]
@@ -61,10 +61,7 @@ impl std::error::Error for WordlistError {}
 /// Build a reverse lookup map (word → byte value) at first use.
 fn word_to_byte(word: &str) -> Option<u8> {
     let lower = word.to_ascii_lowercase();
-    WORDLIST
-        .iter()
-        .position(|&w| w == lower)
-        .map(|i| i as u8)
+    WORDLIST.iter().position(|&w| w == lower).map(|i| i as u8)
 }
 
 /// Encode bytes as a wordlist string.
@@ -94,10 +91,7 @@ pub fn decode_words(input: &str) -> Result<Vec<u8>, WordlistError> {
 
     words
         .iter()
-        .map(|&w| {
-            word_to_byte(w)
-                .ok_or_else(|| WordlistError(format!("unknown word: {:?}", w)))
-        })
+        .map(|&w| word_to_byte(w).ok_or_else(|| WordlistError(format!("unknown word: {:?}", w))))
         .collect()
 }
 

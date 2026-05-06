@@ -83,9 +83,7 @@ impl SessionState {
 
         // SHA-256 hex should be 64 chars
         if self.root_cert_sha256.len() != 64 {
-            return Err(StateValidationError::InvalidHash(
-                "root_cert_sha256".into(),
-            ));
+            return Err(StateValidationError::InvalidHash("root_cert_sha256".into()));
         }
 
         // SSS consistency
@@ -177,9 +175,18 @@ mod tests {
                 threshold: 2,
                 total: 3,
                 custodians: vec![
-                    Custodian { name: "Alice".into(), index: 1 },
-                    Custodian { name: "Bob".into(), index: 2 },
-                    Custodian { name: "Carol".into(), index: 3 },
+                    Custodian {
+                        name: "Alice".into(),
+                        index: 1,
+                    },
+                    Custodian {
+                        name: "Bob".into(),
+                        index: 2,
+                    },
+                    Custodian {
+                        name: "Carol".into(),
+                        index: 3,
+                    },
                 ],
                 pin_verify_hash: "b".repeat(64),
                 share_commitments: vec!["c".repeat(64), "d".repeat(64), "e".repeat(64)],

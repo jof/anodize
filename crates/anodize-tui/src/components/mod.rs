@@ -6,7 +6,7 @@ pub mod share_reveal;
 pub mod status_bar;
 
 use crossterm::event::KeyEvent;
-use ratatui::{Frame, layout::Rect};
+use ratatui::{layout::Rect, Frame};
 
 use crate::action::Action;
 

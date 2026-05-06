@@ -127,12 +127,7 @@ impl CeremonyMode {
     }
 
     /// Render with access to parent App state.
-    pub fn render_with_app(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        app: &crate::app::App,
-    ) {
+    pub fn render_with_app(&self, frame: &mut Frame, area: Rect, app: &crate::app::App) {
         let title = match self.state {
             CeremonyPhase::OperationSelect => "Select Operation",
             CeremonyPhase::Planning(PlanningState::KeyAction) => "Key Management",
@@ -141,18 +136,36 @@ impl CeremonyMode {
             CeremonyPhase::BurningDisc => "Writing Session\u{2026}",
             CeremonyPhase::DiscDone => "Disc Session Written",
             CeremonyPhase::Planning(PlanningState::LoadCsr) => "Select Certificate Profile",
-            CeremonyPhase::Planning(PlanningState::CsrPreview) => "CSR Review \u{2014} VERIFY BEFORE SIGNING",
+            CeremonyPhase::Planning(PlanningState::CsrPreview) => {
+                "CSR Review \u{2014} VERIFY BEFORE SIGNING"
+            }
             CeremonyPhase::Planning(PlanningState::RevokeInput) => "Revoke Certificate",
-            CeremonyPhase::Planning(PlanningState::RevokePreview) => "Revocation Preview \u{2014} VERIFY BEFORE COMMITTING",
+            CeremonyPhase::Planning(PlanningState::RevokePreview) => {
+                "Revocation Preview \u{2014} VERIFY BEFORE COMMITTING"
+            }
             CeremonyPhase::Planning(PlanningState::CrlPreview) => "CRL Issuance Preview",
-            CeremonyPhase::Planning(PlanningState::CustodianSetup) => "Root Init \u{2014} Custodian Setup",
-            CeremonyPhase::Planning(PlanningState::ShareReveal) => "Root Init \u{2014} Distribute Shares",
-            CeremonyPhase::Planning(PlanningState::ShareVerify) => "Root Init \u{2014} Verify Shares",
+            CeremonyPhase::Planning(PlanningState::CustodianSetup) => {
+                "Root Init \u{2014} Custodian Setup"
+            }
+            CeremonyPhase::Planning(PlanningState::ShareReveal) => {
+                "Root Init \u{2014} Distribute Shares"
+            }
+            CeremonyPhase::Planning(PlanningState::ShareVerify) => {
+                "Root Init \u{2014} Verify Shares"
+            }
             CeremonyPhase::Planning(PlanningState::RekeyQuorum) => "Re-key Shares \u{2014} Quorum",
-            CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup) => "Re-key Shares \u{2014} New Custodians",
-            CeremonyPhase::Planning(PlanningState::RekeyShareReveal) => "Re-key Shares \u{2014} Distribute New Shares",
-            CeremonyPhase::Planning(PlanningState::RekeyShareVerify) => "Re-key Shares \u{2014} Verify New Shares",
-            CeremonyPhase::Planning(PlanningState::MigrateConfirm) => "Disc Migration \u{2014} Verify Chain",
+            CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup) => {
+                "Re-key Shares \u{2014} New Custodians"
+            }
+            CeremonyPhase::Planning(PlanningState::RekeyShareReveal) => {
+                "Re-key Shares \u{2014} Distribute New Shares"
+            }
+            CeremonyPhase::Planning(PlanningState::RekeyShareVerify) => {
+                "Re-key Shares \u{2014} Verify New Shares"
+            }
+            CeremonyPhase::Planning(PlanningState::MigrateConfirm) => {
+                "Disc Migration \u{2014} Verify Chain"
+            }
             CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => "Insert Blank Target Disc",
             CeremonyPhase::Quorum => "Quorum \u{2014} Reconstruct PIN",
             CeremonyPhase::Done => "Ceremony Complete",
@@ -178,7 +191,12 @@ impl CeremonyMode {
                     format!("  Disc: {n_sessions} prior session(s).")
                 };
                 let state_label = if let Some(ref state) = app.disc.session_state {
-                    let names: Vec<&str> = state.sss.custodians.iter().map(|c| c.name.as_str()).collect();
+                    let names: Vec<&str> = state
+                        .sss
+                        .custodians
+                        .iter()
+                        .map(|c| c.name.as_str())
+                        .collect();
                     format!(
                         "  STATE.JSON: v{}, {}/{} SSS, custodians: {}",
                         state.version,
@@ -263,12 +281,17 @@ impl CeremonyMode {
             }
 
             CeremonyPhase::Planning(PlanningState::CsrPreview) => {
-                let subject = app.data.csr_subject_display.as_deref().unwrap_or("(unknown)");
+                let subject = app
+                    .data
+                    .csr_subject_display
+                    .as_deref()
+                    .unwrap_or("(unknown)");
                 let profile_name = app
                     .profile
                     .as_ref()
                     .and_then(|p| {
-                        app.data.selected_profile_idx
+                        app.data
+                            .selected_profile_idx
                             .map(|i| p.cert_profiles[i].name.as_str())
                     })
                     .unwrap_or("?");
@@ -288,11 +311,13 @@ impl CeremonyMode {
                 let fp = app.data.fingerprint.as_deref().unwrap_or("(none)");
                 let ca = app.profile.as_ref().map(|p| &p.ca);
                 let (cn, org, country) = ca
-                    .map(|c| (
-                        c.common_name.as_str(),
-                        c.organization.as_str(),
-                        c.country.as_str(),
-                    ))
+                    .map(|c| {
+                        (
+                            c.common_name.as_str(),
+                            c.organization.as_str(),
+                            c.country.as_str(),
+                        )
+                    })
                     .unwrap_or(("?", "?", "?"));
                 let has_crl = app.data.crl_der.is_some();
                 let mut lines = vec![
@@ -323,7 +348,10 @@ impl CeremonyMode {
                 };
                 vec![
                     String::new(),
-                    format!("  {} revoked cert(s) on record.", app.data.revocation_list.len()),
+                    format!(
+                        "  {} revoked cert(s) on record.",
+                        app.data.revocation_list.len()
+                    ),
                     String::new(),
                     format!("  {phase_hint}"),
                     String::new(),
@@ -416,7 +444,9 @@ impl CeremonyMode {
                     }
                     _ => {
                         lines.push("  [1]  Copy artifacts to shuttle".into());
-                        lines.push("  [q]  Quit without shuttle copy (disc is the primary record)".into());
+                        lines.push(
+                            "  [q]  Quit without shuttle copy (disc is the primary record)".into(),
+                        );
                     }
                 }
                 lines

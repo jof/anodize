@@ -117,10 +117,7 @@ impl ShareReveal {
             let ns = &self.shares[self.current];
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!(
-                    "  Hand device to: #{} {}",
-                    ns.index, ns.custodian_name
-                ),
+                format!("  Hand device to: #{} {}", ns.index, ns.custodian_name),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),

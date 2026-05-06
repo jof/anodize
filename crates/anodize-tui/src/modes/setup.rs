@@ -45,12 +45,7 @@ impl SetupMode {
     }
 
     /// Render with access to parent App state (for profile info, PIN display, disc state).
-    pub fn render_with_app(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        app: &crate::app::App,
-    ) {
+    pub fn render_with_app(&self, frame: &mut Frame, area: Rect, app: &crate::app::App) {
         let title = match self.phase {
             SetupPhase::ClockCheck => "Clock Verification",
             SetupPhase::WaitShuttle => "Waiting for USB",
@@ -76,7 +71,8 @@ impl SetupMode {
                     ),
                     String::new(),
                     "  Timestamps derived from this value appear permanently in the".into(),
-                    "  optical disc archive and audit log. Verify against a reference clock.".into(),
+                    "  optical disc archive and audit log. Verify against a reference clock."
+                        .into(),
                     String::new(),
                     "  [1]  Time is correct — continue".into(),
                     "  [q]  Exit to correct clock, then relaunch".into(),
@@ -102,7 +98,10 @@ impl SetupMode {
                         "  [q]  Quit".into(),
                     ]
                 } else {
-                    vec![String::new(), "  Profile loaded. Press [1] to continue.".into()]
+                    vec![
+                        String::new(),
+                        "  Profile loaded. Press [1] to continue.".into(),
+                    ]
                 }
             }
             SetupPhase::EnterPin => {
@@ -117,7 +116,8 @@ impl SetupMode {
             SetupPhase::WaitDisc => {
                 let disc_info = match &app.disc.optical_dev {
                     Some(dev) => {
-                        let cap = app.disc
+                        let cap = app
+                            .disc
                             .sessions_remaining
                             .map(|r| format!(", {r} sessions remaining"))
                             .unwrap_or_default();
