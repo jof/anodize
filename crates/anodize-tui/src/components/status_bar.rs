@@ -18,7 +18,7 @@ pub enum HwState {
     Error(String),
 }
 
-/// Persistent hardware status bar showing HSM, disc, and USB state.
+/// Persistent hardware status bar showing HSM, disc, and shuttle state.
 ///
 /// Rendered as two lines at the bottom of the screen, above the status message.
 pub struct StatusBar<'a> {
@@ -55,7 +55,7 @@ impl Widget for StatusBar<'_> {
             buf.set_string(x, y, "  ", bg);
             x += 2;
         }
-        render_hw_entry(buf, &mut x, y, "USB", self.usb, area.right());
+        render_hw_entry(buf, &mut x, y, "Shuttle", self.usb, area.right());
 
         // If we have a second line, put the log key hint there
         if area.height >= 2 {

@@ -193,7 +193,10 @@ impl App {
                             self.disc.prior_sessions.push(intent);
                         }
                         match self.current_op.clone() {
-                            Some(Operation::InitRoot) | Some(Operation::GenerateRootCa) => {
+                            Some(Operation::InitRoot) => {
+                                // PIN is already in pin_buf from the SSS split.
+                                // Login to HSM and proceed directly.
+                                self.do_login_with_pin(&self.pin_buf.clone());
                                 match self.disc.pending_key_action {
                                     Some(1) => self.do_generate_and_build(),
                                     Some(2) => self.do_find_and_build(),
@@ -203,9 +206,12 @@ impl App {
                                     }
                                 }
                             }
-                            Some(Operation::SignCsr) => self.do_sign_csr(),
-                            Some(Operation::RevokeCert) => self.do_sign_crl_for_revoke(),
-                            Some(Operation::IssueCrl) => self.do_sign_crl_refresh(),
+                            Some(Operation::SignCsr)
+                            | Some(Operation::RevokeCert)
+                            | Some(Operation::IssueCrl) => {
+                                // These need HSM login via quorum share reconstruction.
+                                self.enter_quorum_phase();
+                            }
                             _ => {
                                 self.set_status("Unknown operation after intent");
                                 self.ceremony.state = CeremonyPhase::OperationSelect;
@@ -234,7 +240,6 @@ impl App {
                             .unwrap_or_else(|| "/run/anodize/staging".into());
                         let op_label = match self.current_op {
                             Some(Operation::InitRoot) => "Root init",
-                            Some(Operation::GenerateRootCa) => "Root CA + CRL",
                             Some(Operation::SignCsr) => "Intermediate cert",
                             Some(Operation::RevokeCert) => "Revocation + CRL",
                             Some(Operation::IssueCrl) => "CRL refresh",
@@ -254,11 +259,47 @@ impl App {
         }
     }
 
-    // ── HSM login ─────────────────────────────────────────────────────────────
+    // ── HSM detection (no login — authentication deferred to Quorum phase) ──
 
-    pub(crate) fn do_login(&mut self) {
-        let pin: String = self.pin_buf.drain(..).collect();
-        let pin = SecretString::new(pin);
+    pub(crate) fn do_detect_hsm(&mut self) {
+        let cfg = match &self.profile {
+            Some(p) => &p.hsm,
+            None => {
+                self.set_status("No profile loaded");
+                self.setup.phase = SetupPhase::ProfileLoaded;
+                return;
+            }
+        };
+
+        match Pkcs11Hsm::new(&cfg.module_path, &cfg.token_label) {
+            Ok(_hsm) => {
+                let label = &cfg.token_label;
+                self.hw.hsm_state = HwState::Present(format!("token={label}"));
+                self.setup.phase = SetupPhase::WaitDisc;
+                self.set_status(
+                    "HSM detected. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc) and press [1].",
+                );
+            }
+            Err(e) => {
+                self.hw.hsm_state = HwState::Error(format!("{e}"));
+                self.set_status(format!("HSM detection failed: {e}"));
+                self.setup.phase = SetupPhase::ProfileLoaded;
+            }
+        }
+    }
+
+    // ── HSM login via reconstructed PIN (called from Quorum phase) ───────────
+
+    pub(crate) fn do_login_with_pin(&mut self, pin_hex: &str) {
+        let pin_bytes = match hex::decode(pin_hex) {
+            Ok(b) => b,
+            Err(e) => {
+                self.set_status(format!("Internal PIN decode error: {e}"));
+                return;
+            }
+        };
+        let pin = SecretString::new(hex::encode(&pin_bytes));
+
         let cfg = match &self.profile {
             Some(p) => &p.hsm,
             None => {
@@ -276,15 +317,106 @@ impl App {
         };
         let mut actor = HsmActor::spawn(hsm);
         if let Err(e) = actor.login(&pin) {
-            self.set_status(format!("Login failed: {e}"));
+            self.set_status(format!("HSM login failed: {e}"));
             return;
         }
         self.hw.actor = Some(actor);
-        self.setup.phase = SetupPhase::WaitDisc;
-        self.hw.hsm_state = HwState::Ready("logged in".into());
-        self.set_status(
-            "Logged in. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc) and press [1].",
+        self.hw.hsm_state = HwState::Ready("authenticated via SSS quorum".into());
+    }
+
+    // ── Quorum phase: collect shares → reconstruct PIN → HSM login ─────────
+
+    /// Enter the Quorum phase: create a ShareInput and switch to Quorum state.
+    pub(crate) fn enter_quorum_phase(&mut self) {
+        let sss_meta = match &self.disc.session_state {
+            Some(state) => state.sss.clone(),
+            None => {
+                self.set_status("ERROR: no STATE.JSON loaded — cannot enter quorum.");
+                self.ceremony.state = CeremonyPhase::OperationSelect;
+                return;
+            }
+        };
+
+        self.sss.share_input = Some(crate::components::share_input::ShareInput::new(
+            sss_meta.clone(),
+            32,
+        ));
+        self.ceremony.state = CeremonyPhase::Quorum;
+        self.set_status(format!(
+            "Quorum: collect {}-of-{} shares to unlock HSM.",
+            sss_meta.threshold, sss_meta.total,
+        ));
+
+        tracing::info!(
+            threshold = sss_meta.threshold,
+            total = sss_meta.total,
+            "Entering quorum phase for {:?}",
+            self.current_op,
         );
+    }
+
+    /// Called when quorum ShareInput reaches threshold during the Quorum phase.
+    pub(crate) fn do_quorum_complete(&mut self) {
+        // Collect shares
+        let shares: Vec<anodize_sss::Share> = self
+            .sss
+            .share_input
+            .as_ref()
+            .map(|si| si.collected.iter().map(|c| c.share.clone()).collect())
+            .unwrap_or_default();
+        self.sss.share_input = None;
+
+        let threshold = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.threshold)
+            .unwrap_or(2);
+
+        // Reconstruct PIN
+        let pin_bytes = match anodize_sss::reconstruct(&shares, threshold) {
+            Ok(b) => b,
+            Err(e) => {
+                self.set_status(format!("PIN reconstruction failed: {e}"));
+                self.ceremony.state = CeremonyPhase::OperationSelect;
+                self.current_op = None;
+                return;
+            }
+        };
+
+        // Verify against pin_verify_hash
+        let pin_hash = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&pin_bytes))
+        };
+        let expected = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.pin_verify_hash.as_str())
+            .unwrap_or("");
+
+        if pin_hash != expected {
+            self.set_status("PIN verify hash mismatch — shares may be corrupted.");
+            self.ceremony.state = CeremonyPhase::OperationSelect;
+            self.current_op = None;
+            return;
+        }
+
+        // Login to HSM with reconstructed PIN
+        let pin_hex = hex::encode(&pin_bytes);
+        self.do_login_with_pin(&pin_hex);
+
+        // Dispatch to the pending operation
+        match self.current_op.clone() {
+            Some(Operation::SignCsr) => self.do_sign_csr(),
+            Some(Operation::RevokeCert) => self.do_sign_crl_for_revoke(),
+            Some(Operation::IssueCrl) => self.do_sign_crl_refresh(),
+            other => {
+                self.set_status(format!("Unexpected operation after quorum: {other:?}"));
+                self.ceremony.state = CeremonyPhase::OperationSelect;
+            }
+        }
     }
 
     // ── Operation selection ───────────────────────────────────────────────────
@@ -301,16 +433,12 @@ impl App {
                     self.ceremony.state = CeremonyPhase::OperationSelect;
                     return;
                 }
-                self.sss.custodian_buf.clear();
                 self.sss.custodian_names.clear();
-                self.ceremony.state = CeremonyPhase::Planning(PlanningState::CustodianSetup);
-                self.set_status("Enter custodian names (comma-separated), then press Enter.");
-            }
-            Operation::GenerateRootCa => {
-                self.ceremony.state = CeremonyPhase::Planning(PlanningState::KeyAction);
-                self.set_status(
-                    "[1] Generate new P-384 keypair (fresh)  [2] Use existing key (resume)",
+                self.sss.custodian_setup = Some(
+                    crate::components::custodian_setup::CustodianSetup::new("Root Init"),
                 );
+                self.ceremony.state = CeremonyPhase::Planning(PlanningState::CustodianSetup);
+                self.set_status("Enter custodian names one-by-one, then set threshold.");
             }
             Operation::SignCsr => {
                 self.do_load_csr();
@@ -354,15 +482,9 @@ impl App {
 
     // ── InitRoot: confirm custodians → generate PIN → split → reveal ────────
 
-    pub(crate) fn do_init_root_confirm_custodians(&mut self) {
-        // Parse custodian names from comma-separated input
-        let names: Vec<String> = self
-            .sss
-            .custodian_buf
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+    /// Called by the CustodianSetup component (names already collected).
+    pub(crate) fn do_init_root_confirm_custodians_with_threshold(&mut self, threshold: u8) {
+        let names = self.sss.custodian_names.clone();
 
         if names.len() < 2 {
             self.set_status("Need at least 2 custodians for SSS (threshold >= 2).");
@@ -374,8 +496,6 @@ impl App {
         }
 
         let total = names.len() as u8;
-        // Default threshold: 2-of-N (minimum for SSS)
-        let threshold = 2u8;
 
         // Generate random 32-byte PIN
         let mut pin_bytes = vec![0u8; 32];
@@ -510,23 +630,18 @@ impl App {
 
         // Store reconstructed PIN for re-splitting
         self.pin_buf = hex::encode(&pin_bytes);
-        self.sss.custodian_buf.clear();
         self.sss.custodian_names.clear();
+        self.sss.custodian_setup = Some(crate::components::custodian_setup::CustodianSetup::new(
+            "Re-key Shares",
+        ));
         self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup);
-        self.set_status("PIN verified. Enter new custodian names (comma-separated).");
+        self.set_status("PIN verified. Enter new custodian names, then set threshold.");
 
         tracing::info!("RekeyShares: quorum reached, PIN verified, entering custodian setup");
     }
 
-    pub(crate) fn do_rekey_confirm_custodians(&mut self) {
-        // Parse new custodian names
-        let names: Vec<String> = self
-            .sss
-            .custodian_buf
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+    pub(crate) fn do_rekey_confirm_custodians_with_threshold(&mut self, threshold: u8) {
+        let names = self.sss.custodian_names.clone();
 
         if names.len() < 2 {
             self.set_status("Need at least 2 custodians for SSS (threshold >= 2).");
@@ -538,7 +653,6 @@ impl App {
         }
 
         let total = names.len() as u8;
-        let threshold = 2u8;
 
         // PIN length: 32 bytes
         let pin_bytes = match hex::decode(&self.pin_buf) {
@@ -1239,7 +1353,7 @@ impl App {
     /// Build the intent audit event (name, data) for the current operation.
     fn build_intent_audit_event(&self, genesis_hex: &str) -> Option<(String, serde_json::Value)> {
         match &self.current_op {
-            Some(Operation::InitRoot) | Some(Operation::GenerateRootCa) => {
+            Some(Operation::InitRoot) => {
                 let (cn, org, country) = self
                     .profile
                     .as_ref()
@@ -1481,7 +1595,7 @@ impl App {
                     files,
                 })
             }
-            Some(Operation::InitRoot) | Some(Operation::GenerateRootCa) => {
+            Some(Operation::InitRoot) => {
                 let cert_der = self.data.cert_der.clone()?;
                 let crl_der = self.data.crl_der.clone()?;
 
@@ -1774,7 +1888,7 @@ impl App {
         let staging_log = PathBuf::from("/run/anodize/staging/audit.log");
 
         match self.current_op.clone() {
-            Some(Operation::GenerateRootCa) => {
+            Some(Operation::InitRoot) => {
                 if let Some(cert_der) = &self.data.cert_der {
                     if let Err(e) = std::fs::write(shuttle.join("root.crt"), cert_der) {
                         self.set_status(format!("Shuttle write failed (root.crt): {e}"));
@@ -1817,8 +1931,8 @@ impl App {
                     }
                 }
             }
-            Some(Operation::InitRoot) | Some(Operation::RekeyShares) => {
-                // No shuttle artifacts for these operations
+            Some(Operation::RekeyShares) => {
+                // No shuttle artifacts for re-key
                 self.ceremony.state = CeremonyPhase::Done;
                 self.set_status("Operation complete.");
                 return;
@@ -1848,6 +1962,17 @@ impl App {
     }
 
     pub(crate) fn render_ceremony_content(&self, frame: &mut Frame, area: Rect) {
+        // CustodianSetup overlay for InitRoot and Rekey custodian entry
+        match self.ceremony.state {
+            CeremonyPhase::Planning(PlanningState::CustodianSetup)
+            | CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup) => {
+                if let Some(ref setup) = self.sss.custodian_setup {
+                    setup.render(frame, area);
+                    return;
+                }
+            }
+            _ => {}
+        }
         // ShareReveal / ShareInput overlay for InitRoot and Rekey states
         match self.ceremony.state {
             CeremonyPhase::Planning(PlanningState::ShareReveal)
@@ -1857,7 +1982,8 @@ impl App {
                     return;
                 }
             }
-            CeremonyPhase::Planning(PlanningState::ShareVerify)
+            CeremonyPhase::Quorum
+            | CeremonyPhase::Planning(PlanningState::ShareVerify)
             | CeremonyPhase::Planning(PlanningState::RekeyShareVerify)
             | CeremonyPhase::Planning(PlanningState::RekeyQuorum) => {
                 if let Some(ref input) = self.sss.share_input {

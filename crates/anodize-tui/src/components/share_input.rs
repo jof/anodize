@@ -1,9 +1,9 @@
 //! Share input component for the Quorum phase.
 //!
-//! Accepts wordlist-encoded share input from a custodian. On submission,
-//! decodes the wordlist string into a `Share`, auto-identifies the custodian
-//! via the embedded index byte, and verifies the share against its commitment
-//! stored in `STATE.JSON`.
+//! Word-by-word entry with Tab autocomplete and per-word validation.
+//! On submission, decodes the wordlist into a `Share`, auto-identifies
+//! the custodian via the embedded index byte, and verifies against the
+//! commitment stored in `STATE.JSON`.
 
 use anodize_config::state::SssMetadata;
 use anodize_sss::Share;
@@ -37,12 +37,18 @@ pub struct CollectedShare {
     pub share: Share,
 }
 
-/// Interactive share input widget.
+/// Interactive share input widget with word-by-word entry.
 pub struct ShareInput {
-    /// Current text buffer (words typed so far).
-    pub buf: String,
+    /// Words entered so far for the current share.
+    words: Vec<String>,
+    /// Current word being typed.
+    word_buf: String,
+    /// Autocomplete candidates for the current prefix.
+    completions: Vec<&'static str>,
     /// Number of shares required (threshold k).
     pub threshold: u8,
+    /// Expected total word count per share (secret_len + 2 bytes = that many words).
+    expected_words: usize,
     /// Shares collected so far.
     pub collected: Vec<CollectedShare>,
     /// Expected share byte length (1 + secret_len + 1, from split params).
@@ -56,9 +62,14 @@ pub struct ShareInput {
 impl ShareInput {
     pub fn new(sss_meta: SssMetadata, secret_len: usize) -> Self {
         let threshold = sss_meta.threshold;
+        // Share bytes = 1 (index) + secret_len + 1 (checksum) = secret_len + 2
+        let expected_words = secret_len + 2;
         Self {
-            buf: String::new(),
+            words: Vec::new(),
+            word_buf: String::new(),
+            completions: Vec::new(),
             threshold,
+            expected_words,
             collected: Vec::new(),
             secret_len,
             last_result: None,
@@ -71,40 +82,89 @@ impl ShareInput {
         self.collected.len() >= self.threshold as usize
     }
 
-    /// Handle a key event. Returns true if the share was submitted (Enter).
+    /// Handle a key event. Returns true if a share was just submitted.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
-            KeyCode::Char(c) => {
-                // Accept letters, spaces, dashes, slashes for wordlist input
-                if c.is_ascii_alphabetic() || c == ' ' || c == '-' || c == '/' {
-                    self.buf.push(if c.is_ascii_uppercase() {
-                        c.to_ascii_lowercase()
-                    } else {
-                        c
-                    });
-                }
+            KeyCode::Char(c) if c.is_ascii_alphabetic() => {
+                self.word_buf.push(c.to_ascii_lowercase());
+                self.update_completions();
                 false
             }
             KeyCode::Backspace => {
-                self.buf.pop();
+                if self.word_buf.is_empty() {
+                    // Pop the last accepted word
+                    if let Some(word) = self.words.pop() {
+                        self.word_buf = word;
+                        self.update_completions();
+                    }
+                } else {
+                    self.word_buf.pop();
+                    self.update_completions();
+                }
                 self.last_result = None;
                 false
             }
-            KeyCode::Enter => {
-                if self.buf.trim().is_empty() {
-                    return false;
+            KeyCode::Tab => {
+                // Autocomplete: if exactly one match, accept it
+                if self.completions.len() == 1 {
+                    self.accept_word(self.completions[0].to_string());
                 }
-                self.submit();
-                true
+                false
+            }
+            KeyCode::Char(' ') | KeyCode::Char('-') => {
+                // Space/dash: accept current word if valid
+                self.try_accept_current();
+                false
+            }
+            KeyCode::Enter => {
+                // Accept current word if valid, then try submit
+                self.try_accept_current();
+                if self.words.len() == self.expected_words {
+                    self.submit();
+                    return true;
+                }
+                false
             }
             _ => false,
         }
     }
 
-    /// Submit the current buffer: decode, identify custodian, verify commitment.
+    fn update_completions(&mut self) {
+        if self.word_buf.is_empty() {
+            self.completions.clear();
+        } else {
+            self.completions = anodize_sss::prefix_matches(&self.word_buf);
+        }
+    }
+
+    fn try_accept_current(&mut self) {
+        if self.word_buf.is_empty() {
+            return;
+        }
+        // Auto-complete if exactly one match
+        if self.completions.len() == 1 {
+            self.accept_word(self.completions[0].to_string());
+            return;
+        }
+        // Accept if exact match
+        if anodize_sss::is_valid_word(&self.word_buf) {
+            let word = self.word_buf.clone();
+            self.accept_word(word);
+        }
+    }
+
+    fn accept_word(&mut self, word: String) {
+        self.words.push(word);
+        self.word_buf.clear();
+        self.completions.clear();
+    }
+
+    /// Submit completed word list: decode, identify custodian, verify commitment.
     fn submit(&mut self) {
-        let input = self.buf.trim().to_string();
-        self.buf.clear();
+        let input = self.words.join("-");
+        self.words.clear();
+        self.word_buf.clear();
+        self.completions.clear();
 
         // Decode wordlist → Share
         let share = match Share::from_words(&input, self.secret_len) {
@@ -182,7 +242,7 @@ impl ShareInput {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(
-                "Share Input ({}/{})",
+                "Share Input — {}/{} shares",
                 self.collected.len(),
                 self.threshold
             ))
@@ -191,48 +251,113 @@ impl ShareInput {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
+        let dim = Style::default().fg(Color::DarkGray);
+        let green = Style::default().fg(Color::Green);
+
         let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(""));
 
         // Collected shares summary
-        if !self.collected.is_empty() {
-            for cs in &self.collected {
-                lines.push(Line::from(vec![
-                    Span::styled("  \u{2714} ", Style::default().fg(Color::Green)),
-                    Span::styled(
-                        format!("#{} {}", cs.index, cs.custodian_name),
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ]));
-            }
-            lines.push(Line::from(""));
+        for cs in &self.collected {
+            lines.push(Line::from(vec![
+                Span::styled("  ✓ ", green),
+                Span::styled(
+                    format!("#{} {}", cs.index, cs.custodian_name),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
         }
 
-        // Remaining needed
-        let remaining = self.threshold as usize - self.collected.len();
+        let remaining = self.threshold as usize - self.collected.len().min(self.threshold as usize);
         if remaining > 0 {
-            lines.push(Line::from(format!(
-                "  Enter share ({remaining} more needed):"
-            )));
+            if !self.collected.is_empty() {
+                lines.push(Line::from(""));
+            }
+
+            // Word progress
+            let total_entered = self.words.len();
+            lines.push(Line::from(vec![
+                Span::styled("  Word ", dim),
+                Span::styled(
+                    format!("{}/{}", total_entered + 1, self.expected_words),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(format!("  ({remaining} share(s) still needed)"), dim),
+            ]));
             lines.push(Line::from(""));
 
-            // Input buffer with cursor
-            let display = if self.buf.is_empty() {
-                Span::styled(
-                    "  (type wordlist words...)",
-                    Style::default().fg(Color::DarkGray),
-                )
+            // Show accepted words as a grid (4 per line, matching groups)
+            if !self.words.is_empty() {
+                for (g, chunk) in self.words.chunks(4).enumerate() {
+                    let formatted: Vec<Span> = chunk
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(w, word)| {
+                            let num = g * 4 + w + 1;
+                            vec![
+                                Span::styled(format!("{num:>2}."), dim),
+                                Span::styled(
+                                    format!("{word:<6} "),
+                                    Style::default().fg(Color::Green),
+                                ),
+                            ]
+                        })
+                        .collect();
+                    let mut row = vec![Span::raw("  ")];
+                    row.extend(formatted);
+                    lines.push(Line::from(row));
+                }
+                lines.push(Line::from(""));
+            }
+
+            // Current word input
+            let word_valid =
+                !self.word_buf.is_empty() && anodize_sss::is_valid_word(&self.word_buf);
+            let word_style = if self.word_buf.is_empty() {
+                dim
+            } else if word_valid {
+                Style::default().fg(Color::Green)
+            } else if self.completions.is_empty() {
+                Style::default().fg(Color::Red)
             } else {
-                Span::styled(
-                    format!("  {}\u{2588}", self.buf),
-                    Style::default().fg(Color::White),
-                )
+                Style::default().fg(Color::White)
             };
-            lines.push(Line::from(display));
+
+            lines.push(Line::from(vec![
+                Span::raw("  > "),
+                Span::styled(format!("{}█", self.word_buf), word_style),
+            ]));
+
+            // Autocomplete hint
+            if !self.word_buf.is_empty() {
+                if self.completions.len() == 1 {
+                    lines.push(Line::from(Span::styled(
+                        format!("    → {} [Tab]", self.completions[0]),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                } else if self.completions.len() > 1 && self.completions.len() <= 6 {
+                    let hint = self
+                        .completions
+                        .iter()
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    lines.push(Line::from(Span::styled(format!("    {hint}"), dim)));
+                } else if self.completions.is_empty() && !self.word_buf.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        "    ✘ no matching word",
+                        Style::default().fg(Color::Red),
+                    )));
+                }
+            }
         } else {
+            lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "  Quorum reached! Press Enter to reconstruct.",
+                "  Quorum reached! Press [Enter] to reconstruct PIN.",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -248,8 +373,8 @@ impl ShareInput {
                     index,
                 } => {
                     lines.push(Line::from(Span::styled(
-                        format!("  \u{2714} Accepted: #{index} {custodian_name}"),
-                        Style::default().fg(Color::Green),
+                        format!("  ✓ Accepted: #{index} {custodian_name}"),
+                        green,
                     )));
                 }
                 ShareVerifyResult::CommitmentFailed {
@@ -258,20 +383,24 @@ impl ShareInput {
                 } => {
                     lines.push(Line::from(Span::styled(
                         format!(
-                            "  \u{2718} COMMITMENT MISMATCH: #{index} {custodian_name} — share rejected"
+                            "  ✘ COMMITMENT MISMATCH: #{index} {custodian_name} — share rejected"
                         ),
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )));
+                    lines.push(Line::from(Span::styled(
+                        "    Re-enter this share carefully.",
+                        Style::default().fg(Color::Yellow),
                     )));
                 }
                 ShareVerifyResult::UnknownIndex(idx) => {
                     lines.push(Line::from(Span::styled(
-                        format!("  \u{2718} Unknown share index #{idx} — not in custodian roster"),
+                        format!("  ✘ Unknown share index #{idx} — not in custodian roster"),
                         Style::default().fg(Color::Red),
                     )));
                 }
                 ShareVerifyResult::DecodeError(msg) => {
                     lines.push(Line::from(Span::styled(
-                        format!("  \u{2718} {msg}"),
+                        format!("  ✘ {msg}"),
                         Style::default().fg(Color::Red),
                     )));
                 }
@@ -280,8 +409,8 @@ impl ShareInput {
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  [Esc] Cancel",
-            Style::default().fg(Color::DarkGray),
+            "  [Tab] Complete   [Space/-] Next word   [BS] Undo   [Esc] Cancel",
+            dim,
         )));
 
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });

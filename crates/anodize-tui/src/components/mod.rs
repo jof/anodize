@@ -1,4 +1,5 @@
 pub mod confirm_dialog;
+pub mod custodian_setup;
 pub mod mode_bar;
 pub mod phase_bar;
 pub mod share_input;

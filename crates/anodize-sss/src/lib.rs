@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroize;
 
-pub use wordlist::{decode_words, encode_words};
+pub use wordlist::{decode_words, encode_words, is_valid_word, prefix_matches};
 
 // ── Errors ──────────────────────────────────────────────────────────────────
 

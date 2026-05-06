@@ -71,9 +71,7 @@ fn main() -> Result<()> {
                 }
                 continue;
             }
-            KeyCode::Char('n') | KeyCode::Char('N')
-                if cfg!(feature = "dev-softhsm-usb") =>
-            {
+            KeyCode::Char('n') | KeyCode::Char('N') if cfg!(feature = "dev-softhsm-usb") => {
                 show_network_info();
                 continue;
             }
@@ -248,7 +246,10 @@ fn show_network_info() {
     println!("\r");
     println!("  === SSH Host Keys ===\r");
     match Command::new("sh")
-        .args(["-c", "for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf \"$f\"; done"])
+        .args([
+            "-c",
+            "for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf \"$f\"; done",
+        ])
         .output()
     {
         Ok(out) => {

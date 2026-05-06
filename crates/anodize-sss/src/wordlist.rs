@@ -95,6 +95,21 @@ pub fn decode_words(input: &str) -> Result<Vec<u8>, WordlistError> {
         .collect()
 }
 
+/// Return all wordlist entries matching a case-insensitive prefix.
+pub fn prefix_matches(prefix: &str) -> Vec<&'static str> {
+    let lower = prefix.to_ascii_lowercase();
+    WORDLIST
+        .iter()
+        .copied()
+        .filter(|w| w.starts_with(&lower))
+        .collect()
+}
+
+/// Check if a word is in the wordlist (case-insensitive).
+pub fn is_valid_word(word: &str) -> bool {
+    word_to_byte(word).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,5 +160,52 @@ mod tests {
         let encoded = encode_words(&all);
         let decoded = decode_words(&encoded).unwrap();
         assert_eq!(decoded, all);
+    }
+
+    #[test]
+    fn prefix_matches_single() {
+        let matches = prefix_matches("abl");
+        assert_eq!(matches, vec!["able"]);
+    }
+
+    #[test]
+    fn prefix_matches_multiple() {
+        let matches = prefix_matches("ba");
+        assert!(matches.len() > 1);
+        for w in &matches {
+            assert!(w.starts_with("ba"), "{w} should start with 'ba'");
+        }
+    }
+
+    #[test]
+    fn prefix_matches_case_insensitive() {
+        let lower = prefix_matches("ab");
+        let upper = prefix_matches("AB");
+        assert_eq!(lower, upper);
+    }
+
+    #[test]
+    fn prefix_matches_empty_prefix_returns_all() {
+        let matches = prefix_matches("");
+        assert_eq!(matches.len(), 256);
+    }
+
+    #[test]
+    fn prefix_matches_no_match() {
+        let matches = prefix_matches("zzz");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn is_valid_word_accepts_known() {
+        assert!(is_valid_word("able"));
+        assert!(is_valid_word("ABLE"));
+        assert!(is_valid_word("Able"));
+    }
+
+    #[test]
+    fn is_valid_word_rejects_unknown() {
+        assert!(!is_valid_word("xyzzy"));
+        assert!(!is_valid_word(""));
     }
 }

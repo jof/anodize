@@ -2,7 +2,6 @@
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operation {
     InitRoot,
-    GenerateRootCa,
     SignCsr,
     RevokeCert,
     IssueCrl,
@@ -25,9 +24,8 @@ pub enum Action {
     // Setup flow
     ConfirmClock,
     ProfileLoaded,
-    AdvanceToPinEntry,
-    DoLogin,
-    HsmLoggedIn,
+    HsmDetected,
+    HsmDetectFailed(String),
     // Ceremony flow
     SetupComplete,
     SelectOperation(Operation),
@@ -54,18 +52,9 @@ pub enum Action {
     // Migration
     ConfirmMigrate,
     ConfirmMigrateTarget,
-    // InitRoot / RekeyShares shared custodian input
-    InitRootInputChar(char),
-    InitRootInputBackspace,
-    InitRootConfirmCustodians,
+    // InitRoot / RekeyShares ceremony
     InitRootAbort,
-    // RekeyShares ceremony
-    RekeyConfirmCustodians,
     RekeyAbort,
-    // PIN input
-    PinChar(char),
-    PinBackspace,
-    PinCancel,
     // Utilities sub-screens (1=SystemInfo, 2=AuditLog, 3=HsmBrowser)
     UtilScreen(u8),
 }

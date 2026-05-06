@@ -15,7 +15,7 @@ pub enum SetupPhase {
     ClockCheck,
     WaitShuttle,
     ProfileLoaded,
-    EnterPin,
+    HsmDetect,
     WaitDisc,
 }
 
@@ -25,14 +25,14 @@ impl SetupPhase {
             Self::ClockCheck => 0,
             Self::WaitShuttle => 1,
             Self::ProfileLoaded => 2,
-            Self::EnterPin => 3,
+            Self::HsmDetect => 3,
             Self::WaitDisc => 4,
         }
     }
 }
 
 /// Setup mode component: walks through clock verification, shuttle detection,
-/// profile loading, HSM PIN entry, and disc readiness.
+/// profile loading, HSM detection, and disc readiness.
 pub struct SetupMode {
     pub phase: SetupPhase,
 }
@@ -48,9 +48,9 @@ impl SetupMode {
     pub fn render_with_app(&self, frame: &mut Frame, area: Rect, app: &crate::app::App) {
         let title = match self.phase {
             SetupPhase::ClockCheck => "Clock Verification",
-            SetupPhase::WaitShuttle => "Waiting for USB",
+            SetupPhase::WaitShuttle => "Waiting for Shuttle",
             SetupPhase::ProfileLoaded => "Profile Loaded",
-            SetupPhase::EnterPin => "HSM Authentication",
+            SetupPhase::HsmDetect => "HSM Detection",
             SetupPhase::WaitDisc => "Insert Disc",
         };
 
@@ -80,7 +80,7 @@ impl SetupMode {
             }
             SetupPhase::WaitShuttle => vec![
                 String::new(),
-                "  Insert USB stick containing profile.toml.".into(),
+                "  Insert shuttle USB containing profile.toml.".into(),
                 String::new(),
                 "  Scanning automatically…".into(),
             ],
@@ -94,7 +94,7 @@ impl SetupMode {
                         format!("  HSM token   : {}", p.hsm.token_label),
                         format!("  Shuttle     : {}", app.shuttle_mount.display()),
                         String::new(),
-                        "  [1]  Begin ceremony (HSM PIN entry)".into(),
+                        "  [1]  Detect HSM and continue".into(),
                         "  [q]  Quit".into(),
                     ]
                 } else {
@@ -104,13 +104,27 @@ impl SetupMode {
                     ]
                 }
             }
-            SetupPhase::EnterPin => {
-                let stars = "*".repeat(app.pin_display_len);
+            SetupPhase::HsmDetect => {
+                let hsm_info = match &app.hw.hsm_state {
+                    crate::components::status_bar::HwState::Absent => {
+                        "  Detecting PKCS#11 module and HSM token…".into()
+                    }
+                    crate::components::status_bar::HwState::Present(info) => {
+                        format!("  HSM detected: {info}")
+                    }
+                    crate::components::status_bar::HwState::Ready(info) => {
+                        format!("  HSM ready: {info}")
+                    }
+                    crate::components::status_bar::HwState::Error(msg) => {
+                        format!("  HSM error: {msg}")
+                    }
+                };
                 vec![
                     String::new(),
-                    format!("  PIN: {stars}"),
+                    hsm_info,
                     String::new(),
-                    "  Press Enter to log in, Esc to cancel.".into(),
+                    "  The HSM will be authenticated later via SSS quorum.".into(),
+                    "  No PIN entry is required at this stage.".into(),
                 ]
             }
             SetupPhase::WaitDisc => {
@@ -159,16 +173,10 @@ impl Component for SetupMode {
             SetupPhase::WaitShuttle => {} // auto-advance in background_tick
             SetupPhase::ProfileLoaded => {
                 if key.code == KeyCode::Char('1') {
-                    return Action::AdvanceToPinEntry;
+                    return Action::HsmDetected; // triggers HSM detection in app.update()
                 }
             }
-            SetupPhase::EnterPin => match key.code {
-                KeyCode::Char(c) => return Action::PinChar(c),
-                KeyCode::Backspace => return Action::PinBackspace,
-                KeyCode::Enter => return Action::DoLogin,
-                KeyCode::Esc => return Action::PinCancel,
-                _ => {}
-            },
+            SetupPhase::HsmDetect => {} // auto-advance after detection completes
             SetupPhase::WaitDisc => {
                 if key.code == KeyCode::Char('1') {
                     return Action::ConfirmDisc;

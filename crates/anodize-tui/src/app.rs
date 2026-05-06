@@ -124,6 +124,7 @@ pub struct SssContext {
     pub custodian_names: Vec<String>,
     pub share_input: Option<crate::components::share_input::ShareInput>,
     pub share_reveal: Option<crate::components::share_reveal::ShareReveal>,
+    pub custodian_setup: Option<crate::components::custodian_setup::CustodianSetup>,
 }
 
 impl SssContext {
@@ -134,6 +135,7 @@ impl SssContext {
             custodian_names: Vec::new(),
             share_input: None,
             share_reveal: None,
+            custodian_setup: None,
         }
     }
 }
@@ -175,9 +177,8 @@ pub struct App {
     // Active operation
     pub current_op: Option<Operation>,
 
-    // PIN input — display length is randomised noise, never reveals actual length
+    // Temporary PIN buffer — used internally by SSS operations, never displayed
     pub pin_buf: String,
-    pub pin_display_len: usize,
 
     // Two-key confirmation dialog (modal overlay)
     pub confirm_dialog: Option<ConfirmDialog>,
@@ -214,7 +215,6 @@ impl App {
             profile_toml_bytes: None,
             current_op: None,
             pin_buf: String::new(),
-            pin_display_len: 0,
             confirm_dialog: None,
             content_scroll: 0,
         }
@@ -251,8 +251,7 @@ impl App {
         }
 
         // Log view toggle (except during text entry)
-        let in_text_entry = self.setup.phase == SetupPhase::EnterPin
-            || (self.mode == Mode::Ceremony && self.ceremony.in_text_entry());
+        let in_text_entry = self.mode == Mode::Ceremony && self.ceremony.in_text_entry();
 
         if !in_text_entry {
             match key.code {
@@ -333,6 +332,43 @@ impl App {
             _ => {}
         }
 
+        // CustodianSetup component delegation
+        if self.mode == Mode::Ceremony {
+            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::CustodianSetup)
+                || self.ceremony.state
+                    == CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup)
+            {
+                if let Some(ref mut setup) = self.sss.custodian_setup {
+                    setup.handle_key(key);
+                    if setup.aborted {
+                        self.sss.custodian_setup = None;
+                        let is_rekey = self.ceremony.state
+                            == CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup);
+                        if is_rekey {
+                            return Action::RekeyAbort;
+                        } else {
+                            return Action::InitRootAbort;
+                        }
+                    }
+                    if setup.confirmed {
+                        let names = setup.names.clone();
+                        let threshold = setup.threshold;
+                        self.sss.custodian_setup = None;
+                        let is_rekey = self.ceremony.state
+                            == CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup);
+                        if is_rekey {
+                            self.sss.custodian_names = names;
+                            self.do_rekey_confirm_custodians_with_threshold(threshold);
+                        } else {
+                            self.sss.custodian_names = names;
+                            self.do_init_root_confirm_custodians_with_threshold(threshold);
+                        }
+                    }
+                }
+                return Action::Noop;
+            }
+        }
+
         // InitRoot share reveal/verify: delegate to owned components
         if self.mode == Mode::Ceremony {
             if self.ceremony.state == CeremonyPhase::Planning(PlanningState::ShareReveal) {
@@ -372,6 +408,24 @@ impl App {
                         self.set_status(
                             "Shares verified. [1] Generate root keypair  [2] Use existing key",
                         );
+                    }
+                }
+                return Action::Noop;
+            }
+
+            // Quorum phase: collect shares → reconstruct PIN → HSM login → execute
+            if self.ceremony.state == CeremonyPhase::Quorum {
+                if key.code == KeyCode::Esc {
+                    self.sss.share_input = None;
+                    self.current_op = None;
+                    self.ceremony.state = CeremonyPhase::OperationSelect;
+                    self.set_status("Quorum aborted.");
+                    return Action::Noop;
+                }
+                if let Some(ref mut input) = self.sss.share_input {
+                    input.handle_key(key);
+                    if input.quorum_reached() {
+                        self.do_quorum_complete();
                     }
                 }
                 return Action::Noop;
@@ -498,45 +552,20 @@ impl App {
                 self.setup.phase = SetupPhase::ProfileLoaded;
                 self.set_status("Profile loaded from shuttle.");
             }
-            Action::AdvanceToPinEntry => {
-                self.pin_buf.clear();
-                self.pin_display_len = 0;
-                self.setup.phase = SetupPhase::EnterPin;
-                self.set_status("Enter HSM PIN and press Enter. Esc to cancel.");
+            Action::HsmDetected => {
+                self.setup.phase = SetupPhase::HsmDetect;
+                self.do_detect_hsm();
             }
-            Action::PinChar(c) => {
-                self.pin_buf.push(c);
-                self.pin_display_len = crate::helpers::noise_display_len();
-            }
-            Action::PinBackspace => {
-                self.pin_buf.pop();
-                self.pin_display_len = if self.pin_buf.is_empty() {
-                    0
-                } else {
-                    crate::helpers::noise_display_len()
-                };
-            }
-            Action::PinCancel => {
-                self.pin_buf.clear();
-                self.pin_display_len = 0;
+            Action::HsmDetectFailed(msg) => {
+                self.hw.hsm_state = HwState::Error(msg.clone());
+                self.set_status(format!("HSM detection failed: {msg}"));
                 self.setup.phase = SetupPhase::ProfileLoaded;
-                self.status.clear();
-            }
-            Action::DoLogin => {
-                self.do_login();
-            }
-            Action::HsmLoggedIn => {
-                self.setup.phase = SetupPhase::WaitDisc;
-                self.hw.hsm_state = HwState::Ready("logged in".into());
-                self.set_status(
-                    "Logged in. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc) and press [1].",
-                );
             }
             Action::SetupComplete => {
                 self.setup_complete = true;
                 self.mode = Mode::Ceremony;
                 self.set_status(
-                    "[1] Generate Root CA  [2] Sign CSR  [3] Revoke Cert  [4] Issue CRL  [5] Migrate Disc",
+                    "[1] Init Root  [2] Sign CSR  [3] Revoke  [4] CRL  [5] Re-key  [6] Migrate",
                 );
             }
             Action::ConfirmDisc => {
@@ -639,27 +668,16 @@ impl App {
             }
 
             // InitRoot ceremony
-            Action::InitRootInputChar(c) => {
-                self.sss.custodian_buf.push(c);
-            }
-            Action::InitRootInputBackspace => {
-                self.sss.custodian_buf.pop();
-            }
-            Action::InitRootConfirmCustodians => {
-                self.do_init_root_confirm_custodians();
-            }
             Action::InitRootAbort => {
                 self.sss.custodian_buf.clear();
                 self.sss.shares = None;
                 self.sss.custodian_names.clear();
                 self.sss.share_input = None;
                 self.sss.share_reveal = None;
+                self.sss.custodian_setup = None;
                 self.current_op = None;
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.set_status("InitRoot aborted.");
-            }
-            Action::RekeyConfirmCustodians => {
-                self.do_rekey_confirm_custodians();
             }
             Action::RekeyAbort => {
                 self.sss.custodian_buf.clear();
@@ -667,6 +685,7 @@ impl App {
                 self.sss.custodian_names.clear();
                 self.sss.share_input = None;
                 self.sss.share_reveal = None;
+                self.sss.custodian_setup = None;
                 self.current_op = None;
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.set_status("RekeyShares aborted.");

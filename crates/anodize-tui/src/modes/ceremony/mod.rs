@@ -76,6 +76,10 @@ impl CeremonyMode {
             CeremonyPhase::Planning(PlanningState::RevokeInput)
                 | CeremonyPhase::Planning(PlanningState::CustodianSetup)
                 | CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup)
+                | CeremonyPhase::Planning(PlanningState::ShareVerify)
+                | CeremonyPhase::Planning(PlanningState::RekeyShareVerify)
+                | CeremonyPhase::Planning(PlanningState::RekeyQuorum)
+                | CeremonyPhase::Quorum
         )
     }
 
@@ -100,29 +104,35 @@ impl CeremonyMode {
     }
 
     /// Phase index for the phase bar.
+    ///
+    /// Maps to: 0=Select, 1=Plan, 2=Commit, 3=Quorum, 4=Execute, 5=Export
     pub fn phase_index(&self) -> usize {
         match self.state {
+            // 0 — Select
             CeremonyPhase::OperationSelect => 0,
+            // 1 — Plan (operation-specific configuration)
             CeremonyPhase::Planning(PlanningState::KeyAction)
             | CeremonyPhase::Planning(PlanningState::LoadCsr)
-            | CeremonyPhase::Planning(PlanningState::RevokeInput)
-            | CeremonyPhase::Planning(PlanningState::CustodianSetup)
-            | CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup) => 1,
-            CeremonyPhase::Commit
             | CeremonyPhase::Planning(PlanningState::CsrPreview)
+            | CeremonyPhase::Planning(PlanningState::RevokeInput)
             | CeremonyPhase::Planning(PlanningState::RevokePreview)
             | CeremonyPhase::Planning(PlanningState::CrlPreview)
-            | CeremonyPhase::Planning(PlanningState::MigrateConfirm)
+            | CeremonyPhase::Planning(PlanningState::CustodianSetup)
             | CeremonyPhase::Planning(PlanningState::ShareReveal)
-            | CeremonyPhase::Planning(PlanningState::RekeyQuorum) => 2,
-            CeremonyPhase::Execute
-            | CeremonyPhase::Planning(PlanningState::WaitMigrateTarget)
             | CeremonyPhase::Planning(PlanningState::ShareVerify)
+            | CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup)
             | CeremonyPhase::Planning(PlanningState::RekeyShareReveal)
-            | CeremonyPhase::Planning(PlanningState::RekeyShareVerify) => 3,
-            CeremonyPhase::Quorum => 3,
-            CeremonyPhase::BurningDisc => 4,
-            CeremonyPhase::DiscDone | CeremonyPhase::Done => 5,
+            | CeremonyPhase::Planning(PlanningState::RekeyShareVerify)
+            | CeremonyPhase::Planning(PlanningState::MigrateConfirm)
+            | CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => 1,
+            // 2 — Commit (write intent WAL to disc)
+            CeremonyPhase::Commit => 2,
+            // 3 — Quorum (SSS share collection + PIN reconstruction)
+            CeremonyPhase::Quorum | CeremonyPhase::Planning(PlanningState::RekeyQuorum) => 3,
+            // 4 — Execute (HSM crypto operation, cert preview/verify)
+            CeremonyPhase::Execute => 4,
+            // 5 — Export (write record to disc + shuttle copy)
+            CeremonyPhase::BurningDisc | CeremonyPhase::DiscDone | CeremonyPhase::Done => 5,
         }
     }
 
@@ -214,13 +224,12 @@ impl CeremonyMode {
                     disc_label,
                     state_label,
                     String::new(),
-                    "  [1]  Generate new root CA (fresh or resume key)".into(),
+                    "  [1]  Init root CA           (SSS PIN split + key generation)".into(),
                     "  [2]  Sign intermediate CSR  (requires csr.der on shuttle)".into(),
                     "  [3]  Revoke a certificate   (adds entry + issues new CRL)".into(),
                     "  [4]  Issue CRL refresh      (re-signs current revocation list)".into(),
-                    "  [5]  Migrate disc           (copy all sessions to new disc)".into(),
-                    "  [6]  Init root              (SSS PIN split + fresh root CA)".into(),
-                    "  [7]  Re-key shares          (change custodians, keep same PIN)".into(),
+                    "  [5]  Re-key shares          (change custodians, keep same PIN)".into(),
+                    "  [6]  Migrate disc           (copy all sessions to new disc)".into(),
                 ]
             }
 
@@ -420,7 +429,6 @@ impl CeremonyMode {
             CeremonyPhase::DiscDone => {
                 let op_label = match app.current_op {
                     Some(Operation::InitRoot) => "Root init",
-                    Some(Operation::GenerateRootCa) => "Root CA cert + initial CRL",
                     Some(Operation::SignCsr) => "Intermediate certificate",
                     Some(Operation::RevokeCert) => "Revocation record + CRL",
                     Some(Operation::IssueCrl) => "CRL refresh",
@@ -456,14 +464,8 @@ impl CeremonyMode {
                 vec![
                     String::new(),
                     "  Configure Shamir Secret Sharing for the HSM PIN.".into(),
-                    String::new(),
-                    "  Custodian names (comma-separated):".into(),
-                    format!("  > {}|", app.sss.custodian_buf),
-                    String::new(),
-                    "  After entering names, press [Enter] to set threshold.".into(),
-                    "  Default threshold: 2-of-N (minimum for SSS).".into(),
-                    String::new(),
-                    "  [Enter]  Confirm    [Esc]  Abort".into(),
+                    "  The custodian setup component is active.".into(),
+                    "  [Esc]  Abort".into(),
                 ]
             }
 
@@ -511,11 +513,8 @@ impl CeremonyMode {
                 vec![
                     String::new(),
                     "  Enter new custodian names for re-keyed shares.".into(),
-                    String::new(),
-                    "  Custodian names (comma-separated):".into(),
-                    format!("  > {}|", app.sss.custodian_buf),
-                    String::new(),
-                    "  [Enter]  Confirm    [Esc]  Abort".into(),
+                    "  The custodian setup component is active.".into(),
+                    "  [Esc]  Abort".into(),
                 ]
             }
 
@@ -614,13 +613,12 @@ impl Component for CeremonyMode {
     fn handle_key_event(&mut self, key: KeyEvent) -> Action {
         match &self.state {
             CeremonyPhase::OperationSelect => match key.code {
-                KeyCode::Char('1') => Action::SelectOperation(Operation::GenerateRootCa),
+                KeyCode::Char('1') => Action::SelectOperation(Operation::InitRoot),
                 KeyCode::Char('2') => Action::SelectOperation(Operation::SignCsr),
                 KeyCode::Char('3') => Action::SelectOperation(Operation::RevokeCert),
                 KeyCode::Char('4') => Action::SelectOperation(Operation::IssueCrl),
-                KeyCode::Char('5') => Action::SelectOperation(Operation::MigrateDisc),
-                KeyCode::Char('6') => Action::SelectOperation(Operation::InitRoot),
-                KeyCode::Char('7') => Action::SelectOperation(Operation::RekeyShares),
+                KeyCode::Char('5') => Action::SelectOperation(Operation::RekeyShares),
+                KeyCode::Char('6') => Action::SelectOperation(Operation::MigrateDisc),
                 _ => Action::Noop,
             },
 
@@ -710,25 +708,13 @@ impl Component for CeremonyMode {
                 }
             }
 
-            CeremonyPhase::Planning(PlanningState::CustodianSetup) => match key.code {
-                KeyCode::Char(c) => Action::InitRootInputChar(c),
-                KeyCode::Backspace => Action::InitRootInputBackspace,
-                KeyCode::Enter => Action::InitRootConfirmCustodians,
-                KeyCode::Esc => Action::InitRootAbort,
-                _ => Action::Noop,
-            },
+            CeremonyPhase::Planning(PlanningState::CustodianSetup) => Action::Noop, // handled by CustodianSetup component
 
             CeremonyPhase::Planning(PlanningState::ShareReveal) => Action::Noop, // handled by ShareReveal component
             CeremonyPhase::Planning(PlanningState::ShareVerify) => Action::Noop, // handled by ShareInput component
 
             CeremonyPhase::Planning(PlanningState::RekeyQuorum) => Action::Noop, // handled by ShareInput component
-            CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup) => match key.code {
-                KeyCode::Char(c) => Action::InitRootInputChar(c),
-                KeyCode::Backspace => Action::InitRootInputBackspace,
-                KeyCode::Enter => Action::RekeyConfirmCustodians,
-                KeyCode::Esc => Action::RekeyAbort,
-                _ => Action::Noop,
-            },
+            CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup) => Action::Noop, // handled by CustodianSetup component
             CeremonyPhase::Planning(PlanningState::RekeyShareReveal) => Action::Noop, // handled by ShareReveal component
             CeremonyPhase::Planning(PlanningState::RekeyShareVerify) => Action::Noop, // handled by ShareInput component
 

@@ -1,8 +1,9 @@
 //! Share reveal component for InitRoot and RekeyShares ceremonies.
 //!
-//! Displays one share at a time as a wordlist string for custodian
-//! transcription. The operator advances through shares one by one,
-//! confirming each custodian has copied their share before proceeding.
+//! Displays one share at a time as a numbered word grid for custodian
+//! transcription. Screen-clear protocol: the share is hidden by default
+//! and only shown on explicit toggle, ensuring only the intended custodian
+//! sees the sensitive data.
 
 use anodize_sss::Share;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -18,7 +19,8 @@ use ratatui::{
 pub struct NamedShare {
     pub custodian_name: String,
     pub index: u8,
-    pub words: String,
+    /// Word groups (each is a dash-separated group of 4 words).
+    pub word_groups: Vec<String>,
 }
 
 /// Interactive share reveal widget — shows one share at a time.
@@ -36,10 +38,14 @@ impl ShareReveal {
         let named: Vec<NamedShare> = shares
             .iter()
             .zip(custodian_names.iter())
-            .map(|(share, name)| NamedShare {
-                custodian_name: name.clone(),
-                index: share.index,
-                words: share.to_words(),
+            .map(|(share, name)| {
+                let words = share.to_words();
+                let groups: Vec<String> = words.split(" / ").map(String::from).collect();
+                NamedShare {
+                    custodian_name: name.clone(),
+                    index: share.index,
+                    word_groups: groups,
+                }
             })
             .collect();
         Self {
@@ -61,12 +67,11 @@ impl ShareReveal {
         }
         match key.code {
             KeyCode::Char('s') | KeyCode::Char('S') => {
-                // Toggle visibility
                 self.visible = !self.visible;
                 false
             }
             KeyCode::Enter if self.visible => {
-                // Confirm this share was transcribed, advance
+                // Confirm transcription, hide and advance
                 self.visible = false;
                 self.current += 1;
                 self.all_revealed()
@@ -80,8 +85,8 @@ impl ShareReveal {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(
-                "Share Distribution ({}/{})",
-                self.current.min(self.shares.len()),
+                "Share Distribution — {}/{}",
+                (self.current + 1).min(self.shares.len()),
                 self.shares.len()
             ))
             .border_style(Style::default().fg(Color::Magenta));
@@ -89,78 +94,136 @@ impl ShareReveal {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let mut lines: Vec<Line> = Vec::new();
+        let bold = Style::default().add_modifier(Modifier::BOLD);
+        let dim = Style::default().fg(Color::DarkGray);
+        let green = Style::default().fg(Color::Green);
 
-        // Already-revealed shares
+        let mut lines: Vec<Line> = Vec::new();
+        lines.push(Line::from(""));
+
+        // Progress: already-distributed shares
         for (i, ns) in self.shares.iter().enumerate() {
             if i < self.current {
                 lines.push(Line::from(vec![
-                    Span::styled("  \u{2714} ", Style::default().fg(Color::Green)),
+                    Span::styled("  ✓ ", green),
                     Span::styled(
-                        format!("#{} {}", ns.index, ns.custodian_name),
-                        Style::default().fg(Color::Green),
+                        format!("Share #{} — {}", ns.index, ns.custodian_name),
+                        green,
                     ),
-                    Span::styled(" — transcribed", Style::default().fg(Color::DarkGray)),
+                ]));
+            } else if i == self.current && !self.all_revealed() {
+                lines.push(Line::from(vec![
+                    Span::styled("  ▸ ", Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!("Share #{} — {}", ns.index, ns.custodian_name),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled("  ○ ", dim),
+                    Span::styled(format!("Share #{} — {}", ns.index, ns.custodian_name), dim),
                 ]));
             }
         }
 
+        lines.push(Line::from(""));
+
         if self.all_revealed() {
-            lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                "  All shares distributed. Press Enter to continue.",
+                "  All shares distributed successfully.",
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             )));
-        } else {
-            let ns = &self.shares[self.current];
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
-                format!("  Hand device to: #{} {}", ns.index, ns.custodian_name),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                "  Press [Enter] to continue to verification.",
+                Style::default().fg(Color::Cyan),
             )));
-            lines.push(Line::from(""));
+        } else {
+            let ns = &self.shares[self.current];
 
             if self.visible {
-                // Show the wordlist string — split into groups for readability
-                for chunk in ns.words.split(" / ") {
-                    lines.push(Line::from(Span::styled(
-                        format!("    {chunk}"),
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD),
-                    )));
+                // ── Numbered word grid ──
+                lines.push(Line::from(Span::styled(
+                    format!("  Share #{} for: {}", ns.index, ns.custodian_name),
+                    bold,
+                )));
+                lines.push(Line::from(""));
+
+                for (g, group) in ns.word_groups.iter().enumerate() {
+                    let group_num = g + 1;
+                    // Split "able-acid-aged-also" into individual words
+                    let words: Vec<&str> = group.split('-').collect();
+                    let formatted: String = words
+                        .iter()
+                        .enumerate()
+                        .map(|(w, word)| {
+                            let word_num = g * 4 + w + 1;
+                            format!("{word_num:>2}.{word}")
+                        })
+                        .collect::<Vec<_>>()
+                        .join("  ");
+
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  G{group_num:<2} "), dim),
+                        Span::styled(
+                            formatted,
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
                 }
+
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("  Total: ", dim),
+                    Span::styled(
+                        format!(
+                            "{} groups, {} words",
+                            ns.word_groups.len(),
+                            ns.word_groups.len() * 4
+                        ),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                ]));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "  Transcribe this share, then press [Enter] to confirm.",
+                    "  Transcribe all words carefully. Verify group numbers match.",
                     Style::default().fg(Color::Cyan),
                 )));
+                lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "  [S] Hide share",
-                    Style::default().fg(Color::DarkGray),
+                    "  [Enter] Confirm transcription   [S] Hide share",
+                    dim,
                 )));
             } else {
+                // ── Screen-clear state ──
                 lines.push(Line::from(Span::styled(
-                    "  Share hidden. Press [S] to reveal.",
-                    Style::default().fg(Color::DarkGray),
+                    format!("  HAND DEVICE TO: #{} {}", ns.index, ns.custodian_name),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "  Only the custodian should see this screen.",
+                    "  The share is hidden. Only the custodian should see this screen.",
                     Style::default().fg(Color::Yellow),
+                )));
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "  When ready, the custodian presses [S] to reveal their share.",
+                    dim,
                 )));
             }
         }
 
         lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "  [Esc] Abort ceremony",
-            Style::default().fg(Color::DarkGray),
-        )));
+        lines.push(Line::from(Span::styled("  [Esc] Abort ceremony", dim)));
 
         let para = Paragraph::new(lines).wrap(Wrap { trim: false });
         frame.render_widget(para, inner);

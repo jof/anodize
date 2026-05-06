@@ -69,11 +69,10 @@ yubihsm-shell -p password
 > session open 1
 > reset device
 > session close
-
-# Re-initialize with a new authentication key and wrap key.
-# Record the PIN on paper; it will be used during the ceremony.
-# Use a PIN of at least 8 characters.
 ```
+
+The HSM PIN is **not** chosen manually. It will be generated as a 32-byte random value
+by the ceremony TUI and split via Shamir Secret Sharing among the custodians.
 
 Seal the HSM in a tamper-evident bag labelled with today's date and the token label.
 
@@ -89,25 +88,41 @@ Seal the HSM in a tamper-evident bag labelled with today's date and the token la
 
 1. Insert the USB stick containing `profile.toml`.
 2. The launcher detects `profile.toml` and loads the TUI with your profile values.
-3. Insert the YubiHSM 2. The udev rule grants the ceremony user access automatically.
+3. Insert the YubiHSM 2. The TUI detects the HSM via PKCS#11 (no login yet).
+   The status bar shows "HSM detected" once the token is found.
 
-### Step 4 — Authenticate to the HSM
+### Step 4 — Select InitRoot and configure custodians
 
-1. Press `[1]` on the welcome screen to start the ceremony.
-2. When prompted for the HSM PIN, type it. The display shows a random number of asterisks
-   (not correlated to PIN length) — this is intentional.
-3. Press Enter to log in.
+1. Switch to the Ceremony tab and press `[1]` to select **Init Root CA**.
+2. The Custodian Setup screen appears:
+   - Enter each custodian's name and press Enter to add them (minimum 2).
+   - After all names are entered, press Enter to advance to threshold selection.
+   - Choose the threshold *k* (minimum 2, maximum *n*). This is the number of
+     shares required to reconstruct the HSM PIN.
+   - Press Enter to confirm.
+3. The TUI generates a 32-byte random PIN, splits it into *n* Shamir shares
+   (*k*-of-*n*), and computes per-share commitments and a PIN verification hash.
+   These are stored in `STATE.JSON` on the audit disc.
 
-If login fails, verify the PIN and try again. Three consecutive failures may lock the HSM
-depending on your retry policy.
+### Step 5 — Distribute shares to custodians
 
-### Step 5 — Generate the root keypair
+1. The Share Reveal screen shows one share at a time as a numbered word grid.
+   Shares are hidden by default — the custodian presses `[S]` to reveal.
+2. Each custodian transcribes their share onto paper, then presses Enter to confirm.
+   The screen clears before the next custodian steps forward.
+3. After all shares are distributed, a verification round collects *k* shares
+   back via word-by-word entry with Tab autocomplete and per-word validation.
+   Shares are verified against their commitments.
 
-1. On the Key Management screen, press `[1]` to generate a new P-384 keypair.
-   - This calls `C_GenerateKeyPair` on the HSM; the private key never leaves the device.
+### Step 6 — Generate the root keypair
+
+1. On the Key Management screen, press `[1]` to generate a new P-384 keypair,
+   or `[2]` to use an existing key.
+   - The TUI logs into the HSM using the generated PIN (held in memory).
+   - `C_GenerateKeyPair` is called on the HSM; the private key never leaves the device.
    - The public key is read back for certificate construction.
 
-### Step 6 — Verify the fingerprint
+### Step 7 — Verify the fingerprint
 
 The Certificate Preview screen shows:
 
@@ -124,27 +139,31 @@ prepared before the ceremony. Do not proceed if they do not match.**
 
 If the fingerprint is wrong, press `[q]` to abort. Investigate before retrying.
 
-### Step 7 — Write to M-Disc
+### Step 8 — Write to M-Disc
 
 1. Insert the blank M-DISC into the optical drive.
 2. Ensure the disc path (shown on welcome screen, default `/run/media/ceremony/disc`)
    corresponds to the mounted M-Disc.
-3. Press `[1]` — Write to M-Disc. This is irreversible.
+3. The TUI writes an intent session first, then performs the HSM operation,
+   then writes the record session. This two-session WAL pattern ensures
+   crash recoverability.
 
 The ceremony tool writes:
 - `root.crt` — DER-encoded root certificate
+- `root.crl` — initial empty CRL
+- `STATE.JSON` — SSS metadata (custodian roster, share commitments, PIN verify hash)
 - `audit.log` — JSONL audit log with genesis hash = SHA-256(root.crt)
 
 Both operators record the time and confirm the disc write succeeded.
 
-### Step 8 — Write to USB
+### Step 9 — Write to USB (shuttle)
 
-1. Press `[1]` — Write to USB.
+1. Press `[1]` — Write to shuttle USB.
 
-The ceremony tool copies `root.crt` and `audit.log` to the USB stick. This step is
+The ceremony tool copies artifacts to the USB stick. This step is
 only reachable after the M-Disc write completes successfully.
 
-### Step 9 — Verify audit log
+### Step 10 — Verify audit log
 
 On a separate machine (can be the USB copy), verify the audit log using the
 `verify_log` function from the `anodize-audit` library. Expected result: 1 record
@@ -152,13 +171,15 @@ verified, hash chain intact.
 
 > **Note**: a standalone audit log verification tool via the TUI is not yet implemented.
 
-### Step 10 — Finalise and store
+### Step 11 — Finalise and store
 
 1. Remove the YubiHSM 2.
 2. Remove the M-Disc; label it with date, CA name, and SHA-256 fingerprint.
 3. Remove the USB stick.
 4. Power off the ceremony machine.
 5. Store the YubiHSM 2, M-Disc, and USB in separate locations with separate custodians.
+6. Each custodian stores their paper share securely. No single custodian can
+   reconstruct the PIN — at least *k* shares are required.
 
 ---
 
