@@ -1,4 +1,4 @@
-.PHONY: ci nix-check prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev list-usb write-usb hash-iso verify-iso clean test fmt lint deny build-dev
+.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev list-usb write-usb hash-iso verify-iso clean test fmt lint deny build-dev
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -86,6 +86,17 @@ anodize-dev-amd64.iso: $(NIX_SOURCES)
 # Development ISO (arm64) — runs natively on Apple Silicon via HVF.
 anodize-dev-arm64.iso: $(NIX_SOURCES)
 	$(call nix-iso-build,dev-arm64,anodize-dev-arm64.iso,linux/arm64,arm64)
+
+# Delete the Docker Nix store volumes so the next build starts fresh.
+# Run this after updating flake.lock or when volumes are full/corrupt.
+nix-reset:
+	@for arch in amd64 arm64; do \
+	  vol="nix-store-$$arch"; \
+	  if docker volume inspect "$$vol" >/dev/null 2>&1; then \
+	    echo "Removing $$vol"; \
+	    docker volume rm "$$vol"; \
+	  fi; \
+	done
 
 prod-amd64: anodize-prod-amd64.iso
 prod-arm64: anodize-prod-arm64.iso
