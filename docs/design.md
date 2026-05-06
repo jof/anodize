@@ -343,6 +343,40 @@ The operator interaction surface is entirely the numbered ratatui TUI menu.
 - `--skip-disc` flag: writes staging ISO to `/run/anodize/staging` for dev/test without optical hardware
 - `write_session` background thread: OPC → write params → reserve NWA → WRITE(10) chunks → sync → close track → close session
 
+### Phase 5b — Ceremony UX overhaul
+
+#### USB renamed to "Shuttle"
+The USB stick carrying `profile.toml`, CSRs, and signed artifacts is now called the **shuttle** (`ANODIZE-SHUTTLE` volume label). CLI flag `--shuttle-mount`, default `/tmp/anodize-shuttle`. This clarifies the role distinction from the audit optical disc.
+
+#### Shamir Secret Sharing for HSM PIN (`anodize-sss`)
+The HSM PIN is a 32-byte random value split via Shamir over GF(256). Share parameters (threshold *k*, total *n*, custodian names) are chosen at root-init and stored as metadata in `STATE.JSON` on the audit disc. Shares are never stored on disc — custodians hold paper transcripts using a 256-word wordlist encoding with CRC-8 checksums.
+
+**Share commitments**: each share has a SHA-256 commitment `H(index || custodian_name || y_bytes)` stored in `STATE.JSON`. At quorum time, the presented share is checked against its commitment before reconstruction proceeds, preventing share-index spoofing.
+
+**PIN verification hash**: `H(pin_bytes)` stored in `STATE.JSON` allows pre-login verification, avoiding wasting PKCS#11 retry attempts on reconstructed-PIN mismatches.
+
+#### Ceremony phases
+The ceremony pipeline has six phases after setup:
+
+1. **Preflight** — load `STATE.JSON`, verify disc chain, detect recovery
+2. **Planning** — select operation, configure parameters
+3. **Commit** — write intent WAL to disc (crash-safe point)
+4. **Quorum** — collect shares, reconstruct PIN, verify against commitment + hash
+5. **Execute** — HSM login, perform crypto op, HSM logout
+6. **Export** — write artifacts to shuttle, finalize disc session
+
+#### Operations
+- `InitRoot` — generate root CA keypair, split PIN into shares, distribute to custodians
+- `GenerateRootCa` / `SignCsr` / `RevokeCert` / `IssueCrl` — existing ceremony ops
+- `RekeyShares` — reconstruct old PIN, generate new PIN, `C_SetPIN`, split new shares, verify new shares, commit
+- `MigrateDisc` — migrate audit log to new optical disc
+
+#### Crash recoverability invariant
+Before any irreversible operation (HSM key generation, `C_SetPIN`), the intent WAL session is committed to disc. The WAL contains enough state to recover: the old PIN hash (for re-key), the operation parameters, and intermediate results. If the ceremony machine crashes, the next session can detect and resume from the WAL.
+
+#### Pedantic config validation
+All config and state structs use `#[serde(deny_unknown_fields)]` to reject typos and unexpected fields at parse time.
+
 ### Phase 6 — Production hardening (ongoing)
 - `cargo-deny` + `cargo-vet` in CI
 - Reproducible binary builds documented (commit hash → ISO hash)
