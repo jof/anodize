@@ -178,7 +178,7 @@
         modules = [
           "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
           ./nix/iso.nix
-          ./nix/cdemu.nix
+          ./nix/dev-iso.nix
           {
             system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
             image.fileName    = nixpkgs.lib.mkForce "anodize-dev-amd64";
@@ -203,7 +203,7 @@
         modules = [
           "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
           ./nix/iso.nix
-          ./nix/cdemu.nix
+          ./nix/dev-iso.nix
           {
             system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
             image.fileName    = nixpkgs.lib.mkForce "anodize-dev-arm64";

@@ -73,7 +73,7 @@ anodize/
 │       └── src/media/            # ISO 9660 writer, SG_IO MMC, USB/optical discovery
 ├── nix/
 │   ├── iso.nix                   # NixOS base module for all ISO images
-│   └── cdemu.nix                 # Dev ISO overlay — cdemu, SSH, networking
+│   └── dev-iso.nix                 # Dev ISO overlay — cdemu, SSH, networking
 ├── tests/
 │   └── softhsm-fixtures/         # softhsm2.conf template for integration tests
 └── docs/

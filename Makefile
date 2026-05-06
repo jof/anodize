@@ -35,7 +35,7 @@ NIX_SANDBOX_FLAG :=
 endif
 
 # Source files that affect the ISO build — changing any of these triggers a rebuild.
-NIX_SOURCES := flake.nix flake.lock nix/iso.nix nix/cdemu.nix
+NIX_SOURCES := flake.nix flake.lock nix/iso.nix nix/dev-iso.nix
 
 # $(call nix-iso-build, <flake-output>, <dest-file>, <docker-platform>, <arch-tag>)
 define nix-iso-build
