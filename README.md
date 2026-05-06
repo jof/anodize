@@ -110,7 +110,7 @@ The optical disc write path (SG_IO MMC via `mmc.rs`/`sgdev.rs`) is **unchanged**
 
 ```sh
 # Set up a fake profile USB with an embedded SoftHSM2 token:
-make fake-usb.img
+make fake-shuttle.img
 
 # Build dev ISO and run in QEMU — no host cdemu setup needed:
 make dev-amd64             # dev ISO (NixOS, dev-softhsm-usb, cdemu inside VM)

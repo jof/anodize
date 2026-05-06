@@ -4,7 +4,7 @@
 # Connects over SSH (not serial console) so terminal size is handled correctly.
 #
 # Usage: expect scripts/e2e-test.expect
-# (Run from the anodize repo root after building anodize-cdemu.iso and fake-usb.img)
+# (Run from the anodize repo root after building anodize-cdemu.iso and fake-shuttle.img)
 #
 # Pattern matching note: ratatui renders with cursor positioning between words,
 # so multi-word phrases do not appear as contiguous bytes in the terminal stream.
@@ -12,7 +12,7 @@
 
 set repo [file dirname [file dirname [info script]]]
 set iso     "$repo/anodize-cdemu.iso"
-set usb     "$repo/fake-usb.img"
+set usb     "$repo/fake-shuttle.img"
 set devdisc "$repo/dev-disc"
 set ssh_port 2222
 
@@ -114,7 +114,7 @@ expect {
         puts "\n\[PASS\] PIN prompt appeared"
     }
 }
-# dev PIN from fake-usb.img SoftHSM token
+# dev PIN from fake-shuttle.img SoftHSM token
 send "123456\r"
 
 # --- WaitDisc ---

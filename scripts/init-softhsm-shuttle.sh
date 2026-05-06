@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Initialize a SoftHSM2 token and write it into a FAT image.
-# Called by the Makefile fake-usb.img target.
+# Called by the Makefile fake-shuttle.img target.
 #
-# Usage: init-softhsm-usb.sh <fat-image>
+# Usage: init-softhsm-shuttle.sh <fat-image>
 #
 # Requires: softhsm2-util, mmd, mcopy (mtools)
 #

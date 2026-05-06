@@ -103,7 +103,7 @@ prod-arm64: anodize-prod-arm64.iso
 dev-amd64:  anodize-dev-amd64.iso
 dev-arm64:  anodize-dev-arm64.iso
 
-# Create a 64 MiB FAT USB image pre-loaded with a SoftHSM2 profile and a
+# Create a 64 MiB FAT shuttle image pre-loaded with a SoftHSM2 profile and a
 # pre-initialized SoftHSM2 token for dev-softhsm-usb testing.
 # Requires: mtools (mcopy, mmd), softhsm2-util.
 # Only built once — delete to recreate.
@@ -112,7 +112,7 @@ dev-arm64:  anodize-dev-arm64.iso
 #   token label : anodize-root-2026
 #   user PIN    : 123456
 #   SO PIN      : 12345678
-fake-usb.img:
+fake-shuttle.img:
 	truncate -s 64M $@
 	mkfs.vfat $@
 	printf '%s\n' \
@@ -128,7 +128,7 @@ fake-usb.img:
 	    'key_spec    = "ecdsa-p384"' \
 	    'pin_source  = "prompt"' \
 	    | mcopy -i $@ - ::profile.toml
-	bash scripts/init-softhsm-usb.sh $@
+	bash scripts/init-softhsm-shuttle.sh $@
 	@echo "$@ ready (dev PIN: 123456)"
 
 # ---------------------------------------------------------------------------
@@ -190,18 +190,18 @@ QEMU_BASE = qemu-system-x86_64 \
 	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 	  -drive if=pflash,format=raw,file=/tmp/anodize-ovmf-vars.fd \
 	  -cdrom anodize-prod-amd64.iso -no-reboot \
-	  -drive file=fake-usb.img,format=raw,if=none,id=usb0 \
+	  -drive file=fake-shuttle.img,format=raw,if=none,id=usb0 \
 	  -device usb-ehci,id=ehci \
 	  -device usb-storage,drive=usb0,bus=ehci.0 \
 	  -serial stdio
 
-# Dev amd64 QEMU: dev ISO + SoftHSM USB + 9p share + user-mode networking.
+# Dev amd64 QEMU: dev ISO + SoftHSM shuttle + 9p share + user-mode networking.
 # The cdemu stack runs inside the guest — no host setup required.
 QEMU_DEV_BASE = qemu-system-x86_64 -enable-kvm -machine pc -cpu host -m 2G -smp 2 \
 	  -drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 	  -drive if=pflash,format=raw,file=/tmp/anodize-ovmf-vars.fd \
 	  -cdrom anodize-dev-amd64.iso -no-reboot \
-	  -drive file=fake-usb.img,format=raw,if=none,id=usb0 \
+	  -drive file=fake-shuttle.img,format=raw,if=none,id=usb0 \
 	  -device usb-ehci,id=ehci \
 	  -device usb-storage,drive=usb0,bus=ehci.0 \
 	  -fsdev local,security_model=none,id=devdisc,path=$(DEV_DISC_DIR) \
@@ -220,7 +220,7 @@ QEMU_AARCH64_BASE = qemu-system-aarch64 \
 	  -device nec-usb-xhci,id=xhci \
 	  -drive if=none,id=usbiso,format=raw,readonly=on,file=anodize-dev-arm64.iso \
 	  -device usb-storage,bus=xhci.0,drive=usbiso \
-	  -drive file=fake-usb.img,format=raw,if=none,id=usb0 \
+	  -drive file=fake-shuttle.img,format=raw,if=none,id=usb0 \
 	  -device usb-storage,bus=xhci.0,drive=usb0 \
 	  -fsdev local,security_model=none,id=devdisc,path=$(DEV_DISC_DIR) \
 	  -device virtio-9p-pci,id=fs0,fsdev=devdisc,mount_tag=dev-disc \
@@ -232,22 +232,22 @@ QEMU_AARCH64_BASE = qemu-system-aarch64 \
 qemu: qemu-sdl
 
 # Boot production ISO in SDL graphical window.
-qemu-sdl: anodize-prod-amd64.iso fake-usb.img
+qemu-sdl: anodize-prod-amd64.iso fake-shuttle.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_BASE) -display $(QEMU_DISPLAY) -vga std
 
 # Boot production ISO — serial console only.  Ctrl-A X to quit.
-qemu-nographic: anodize-prod-amd64.iso fake-usb.img
+qemu-nographic: anodize-prod-amd64.iso fake-shuttle.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(subst -serial stdio,-nographic,$(QEMU_BASE))
 
 # Dev arm64 with graphical window — near-native speed via HVF on Apple Silicon.
-qemu-aarch64: anodize-dev-arm64.iso fake-usb.img
+qemu-aarch64: anodize-dev-arm64.iso fake-shuttle.img
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	$(QEMU_AARCH64_BASE) -display cocoa -device virtio-gpu-pci
 
 # Dev arm64 serial console only.  Ctrl-A X to quit.
-qemu-aarch64-nographic: anodize-dev-arm64.iso fake-usb.img
+qemu-aarch64-nographic: anodize-dev-arm64.iso fake-shuttle.img
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	$(subst -serial stdio,-nographic,$(QEMU_AARCH64_BASE))
 
@@ -335,7 +335,7 @@ verify-iso: anodize-prod-amd64.iso.sha256
 # The BD-R image is stored on a virtio-9p share: dev-disc/test-bdr.img
 #
 # One-time setup:
-#   make fake-usb.img     # SoftHSM2 profile USB (PIN: 123456)
+#   make fake-shuttle.img  # SoftHSM2 profile shuttle (PIN: 123456)
 #   make dev-amd64        # dev ISO — first build slow, cached after
 #
 # Each dev session:
@@ -344,12 +344,12 @@ verify-iso: anodize-prod-amd64.iso.sha256
 
 qemu-dev: qemu-dev-sdl
 
-qemu-dev-sdl: anodize-dev-amd64.iso fake-usb.img
+qemu-dev-sdl: anodize-dev-amd64.iso fake-shuttle.img
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_DEV_BASE) -display sdl -vga std
 
-qemu-dev-nographic: anodize-dev-amd64.iso fake-usb.img
+qemu-dev-nographic: anodize-dev-amd64.iso fake-shuttle.img
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(subst -serial stdio,-nographic,$(QEMU_DEV_BASE))
@@ -370,7 +370,7 @@ build-dev:
 	cargo build -p anodize-tui --features dev-softhsm-usb
 
 clean:
-	rm -rf anodize-prod-amd64.iso anodize-prod-arm64.iso anodize-dev-amd64.iso anodize-dev-arm64.iso anodize-prod-amd64.iso.sha256 fake-usb.img dev-disc /tmp/anodize-ovmf-vars.fd
+	rm -rf anodize-prod-amd64.iso anodize-prod-arm64.iso anodize-dev-amd64.iso anodize-dev-arm64.iso anodize-prod-amd64.iso.sha256 fake-shuttle.img dev-disc /tmp/anodize-ovmf-vars.fd
 
 # Inner-loop shortcuts (no Docker overhead)
 fmt:
