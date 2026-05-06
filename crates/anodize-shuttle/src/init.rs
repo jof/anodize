@@ -149,9 +149,9 @@ pub fn run(args: InitArgs) -> Result<()> {
 }
 
 fn build_profile_toml(args: &InitArgs) -> String {
-    let module_path = match args.mode {
-        HsmMode::Softhsm2 => "/run/current-system/sw/lib/softhsm/libsofthsm2.so",
-        HsmMode::Yubihsm => "/run/current-system/sw/lib/pkcs11/yubihsm_pkcs11.so",
+    let module_name = match args.mode {
+        HsmMode::Softhsm2 => "libsofthsm2.so",
+        HsmMode::Yubihsm => "yubihsm_pkcs11.so",
     };
 
     let cdp_line = match &args.cdp_url {
@@ -166,7 +166,7 @@ organization = {:?}
 country      = {:?}
 {cdp_line}
 [hsm]
-module_path  = {:?}
+module_name  = {:?}
 token_label  = {:?}
 key_label    = {:?}
 key_spec     = "ecdsa-p384"
@@ -175,7 +175,7 @@ pin_source   = "prompt"
         args.common_name,
         args.organization,
         args.country,
-        module_path,
+        module_name,
         args.token_label,
         args.key_label,
     )
