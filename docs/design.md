@@ -1,18 +1,6 @@
-# Anodize — Design Document
+# Anodize — Detailed Design
 
-## Goals
-
-1. A small, auditable root-CA tool written in Rust.
-2. Runs from a verified live ISO on an air-gapped machine.
-3. Talks to its signing key only through a **PKCS#11** module.
-4. Tests against **SoftHSM2** in dev/CI; runs against a **YubiHSM 2** in production with no code changes — only a config swap.
-5. Reproducible build of both the binary and the ISO.
-
-## Non-goals
-
-- Online CA, OCSP responder, ACME — out of scope. Anodize signs intermediates and CRLs only.
-- Generic certificate management. Intermediates do the day-to-day work.
-- A web UI of any kind.
+For project goals, domain concepts, and the ceremony pipeline, see the [overview](overview.md). For trust boundaries and attack surface analysis, see the [threat model](threat-model.md).
 
 ---
 
@@ -243,51 +231,6 @@ The HSM PIN is a 32-byte random value split via Shamir over GF(256) (`anodize-ss
 
 ---
 
-## Ceremony pipeline
-
-The ceremony TUI has two phases: **Setup** and **Ceremony**. Setup runs once per session; Ceremony can execute multiple operations.
-
-### Setup
-
-Setup gates the ceremony by verifying prerequisites in order:
-
-1. **Clock** — operator confirms UTC time accuracy
-2. **Shuttle** — detect and mount shuttle USB with `profile.toml`
-3. **Profile** — parse and validate `profile.toml`
-4. **Disc** — detect write-once optical disc, load prior sessions + `STATE.JSON`
-
-No PIN entry occurs during setup. PIN acquisition is deferred to the Quorum phase of each ceremony operation.
-
-### Ceremony operations
-
-After setup completes, the operator selects an operation. Each operation follows a six-phase pipeline:
-
-1. **Preflight** — load `STATE.JSON`, verify disc chain, detect WAL recovery
-2. **Planning** — configure parameters (operation-specific sub-screens)
-3. **Commit** — write intent WAL session to disc (crash-safe point)
-4. **Quorum** — collect threshold shares from custodians, reconstruct PIN, verify against commitment + hash. For `InitRoot` (no prior PIN), this phase generates the random PIN and performs SSS distribution instead.
-5. **Execute** — HSM login with reconstructed PIN, perform crypto operation, HSM logout
-6. **Export** — write record session to disc, copy artifacts to shuttle
-
-### Operations
-
-- **`InitRoot`** — generate root CA keypair, split PIN into shares, distribute to custodians, build root cert + initial CRL. This is the primary first-ceremony operation.
-- **`SignCsr`** — sign an intermediate CSR from the shuttle
-- **`RevokeCert`** — add revocation entry + issue new CRL
-- **`IssueCrl`** — re-sign the current revocation list
-- **`RekeyShares`** — reconstruct old PIN, generate new PIN, `C_SetPIN`, split new shares, verify new shares, commit
-- **`MigrateDisc`** — migrate all sessions to a new optical disc (no HSM involvement; Quorum skipped)
-
-### Crash recoverability
-
-Before any irreversible operation (HSM key generation, `C_SetPIN`), the intent WAL session is committed to disc. The WAL contains enough state to recover: the old PIN hash (for re-key), the operation parameters, and intermediate results. If the ceremony machine crashes, the next session can detect and resume from the WAL.
-
-### Pedantic config validation
-
-All config and state structs use `#[serde(deny_unknown_fields)]` to reject typos and unexpected fields at parse time.
-
----
-
 ## CSR policy
 
 Conservative by default. When signing a CSR to produce an intermediate:
@@ -375,11 +318,7 @@ The operator interaction surface is entirely the numbered ratatui TUI menu.
 
 ---
 
-## Threat model
+## Related documents
 
-Where Anodize does *not* protect you:
-
-- **Ceremony discipline**: an operator who ignores the paper checklist can make errors that no software can catch
-- **ISO build host**: if the machine running `nix build` is compromised, the ISO may be too — reproducibility lets you verify against an independent build, not against a trusted build host
-- **Physical security**: a stolen YubiHSM with a known PIN is a compromised root
-- **Supply chain on dependencies**: `cargo-deny` + `cargo-vet` reduce but don't eliminate this
+- [Overview](overview.md) — project goals, domain concepts, ceremony pipeline
+- [Threat Model](threat-model.md) — trust boundaries, attack surface, mitigations
