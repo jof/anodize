@@ -1,4 +1,4 @@
-.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev list-usb write-usb write-usb-dev hash-iso verify-iso clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
+.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev ssh-dev-vm list-usb write-usb write-usb-dev hash-iso verify-iso clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -415,6 +415,16 @@ ssh-dev:
 	ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 	    -i $(CURDIR)/scripts/dev-ssh-key \
 	    -p $(DEV_SSH_PORT) ceremony@localhost
+
+# SSH into a remote dev VM as the debug user (bash shell).
+# Usage: DEV_VM_IP=10.0.0.5 make ssh-dev-vm
+ssh-dev-vm:
+ifndef DEV_VM_IP
+	$(error DEV_VM_IP is required — set it to the dev VM's IP address)
+endif
+	ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+	    -i $(CURDIR)/scripts/dev-ssh-key \
+	    debug@$(DEV_VM_IP)
 
 # Build anodize-ceremony with dev-softhsm-usb (never use in a real ceremony).
 build-dev:
