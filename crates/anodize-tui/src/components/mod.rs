@@ -1,6 +1,8 @@
 pub mod confirm_dialog;
 pub mod mode_bar;
 pub mod phase_bar;
+pub mod share_input;
+pub mod share_reveal;
 pub mod status_bar;
 
 use crossterm::event::KeyEvent;
