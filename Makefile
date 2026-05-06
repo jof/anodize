@@ -1,4 +1,4 @@
-.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev list-usb write-usb hash-iso verify-iso clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
+.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev list-usb write-usb write-usb-dev hash-iso verify-iso clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -321,10 +321,8 @@ list-usb:
 	  (data[data.rfind("+-o ", 0, pos):pos], data[pos:]))) for s, pos in serials.items()]; \
 	(lambda: [print(f"  {s:<{max(len(x) for x,_ in rows)}}  {d:<{max(len(y) for _,(_, y) in rows)}}  {n}") for s, (n, d) in rows])() if rows else print("No USB storage devices found.")'
 
-write-usb: anodize-prod-amd64.iso
-ifndef USB_SERIAL
-	$(error USB_SERIAL is required — set it to your USB stick serial number)
-endif
+# $(call write-usb-iso, <iso-file>)
+define write-usb-iso
 	@disk=$$(ioreg -r -c IOUSBHostDevice -l | \
 		python3 -c 'import sys, re; \
 		data = sys.stdin.read(); \
@@ -337,9 +335,22 @@ endif
 	fi && \
 	echo "Found serial $(USB_SERIAL) at /dev/$$disk" && \
 	diskutil unmountDisk /dev/$$disk && \
-	sudo dd if=anodize-prod-amd64.iso of=/dev/r$$disk bs=1m && \
+	sudo dd if=$(1) of=/dev/r$$disk bs=1m && \
 	diskutil eject /dev/$$disk && \
 	echo "Done — safe to remove the USB stick."
+endef
+
+write-usb: anodize-prod-amd64.iso
+ifndef USB_SERIAL
+	$(error USB_SERIAL is required — set it to your USB stick serial number)
+endif
+	$(call write-usb-iso,anodize-prod-amd64.iso)
+
+write-usb-dev: anodize-dev-amd64.iso
+ifndef USB_SERIAL
+	$(error USB_SERIAL is required — set it to your USB stick serial number)
+endif
+	$(call write-usb-iso,anodize-dev-amd64.iso)
 
 # ---------------------------------------------------------------------------
 # ISO hash and verification — for reproducibility assurance.
