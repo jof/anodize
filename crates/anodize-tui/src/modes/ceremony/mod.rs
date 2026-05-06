@@ -9,48 +9,63 @@ use ratatui::{
 use crate::action::{Action, Operation};
 use crate::components::Component;
 
-/// Ceremony sub-state — mirrors the old AppState but only for ceremony operations.
+/// Operation-specific sub-states within the Planning phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CeremonyState {
-    OperationSelect,
-    // Mode 1: Generate Root CA
+pub enum PlanningState {
+    // InitRoot
+    CustodianSetup,
+    ShareReveal,
+    ShareVerify,
     KeyAction,
-    WritingIntent,
-    CertPreview,
-    BurningDisc,
-    DiscDone,
-    // Mode 2: Sign CSR
+    // SignCsr
     LoadCsr,
     CsrPreview,
-    // Mode 3: Revoke Cert + Issue CRL
+    // RevokeCert
     RevokeInput,
     RevokePreview,
-    // Mode 4: Issue CRL refresh
+    // IssueCrl
     CrlPreview,
-    // InitRoot flow
-    InitRootCustodianSetup,
-    InitRootShareReveal,
-    InitRootShareVerify,
-    // RekeyShares flow
+    // RekeyShares
     RekeyQuorum,
     RekeyCustodianSetup,
     RekeyShareReveal,
     RekeyShareVerify,
-    // Mode 5: Migrate
+    // MigrateDisc
     MigrateConfirm,
     WaitMigrateTarget,
-    // Terminal
+}
+
+/// Pipeline phase for the ceremony state machine.
+///
+/// Phases: Select → Plan → Commit → Quorum → Execute → Export → Done
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CeremonyPhase {
+    /// Pre-pipeline: choose an operation.
+    OperationSelect,
+    /// Phase 2: operation-specific configuration.
+    Planning(PlanningState),
+    /// Phase 3: write intent WAL to disc.
+    Commit,
+    /// Phase 4: collect SSS shares, reconstruct PIN.
+    Quorum,
+    /// Phase 5: HSM crypto operation complete, verify result.
+    Execute,
+    /// Phase 6a: writing record session to disc.
+    BurningDisc,
+    /// Phase 6b: disc written, shuttle copy pending.
+    DiscDone,
+    /// Terminal.
     Done,
 }
 
 pub struct CeremonyMode {
-    pub state: CeremonyState,
+    pub state: CeremonyPhase,
 }
 
 impl CeremonyMode {
     pub fn new() -> Self {
         Self {
-            state: CeremonyState::OperationSelect,
+            state: CeremonyPhase::OperationSelect,
         }
     }
 
@@ -58,82 +73,56 @@ impl CeremonyMode {
     pub fn in_text_entry(&self) -> bool {
         matches!(
             self.state,
-            CeremonyState::RevokeInput
-                | CeremonyState::InitRootCustodianSetup
-                | CeremonyState::RekeyCustodianSetup
+            CeremonyPhase::Planning(PlanningState::RevokeInput)
+                | CeremonyPhase::Planning(PlanningState::CustodianSetup)
+                | CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup)
         )
     }
 
     pub fn is_waiting_migrate_target(&self) -> bool {
-        self.state == CeremonyState::WaitMigrateTarget
+        self.state == CeremonyPhase::Planning(PlanningState::WaitMigrateTarget)
     }
 
     pub fn is_writing_intent(&self) -> bool {
-        self.state == CeremonyState::WritingIntent
+        self.state == CeremonyPhase::Commit
     }
 
     pub fn is_burning_disc(&self) -> bool {
-        self.state == CeremonyState::BurningDisc
+        self.state == CeremonyPhase::BurningDisc
     }
 
     pub fn set_state_csr_preview(&mut self) {
-        self.state = CeremonyState::CsrPreview;
+        self.state = CeremonyPhase::Planning(PlanningState::CsrPreview);
     }
 
     pub fn set_state_wait_migrate_target(&mut self) {
-        self.state = CeremonyState::WaitMigrateTarget;
-    }
-
-    /// Human-readable label for the phase bar.
-    pub fn op_label(&self) -> &'static str {
-        match self.state {
-            CeremonyState::OperationSelect => "Select",
-            CeremonyState::KeyAction => "Key",
-            CeremonyState::WritingIntent => "Intent",
-            CeremonyState::CertPreview => "Preview",
-            CeremonyState::BurningDisc => "Burn",
-            CeremonyState::DiscDone => "Done",
-            CeremonyState::LoadCsr => "CSR",
-            CeremonyState::CsrPreview => "Preview",
-            CeremonyState::RevokeInput => "Revoke",
-            CeremonyState::RevokePreview => "Preview",
-            CeremonyState::CrlPreview => "CRL",
-            CeremonyState::InitRootCustodianSetup
-            | CeremonyState::RekeyCustodianSetup => "Custodians",
-            CeremonyState::InitRootShareReveal
-            | CeremonyState::RekeyShareReveal => "Distribute",
-            CeremonyState::InitRootShareVerify
-            | CeremonyState::RekeyShareVerify => "Verify",
-            CeremonyState::RekeyQuorum => "Quorum",
-            CeremonyState::MigrateConfirm => "Verify",
-            CeremonyState::WaitMigrateTarget => "Wait",
-            CeremonyState::Done => "Done",
-        }
+        self.state = CeremonyPhase::Planning(PlanningState::WaitMigrateTarget);
     }
 
     /// Phase index for the phase bar.
     pub fn phase_index(&self) -> usize {
         match self.state {
-            CeremonyState::OperationSelect => 0,
-            CeremonyState::KeyAction
-            | CeremonyState::LoadCsr
-            | CeremonyState::RevokeInput
-            | CeremonyState::InitRootCustodianSetup
-            | CeremonyState::RekeyCustodianSetup => 1,
-            CeremonyState::WritingIntent
-            | CeremonyState::CsrPreview
-            | CeremonyState::RevokePreview
-            | CeremonyState::CrlPreview
-            | CeremonyState::MigrateConfirm
-            | CeremonyState::InitRootShareReveal
-            | CeremonyState::RekeyQuorum => 2,
-            CeremonyState::CertPreview
-            | CeremonyState::WaitMigrateTarget
-            | CeremonyState::InitRootShareVerify
-            | CeremonyState::RekeyShareReveal
-            | CeremonyState::RekeyShareVerify => 3,
-            CeremonyState::BurningDisc => 4,
-            CeremonyState::DiscDone | CeremonyState::Done => 5,
+            CeremonyPhase::OperationSelect => 0,
+            CeremonyPhase::Planning(PlanningState::KeyAction)
+            | CeremonyPhase::Planning(PlanningState::LoadCsr)
+            | CeremonyPhase::Planning(PlanningState::RevokeInput)
+            | CeremonyPhase::Planning(PlanningState::CustodianSetup)
+            | CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup) => 1,
+            CeremonyPhase::Commit
+            | CeremonyPhase::Planning(PlanningState::CsrPreview)
+            | CeremonyPhase::Planning(PlanningState::RevokePreview)
+            | CeremonyPhase::Planning(PlanningState::CrlPreview)
+            | CeremonyPhase::Planning(PlanningState::MigrateConfirm)
+            | CeremonyPhase::Planning(PlanningState::ShareReveal)
+            | CeremonyPhase::Planning(PlanningState::RekeyQuorum) => 2,
+            CeremonyPhase::Execute
+            | CeremonyPhase::Planning(PlanningState::WaitMigrateTarget)
+            | CeremonyPhase::Planning(PlanningState::ShareVerify)
+            | CeremonyPhase::Planning(PlanningState::RekeyShareReveal)
+            | CeremonyPhase::Planning(PlanningState::RekeyShareVerify) => 3,
+            CeremonyPhase::Quorum => 3,
+            CeremonyPhase::BurningDisc => 4,
+            CeremonyPhase::DiscDone | CeremonyPhase::Done => 5,
         }
     }
 
@@ -145,27 +134,28 @@ impl CeremonyMode {
         app: &crate::app::App,
     ) {
         let title = match self.state {
-            CeremonyState::OperationSelect => "Select Operation",
-            CeremonyState::KeyAction => "Key Management",
-            CeremonyState::WritingIntent => "Committing Intent to Disc\u{2026}",
-            CeremonyState::CertPreview => "Certificate Preview \u{2014} VERIFY FINGERPRINT",
-            CeremonyState::BurningDisc => "Writing Session\u{2026}",
-            CeremonyState::DiscDone => "Disc Session Written",
-            CeremonyState::LoadCsr => "Select Certificate Profile",
-            CeremonyState::CsrPreview => "CSR Review \u{2014} VERIFY BEFORE SIGNING",
-            CeremonyState::RevokeInput => "Revoke Certificate",
-            CeremonyState::RevokePreview => "Revocation Preview \u{2014} VERIFY BEFORE COMMITTING",
-            CeremonyState::CrlPreview => "CRL Issuance Preview",
-            CeremonyState::InitRootCustodianSetup => "Root Init \u{2014} Custodian Setup",
-            CeremonyState::InitRootShareReveal => "Root Init \u{2014} Distribute Shares",
-            CeremonyState::InitRootShareVerify => "Root Init \u{2014} Verify Shares",
-            CeremonyState::RekeyQuorum => "Re-key Shares \u{2014} Quorum",
-            CeremonyState::RekeyCustodianSetup => "Re-key Shares \u{2014} New Custodians",
-            CeremonyState::RekeyShareReveal => "Re-key Shares \u{2014} Distribute New Shares",
-            CeremonyState::RekeyShareVerify => "Re-key Shares \u{2014} Verify New Shares",
-            CeremonyState::MigrateConfirm => "Disc Migration \u{2014} Verify Chain",
-            CeremonyState::WaitMigrateTarget => "Insert Blank Target Disc",
-            CeremonyState::Done => "Ceremony Complete",
+            CeremonyPhase::OperationSelect => "Select Operation",
+            CeremonyPhase::Planning(PlanningState::KeyAction) => "Key Management",
+            CeremonyPhase::Commit => "Committing Intent to Disc\u{2026}",
+            CeremonyPhase::Execute => "Certificate Preview \u{2014} VERIFY FINGERPRINT",
+            CeremonyPhase::BurningDisc => "Writing Session\u{2026}",
+            CeremonyPhase::DiscDone => "Disc Session Written",
+            CeremonyPhase::Planning(PlanningState::LoadCsr) => "Select Certificate Profile",
+            CeremonyPhase::Planning(PlanningState::CsrPreview) => "CSR Review \u{2014} VERIFY BEFORE SIGNING",
+            CeremonyPhase::Planning(PlanningState::RevokeInput) => "Revoke Certificate",
+            CeremonyPhase::Planning(PlanningState::RevokePreview) => "Revocation Preview \u{2014} VERIFY BEFORE COMMITTING",
+            CeremonyPhase::Planning(PlanningState::CrlPreview) => "CRL Issuance Preview",
+            CeremonyPhase::Planning(PlanningState::CustodianSetup) => "Root Init \u{2014} Custodian Setup",
+            CeremonyPhase::Planning(PlanningState::ShareReveal) => "Root Init \u{2014} Distribute Shares",
+            CeremonyPhase::Planning(PlanningState::ShareVerify) => "Root Init \u{2014} Verify Shares",
+            CeremonyPhase::Planning(PlanningState::RekeyQuorum) => "Re-key Shares \u{2014} Quorum",
+            CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup) => "Re-key Shares \u{2014} New Custodians",
+            CeremonyPhase::Planning(PlanningState::RekeyShareReveal) => "Re-key Shares \u{2014} Distribute New Shares",
+            CeremonyPhase::Planning(PlanningState::RekeyShareVerify) => "Re-key Shares \u{2014} Verify New Shares",
+            CeremonyPhase::Planning(PlanningState::MigrateConfirm) => "Disc Migration \u{2014} Verify Chain",
+            CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => "Insert Blank Target Disc",
+            CeremonyPhase::Quorum => "Quorum \u{2014} Reconstruct PIN",
+            CeremonyPhase::Done => "Ceremony Complete",
         };
 
         let content = self.build_body(app);
@@ -180,7 +170,7 @@ impl CeremonyMode {
 
     fn build_body(&self, app: &crate::app::App) -> Vec<String> {
         match &self.state {
-            CeremonyState::OperationSelect => {
+            CeremonyPhase::OperationSelect => {
                 let n_sessions = app.disc.prior_sessions.len();
                 let disc_label = if n_sessions == 0 {
                     "  Blank disc \u{2014} no prior sessions.".into()
@@ -216,7 +206,7 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::KeyAction => {
+            CeremonyPhase::Planning(PlanningState::KeyAction) => {
                 let label = app
                     .profile
                     .as_ref()
@@ -234,14 +224,14 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::WritingIntent => vec![
+            CeremonyPhase::Commit => vec![
                 String::new(),
                 "  Writing intent session to disc.".into(),
                 "  HSM signing will begin after disc commit completes.".into(),
                 "  Do not remove the disc or power off.".into(),
             ],
 
-            CeremonyState::LoadCsr => {
+            CeremonyPhase::Planning(PlanningState::LoadCsr) => {
                 let profiles = app
                     .profile
                     .as_ref()
@@ -272,7 +262,7 @@ impl CeremonyMode {
                 lines
             }
 
-            CeremonyState::CsrPreview => {
+            CeremonyPhase::Planning(PlanningState::CsrPreview) => {
                 let subject = app.data.csr_subject_display.as_deref().unwrap_or("(unknown)");
                 let profile_name = app
                     .profile
@@ -294,7 +284,7 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::CertPreview => {
+            CeremonyPhase::Execute => {
                 let fp = app.data.fingerprint.as_deref().unwrap_or("(none)");
                 let ca = app.profile.as_ref().map(|p| &p.ca);
                 let (cn, org, country) = ca
@@ -325,7 +315,7 @@ impl CeremonyMode {
                 lines
             }
 
-            CeremonyState::RevokeInput => {
+            CeremonyPhase::Planning(PlanningState::RevokeInput) => {
                 let phase_hint = if app.data.revoke_phase == 0 {
                     "Enter serial number (digits only):"
                 } else {
@@ -344,7 +334,7 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::RevokePreview => {
+            CeremonyPhase::Planning(PlanningState::RevokePreview) => {
                 let crl_num = app.data.crl_number.unwrap_or(0);
                 let mut lines = vec![
                     String::new(),
@@ -366,7 +356,7 @@ impl CeremonyMode {
                 lines
             }
 
-            CeremonyState::CrlPreview => {
+            CeremonyPhase::Planning(PlanningState::CrlPreview) => {
                 let crl_num = app.data.crl_number.unwrap_or(0);
                 let count = app.data.revocation_list.len();
                 let mut lines = vec![
@@ -392,14 +382,14 @@ impl CeremonyMode {
                 lines
             }
 
-            CeremonyState::BurningDisc => vec![
+            CeremonyPhase::BurningDisc => vec![
                 String::new(),
                 "  Writing ISO 9660 session to optical disc\u{2026}".into(),
                 String::new(),
                 "  Please wait. Do not remove the disc or USB.".into(),
             ],
 
-            CeremonyState::DiscDone => {
+            CeremonyPhase::DiscDone => {
                 let op_label = match app.current_op {
                     Some(Operation::InitRoot) => "Root init",
                     Some(Operation::GenerateRootCa) => "Root CA cert + initial CRL",
@@ -432,7 +422,7 @@ impl CeremonyMode {
                 lines
             }
 
-            CeremonyState::InitRootCustodianSetup => {
+            CeremonyPhase::Planning(PlanningState::CustodianSetup) => {
                 vec![
                     String::new(),
                     "  Configure Shamir Secret Sharing for the HSM PIN.".into(),
@@ -447,7 +437,7 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::InitRootShareReveal => {
+            CeremonyPhase::Planning(PlanningState::ShareReveal) => {
                 vec![
                     String::new(),
                     "  Shares are being distributed to custodians.".into(),
@@ -458,7 +448,7 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::InitRootShareVerify => {
+            CeremonyPhase::Planning(PlanningState::ShareVerify) => {
                 vec![
                     String::new(),
                     "  Verification round: each custodian re-enters their share.".into(),
@@ -468,7 +458,7 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::RekeyQuorum => {
+            CeremonyPhase::Planning(PlanningState::RekeyQuorum) => {
                 let info = if let Some(ref state) = app.disc.session_state {
                     format!(
                         "  Current scheme: {}-of-{}.  Need {} shares to proceed.",
@@ -487,7 +477,7 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::RekeyCustodianSetup => {
+            CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup) => {
                 vec![
                     String::new(),
                     "  Enter new custodian names for re-keyed shares.".into(),
@@ -499,7 +489,7 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::RekeyShareReveal => {
+            CeremonyPhase::Planning(PlanningState::RekeyShareReveal) => {
                 vec![
                     String::new(),
                     "  New shares are being distributed to custodians.".into(),
@@ -509,7 +499,7 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::RekeyShareVerify => {
+            CeremonyPhase::Planning(PlanningState::RekeyShareVerify) => {
                 vec![
                     String::new(),
                     "  Verification round: each new custodian re-enters their share.".into(),
@@ -518,7 +508,7 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::MigrateConfirm => {
+            CeremonyPhase::Planning(PlanningState::MigrateConfirm) => {
                 let chain_str = if app.data.migrate_chain_ok {
                     "OK \u{2714}"
                 } else {
@@ -541,7 +531,17 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::WaitMigrateTarget => {
+            CeremonyPhase::Quorum => {
+                vec![
+                    String::new(),
+                    "  Collecting threshold shares to reconstruct the HSM PIN.".into(),
+                    String::new(),
+                    "  The share input component is active.".into(),
+                    "  [Esc]  Abort".into(),
+                ]
+            }
+
+            CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => {
                 let session_count = app.data.migrate_sessions.len();
                 let disc_info = match &app.disc.optical_dev {
                     Some(dev) => format!("  Blank disc in {}. Press [1].", dev.display()),
@@ -558,7 +558,7 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyState::Done => {
+            CeremonyPhase::Done => {
                 vec![
                     String::new(),
                     "  Ceremony complete.".into(),
@@ -583,7 +583,7 @@ impl CeremonyMode {
 impl Component for CeremonyMode {
     fn handle_key_event(&mut self, key: KeyEvent) -> Action {
         match &self.state {
-            CeremonyState::OperationSelect => match key.code {
+            CeremonyPhase::OperationSelect => match key.code {
                 KeyCode::Char('1') => Action::SelectOperation(Operation::GenerateRootCa),
                 KeyCode::Char('2') => Action::SelectOperation(Operation::SignCsr),
                 KeyCode::Char('3') => Action::SelectOperation(Operation::RevokeCert),
@@ -594,15 +594,15 @@ impl Component for CeremonyMode {
                 _ => Action::Noop,
             },
 
-            CeremonyState::KeyAction => match key.code {
+            CeremonyPhase::Planning(PlanningState::KeyAction) => match key.code {
                 KeyCode::Char('1') => Action::SelectKeyAction(1),
                 KeyCode::Char('2') => Action::SelectKeyAction(2),
                 _ => Action::Noop,
             },
 
-            CeremonyState::WritingIntent => Action::Noop, // auto-advance on burn
+            CeremonyPhase::Commit => Action::Noop, // auto-advance on burn
 
-            CeremonyState::LoadCsr => {
+            CeremonyPhase::Planning(PlanningState::LoadCsr) => {
                 if let KeyCode::Char(c) = key.code {
                     if let Some(d) = c.to_digit(10) {
                         let idx = d as usize;
@@ -614,7 +614,7 @@ impl Component for CeremonyMode {
                 Action::Noop
             }
 
-            CeremonyState::CsrPreview => {
+            CeremonyPhase::Planning(PlanningState::CsrPreview) => {
                 if key.code == KeyCode::Char('1') {
                     Action::ConfirmCsrSign
                 } else {
@@ -622,7 +622,7 @@ impl Component for CeremonyMode {
                 }
             }
 
-            CeremonyState::CertPreview => {
+            CeremonyPhase::Execute => {
                 if key.code == KeyCode::Char('1') {
                     Action::ConfirmCertBurn
                 } else {
@@ -630,7 +630,7 @@ impl Component for CeremonyMode {
                 }
             }
 
-            CeremonyState::RevokeInput => match key.code {
+            CeremonyPhase::Planning(PlanningState::RevokeInput) => match key.code {
                 KeyCode::Char(c) => Action::RevokeInputChar(c),
                 KeyCode::Backspace => Action::RevokeInputBackspace,
                 KeyCode::Enter => Action::RevokeInputNextPhase,
@@ -638,7 +638,7 @@ impl Component for CeremonyMode {
                 _ => Action::Noop,
             },
 
-            CeremonyState::RevokePreview => {
+            CeremonyPhase::Planning(PlanningState::RevokePreview) => {
                 if key.code == KeyCode::Char('1') {
                     Action::ConfirmCrlSign
                 } else {
@@ -646,7 +646,7 @@ impl Component for CeremonyMode {
                 }
             }
 
-            CeremonyState::CrlPreview => {
+            CeremonyPhase::Planning(PlanningState::CrlPreview) => {
                 if key.code == KeyCode::Char('1') {
                     Action::ConfirmCrlSign
                 } else {
@@ -654,9 +654,9 @@ impl Component for CeremonyMode {
                 }
             }
 
-            CeremonyState::BurningDisc => Action::Noop, // auto-advance on burn
+            CeremonyPhase::BurningDisc => Action::Noop, // auto-advance on burn
 
-            CeremonyState::DiscDone => {
+            CeremonyPhase::DiscDone => {
                 if key.code == KeyCode::Char('1') {
                     Action::DoWriteShuttle
                 } else {
@@ -664,7 +664,7 @@ impl Component for CeremonyMode {
                 }
             }
 
-            CeremonyState::MigrateConfirm => {
+            CeremonyPhase::Planning(PlanningState::MigrateConfirm) => {
                 if key.code == KeyCode::Char('1') {
                     Action::ConfirmMigrate
                 } else {
@@ -672,7 +672,7 @@ impl Component for CeremonyMode {
                 }
             }
 
-            CeremonyState::WaitMigrateTarget => {
+            CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => {
                 if key.code == KeyCode::Char('1') {
                     Action::ConfirmMigrateTarget
                 } else {
@@ -680,7 +680,7 @@ impl Component for CeremonyMode {
                 }
             }
 
-            CeremonyState::InitRootCustodianSetup => match key.code {
+            CeremonyPhase::Planning(PlanningState::CustodianSetup) => match key.code {
                 KeyCode::Char(c) => Action::InitRootInputChar(c),
                 KeyCode::Backspace => Action::InitRootInputBackspace,
                 KeyCode::Enter => Action::InitRootConfirmCustodians,
@@ -688,21 +688,23 @@ impl Component for CeremonyMode {
                 _ => Action::Noop,
             },
 
-            CeremonyState::InitRootShareReveal => Action::Noop, // handled by ShareReveal component
-            CeremonyState::InitRootShareVerify => Action::Noop, // handled by ShareInput component
+            CeremonyPhase::Planning(PlanningState::ShareReveal) => Action::Noop, // handled by ShareReveal component
+            CeremonyPhase::Planning(PlanningState::ShareVerify) => Action::Noop, // handled by ShareInput component
 
-            CeremonyState::RekeyQuorum => Action::Noop, // handled by ShareInput component
-            CeremonyState::RekeyCustodianSetup => match key.code {
+            CeremonyPhase::Planning(PlanningState::RekeyQuorum) => Action::Noop, // handled by ShareInput component
+            CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup) => match key.code {
                 KeyCode::Char(c) => Action::InitRootInputChar(c),
                 KeyCode::Backspace => Action::InitRootInputBackspace,
                 KeyCode::Enter => Action::RekeyConfirmCustodians,
                 KeyCode::Esc => Action::RekeyAbort,
                 _ => Action::Noop,
             },
-            CeremonyState::RekeyShareReveal => Action::Noop, // handled by ShareReveal component
-            CeremonyState::RekeyShareVerify => Action::Noop, // handled by ShareInput component
+            CeremonyPhase::Planning(PlanningState::RekeyShareReveal) => Action::Noop, // handled by ShareReveal component
+            CeremonyPhase::Planning(PlanningState::RekeyShareVerify) => Action::Noop, // handled by ShareInput component
 
-            CeremonyState::Done => Action::Noop,
+            CeremonyPhase::Quorum => Action::Noop, // handled by ShareInput component
+
+            CeremonyPhase::Done => Action::Noop,
         }
     }
 

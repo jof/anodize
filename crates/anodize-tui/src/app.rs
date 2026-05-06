@@ -17,7 +17,7 @@ use ratatui::{
 
 use crate::action::{Action, Mode, Operation};
 use crate::components::confirm_dialog::ConfirmDialog;
-use crate::modes::ceremony::CeremonyState;
+use crate::modes::ceremony::{CeremonyPhase, PlanningState};
 use crate::components::mode_bar::ModeBar;
 use crate::components::phase_bar::PhaseBar;
 use crate::components::status_bar::{HwState, StatusBar};
@@ -335,7 +335,7 @@ impl App {
 
         // InitRoot share reveal/verify: delegate to owned components
         if self.mode == Mode::Ceremony {
-            if self.ceremony.state == CeremonyState::InitRootShareReveal {
+            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::ShareReveal) {
                 if key.code == KeyCode::Esc {
                     return Action::InitRootAbort;
                 }
@@ -351,13 +351,13 @@ impl App {
                                 ),
                             );
                         }
-                        self.ceremony.state = CeremonyState::InitRootShareVerify;
+                        self.ceremony.state = CeremonyPhase::Planning(PlanningState::ShareVerify);
                         self.set_status("Verification round: each custodian re-enters their share.");
                     }
                 }
                 return Action::Noop;
             }
-            if self.ceremony.state == CeremonyState::InitRootShareVerify {
+            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::ShareVerify) {
                 if key.code == KeyCode::Esc {
                     return Action::InitRootAbort;
                 }
@@ -367,7 +367,7 @@ impl App {
                         self.sss.share_input = None;
                         self.sss.shares = None;
                         // Verification passed → proceed to HSM key generation
-                        self.ceremony.state = CeremonyState::KeyAction;
+                        self.ceremony.state = CeremonyPhase::Planning(PlanningState::KeyAction);
                         self.set_status(
                             "Shares verified. [1] Generate root keypair  [2] Use existing key",
                         );
@@ -377,7 +377,7 @@ impl App {
             }
 
             // RekeyShares: quorum input → reconstruct PIN
-            if self.ceremony.state == CeremonyState::RekeyQuorum {
+            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RekeyQuorum) {
                 if key.code == KeyCode::Esc {
                     return Action::RekeyAbort;
                 }
@@ -390,7 +390,7 @@ impl App {
                 }
                 return Action::Noop;
             }
-            if self.ceremony.state == CeremonyState::RekeyShareReveal {
+            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RekeyShareReveal) {
                 if key.code == KeyCode::Esc {
                     return Action::RekeyAbort;
                 }
@@ -405,13 +405,13 @@ impl App {
                                 ),
                             );
                         }
-                        self.ceremony.state = CeremonyState::RekeyShareVerify;
+                        self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyShareVerify);
                         self.set_status("Verify new shares: each custodian re-enters their share.");
                     }
                 }
                 return Action::Noop;
             }
-            if self.ceremony.state == CeremonyState::RekeyShareVerify {
+            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RekeyShareVerify) {
                 if key.code == KeyCode::Esc {
                     return Action::RekeyAbort;
                 }
@@ -650,7 +650,7 @@ impl App {
                 self.sss.share_input = None;
                 self.sss.share_reveal = None;
                 self.current_op = None;
-                self.ceremony.state = CeremonyState::OperationSelect;
+                self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.set_status("InitRoot aborted.");
             }
             Action::RekeyConfirmCustodians => {
@@ -663,7 +663,7 @@ impl App {
                 self.sss.share_input = None;
                 self.sss.share_reveal = None;
                 self.current_op = None;
-                self.ceremony.state = CeremonyState::OperationSelect;
+                self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.set_status("RekeyShares aborted.");
             }
 
@@ -779,7 +779,6 @@ impl App {
         let phase_steps = match self.mode {
             Mode::Setup => modes::setup_phases(self.setup.phase.index()),
             Mode::Ceremony => modes::ceremony_phases(
-                self.ceremony.op_label(),
                 self.ceremony.phase_index(),
             ),
             Mode::Utilities => modes::utility_phases(&self.utilities.screen),

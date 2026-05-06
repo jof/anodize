@@ -23,7 +23,7 @@ use crate::app::App;
 use crate::components::status_bar::HwState;
 use crate::helpers::*;
 use crate::media::{self, IsoFile, SessionEntry};
-use crate::modes::ceremony::CeremonyState;
+use crate::modes::ceremony::{CeremonyPhase, PlanningState};
 use crate::modes::setup::SetupPhase;
 
 impl App {
@@ -201,7 +201,7 @@ impl App {
                                     Some(2) => self.do_find_and_build(),
                                     _ => {
                                         self.set_status("Unknown key action");
-                                        self.ceremony.state = CeremonyState::OperationSelect;
+                                        self.ceremony.state = CeremonyPhase::OperationSelect;
                                     }
                                 }
                             }
@@ -210,7 +210,7 @@ impl App {
                             Some(Operation::IssueCrl) => self.do_sign_crl_refresh(),
                             _ => {
                                 self.set_status("Unknown operation after intent");
-                                self.ceremony.state = CeremonyState::OperationSelect;
+                                self.ceremony.state = CeremonyPhase::OperationSelect;
                             }
                         }
                     }
@@ -227,7 +227,7 @@ impl App {
                 self.disc.burn_rx = None;
                 match result {
                     Ok(()) => {
-                        self.ceremony.state = CeremonyState::DiscDone;
+                        self.ceremony.state = CeremonyPhase::DiscDone;
                         let disc_label = self
                             .disc.optical_dev
                             .as_deref()
@@ -249,7 +249,7 @@ impl App {
                         self.set_status(format!(
                             "Burn failed: {e} — reinsert disc and retry."
                         ));
-                        self.ceremony.state = CeremonyState::OperationSelect;
+                        self.ceremony.state = CeremonyPhase::OperationSelect;
                         self.disc.optical_dev = None;
                     }
                 }
@@ -299,16 +299,16 @@ impl App {
                 if self.disc.session_state.is_some() {
                     self.set_status("Root already initialized on this disc. Use RekeyShares to change PIN.");
                     self.current_op = None;
-                    self.ceremony.state = CeremonyState::OperationSelect;
+                    self.ceremony.state = CeremonyPhase::OperationSelect;
                     return;
                 }
                 self.sss.custodian_buf.clear();
                 self.sss.custodian_names.clear();
-                self.ceremony.state = CeremonyState::InitRootCustodianSetup;
+                self.ceremony.state = CeremonyPhase::Planning(PlanningState::CustodianSetup);
                 self.set_status("Enter custodian names (comma-separated), then press Enter.");
             }
             Operation::GenerateRootCa => {
-                self.ceremony.state = CeremonyState::KeyAction;
+                self.ceremony.state = CeremonyPhase::Planning(PlanningState::KeyAction);
                 self.set_status(
                     "[1] Generate new P-384 keypair (fresh)  [2] Use existing key (resume)",
                 );
@@ -318,7 +318,7 @@ impl App {
             }
             Operation::RevokeCert => {
                 self.do_load_revocation();
-                if self.ceremony.state == CeremonyState::RevokeInput {
+                if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RevokeInput) {
                     self.data.revoke_phase = 0;
                     self.data.revoke_serial_buf.clear();
                     self.data.revoke_reason_buf.clear();
@@ -329,7 +329,7 @@ impl App {
             }
             Operation::IssueCrl => {
                 self.do_load_revocation();
-                if self.ceremony.state == CeremonyState::CrlPreview {
+                if self.ceremony.state == CeremonyPhase::Planning(PlanningState::CrlPreview) {
                     self.set_status("Review CRL details. [1] to proceed, [q] to cancel.");
                 }
             }
@@ -337,7 +337,7 @@ impl App {
                 if self.disc.session_state.is_none() {
                     self.set_status("No STATE.JSON — run InitRoot first.");
                     self.current_op = None;
-                    self.ceremony.state = CeremonyState::OperationSelect;
+                    self.ceremony.state = CeremonyPhase::OperationSelect;
                     return;
                 }
                 // Enter quorum phase: custodians re-enter shares
@@ -345,7 +345,7 @@ impl App {
                 self.sss.share_input = Some(
                     crate::components::share_input::ShareInput::new(sss, 32),
                 );
-                self.ceremony.state = CeremonyState::RekeyQuorum;
+                self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyQuorum);
                 self.set_status("Enter threshold shares to reconstruct the PIN.");
             }
             Operation::MigrateDisc => {
@@ -449,7 +449,7 @@ impl App {
             &names,
         ));
 
-        self.ceremony.state = CeremonyState::InitRootShareReveal;
+        self.ceremony.state = CeremonyPhase::Planning(PlanningState::ShareReveal);
         self.set_status(format!(
             "PIN generated. Distributing {total} shares ({threshold}-of-{total}). Hand device to each custodian."
         ));
@@ -483,7 +483,7 @@ impl App {
             Ok(b) => b,
             Err(e) => {
                 self.set_status(format!("PIN reconstruction failed: {e}"));
-                self.ceremony.state = CeremonyState::OperationSelect;
+                self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.current_op = None;
                 return;
             }
@@ -502,7 +502,7 @@ impl App {
 
         if pin_hash != expected {
             self.set_status("PIN verify hash mismatch — shares may be corrupted.");
-            self.ceremony.state = CeremonyState::OperationSelect;
+            self.ceremony.state = CeremonyPhase::OperationSelect;
             self.current_op = None;
             return;
         }
@@ -511,7 +511,7 @@ impl App {
         self.pin_buf = hex::encode(&pin_bytes);
         self.sss.custodian_buf.clear();
         self.sss.custodian_names.clear();
-        self.ceremony.state = CeremonyState::RekeyCustodianSetup;
+        self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup);
         self.set_status("PIN verified. Enter new custodian names (comma-separated).");
 
         tracing::info!("RekeyShares: quorum reached, PIN verified, entering custodian setup");
@@ -590,7 +590,7 @@ impl App {
             &names,
         ));
 
-        self.ceremony.state = CeremonyState::RekeyShareReveal;
+        self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyShareReveal);
         self.set_status(format!(
             "Distributing {total} new shares ({threshold}-of-{total}). Hand device to each custodian."
         ));
@@ -640,7 +640,7 @@ impl App {
         }
 
         self.data.csr_der = Some(csr_bytes);
-        self.ceremony.state = CeremonyState::LoadCsr;
+        self.ceremony.state = CeremonyPhase::Planning(PlanningState::LoadCsr);
         self.set_status(format!("CSR loaded. Select profile [1]–[{profiles_len}]."));
     }
 
@@ -695,7 +695,7 @@ impl App {
             self.data.crl_number = Some(next_crl_number_from_sessions(&self.disc.prior_sessions));
         }
 
-        self.ceremony.state = CeremonyState::RevokePreview;
+        self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokePreview);
         self.set_status("Review revocation. [1] to commit to disc, [q] to cancel.");
     }
 
@@ -714,10 +714,10 @@ impl App {
 
         match self.current_op {
             Some(Operation::RevokeCert) => {
-                self.ceremony.state = CeremonyState::RevokeInput;
+                self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokeInput);
             }
             Some(Operation::IssueCrl) => {
-                self.ceremony.state = CeremonyState::CrlPreview;
+                self.ceremony.state = CeremonyPhase::Planning(PlanningState::CrlPreview);
             }
             _ => {}
         }
@@ -744,7 +744,7 @@ impl App {
         }
 
         self.data.migrate_chain_ok = verify_audit_chain(&self.disc.prior_sessions);
-        self.ceremony.state = CeremonyState::MigrateConfirm;
+        self.ceremony.state = CeremonyPhase::Planning(PlanningState::MigrateConfirm);
         let chain_status = if self.data.migrate_chain_ok { "OK" } else { "FAIL" };
         self.set_status(format!(
             "Chain: {chain_status}  {} session(s)  {} bytes. [1] to proceed, [q] to abort.",
@@ -899,7 +899,7 @@ impl App {
 
         self.data.cert_der = Some(cert_der);
         self.data.crl_der = Some(crl_der);
-        self.ceremony.state = CeremonyState::CertPreview;
+        self.ceremony.state = CeremonyPhase::Execute;
         self.set_status("Certificate built. Verify fingerprint before writing.");
     }
 
@@ -1014,7 +1014,7 @@ impl App {
         let fp = sha256_fingerprint(&cert_der);
         self.data.fingerprint = Some(fp);
         self.data.cert_der = Some(cert_der);
-        self.ceremony.state = CeremonyState::CertPreview;
+        self.ceremony.state = CeremonyPhase::Execute;
         self.set_status("Intermediate cert signed. Verify fingerprint before writing.");
     }
 
@@ -1226,7 +1226,7 @@ impl App {
             }
         }
 
-        self.ceremony.state = CeremonyState::WritingIntent;
+        self.ceremony.state = CeremonyPhase::Commit;
         self.set_status("Writing intent to disc. Operation will follow…");
     }
 
@@ -1369,7 +1369,7 @@ impl App {
                 return;
             }
 
-            self.ceremony.state = CeremonyState::BurningDisc;
+            self.ceremony.state = CeremonyPhase::BurningDisc;
             self.set_status("Burning disc session… (this may take a few minutes)");
         }
     }
@@ -1809,12 +1809,12 @@ impl App {
             }
             Some(Operation::InitRoot) | Some(Operation::RekeyShares) => {
                 // No shuttle artifacts for these operations
-                self.ceremony.state = CeremonyState::Done;
+                self.ceremony.state = CeremonyPhase::Done;
                 self.set_status("Operation complete.");
                 return;
             }
             Some(Operation::MigrateDisc) | None => {
-                self.ceremony.state = CeremonyState::Done;
+                self.ceremony.state = CeremonyPhase::Done;
                 self.set_status("Migration complete.");
                 return;
             }
@@ -1827,7 +1827,7 @@ impl App {
             return;
         }
 
-        self.ceremony.state = CeremonyState::Done;
+        self.ceremony.state = CeremonyPhase::Done;
         self.set_status(format!("Shuttle write complete: {}", shuttle.display()));
     }
 
@@ -1840,15 +1840,15 @@ impl App {
     pub(crate) fn render_ceremony_content(&self, frame: &mut Frame, area: Rect) {
         // ShareReveal / ShareInput overlay for InitRoot and Rekey states
         match self.ceremony.state {
-            CeremonyState::InitRootShareReveal | CeremonyState::RekeyShareReveal => {
+            CeremonyPhase::Planning(PlanningState::ShareReveal) | CeremonyPhase::Planning(PlanningState::RekeyShareReveal) => {
                 if let Some(ref reveal) = self.sss.share_reveal {
                     reveal.render(frame, area);
                     return;
                 }
             }
-            CeremonyState::InitRootShareVerify
-            | CeremonyState::RekeyShareVerify
-            | CeremonyState::RekeyQuorum => {
+            CeremonyPhase::Planning(PlanningState::ShareVerify)
+            | CeremonyPhase::Planning(PlanningState::RekeyShareVerify)
+            | CeremonyPhase::Planning(PlanningState::RekeyQuorum) => {
                 if let Some(ref input) = self.sss.share_input {
                     input.render(frame, area);
                     return;

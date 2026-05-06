@@ -45,8 +45,8 @@ pub fn utility_phases(screen: &utilities::UtilScreen) -> Vec<PhaseStep> {
 }
 
 /// Phase steps for a ceremony operation.
-pub fn ceremony_phases(op_label: &'static str, current: usize) -> Vec<PhaseStep> {
-    let labels: &[&str] = &["Select", op_label, "Commit", "Quorum", "Execute", "Burn", "Export", "Done"];
+pub fn ceremony_phases(current: usize) -> Vec<PhaseStep> {
+    let labels: &[&str] = &["Select", "Plan", "Commit", "Execute", "Export", "Done"];
     labels
         .iter()
         .enumerate()
