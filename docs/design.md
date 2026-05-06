@@ -33,7 +33,7 @@ PKCS#11 is a `dlopen`-at-runtime contract. The whole point of the abstraction is
 The binary has no compile-time knowledge of the HSM backend. The operator (or the boot process) selects a profile:
 
 ```toml
-# /media/usb/profile.toml
+# shuttle USB: /tmp/anodize-shuttle/profile.toml
 [ca]
 common_name  = "Example Root CA"
 organization = "Example Corp"
@@ -80,11 +80,11 @@ Rationale:
 - The TUI mirrors its status log to tty2, providing a scrollable audit trail of every ceremony action that persists until reboot.
 - An operator photographing the screen (common during witnessed ceremonies) would capture any displayed secret.
 
-PIN entry uses masked input with random-length noise (see Phase 4). All other secret values are handled exclusively via the `Hsm` trait boundary — they never cross into the TUI layer.
+PIN entry uses masked input with random-length noise. SSS share display is the one controlled exception: shares are shown one at a time to each custodian, hidden by default, and revealed only on explicit key press. The share is cleared from the display before the next custodian steps forward. All other secret values are handled exclusively via the `Hsm` trait boundary — they never cross into the TUI layer.
 
-### Disc before USB invariant
+### Disc before shuttle invariant
 
-Every signed artifact (cert, CRL) is held in RAM after signing. The TUI commits the artifact to a write-once optical disc (BD-R, DVD-R, or M-Disc) before writing to USB. The USB write step is only reachable in the TUI state machine after the disc write completes — a full SG_IO SAO session burn, not a file write to a pre-mounted path. This is enforced structurally: the data does not exist on any writable path until after the disc session closes successfully.
+Every signed artifact (cert, CRL) is held in RAM after signing. The TUI commits the artifact to a write-once optical disc (BD-R, DVD-R, or M-Disc) before writing to the shuttle. The Export phase (shuttle write) is only reachable in the ceremony pipeline after the disc session closes successfully — a full SG_IO SAO session burn, not a file write to a pre-mounted path. This is enforced structurally: the data does not exist on any writable path until after the disc session closes.
 
 ### Ceremony disc: multi-session SAO archive
 
@@ -135,11 +135,13 @@ Minimum ISO image size is 300 sectors (614 KiB); images are zero-padded to this 
 
 The system clock is verified first — the TUI's `ClockCheck` screen displays the current UTC time and requires the operator to confirm accuracy before any timestamped session can be written. If the clock is wrong, the operator exits and corrects it before relaunching.
 
-### Ceremony device discovery
+### Shuttle and device discovery
 
-The ceremony binary discovers USB sticks and optical drives internally via Linux sysfs (`/sys/block/`). USB partitions are mounted with `nix::mount::mount(2)` (requires `CAP_SYS_ADMIN`, granted via NixOS `security.wrappers` capability wrapper with `cap_sys_admin=ep`). No udisks2 or automount daemon is involved. The USB stick supplying `profile.toml` remains mounted throughout the ceremony and is the output target for the post-disc USB write.
+The **shuttle** is the USB stick carrying `profile.toml`, CSRs, and signed artifacts (`ANODIZE-SHUTTLE` volume label). CLI flag `--shuttle-mount`, default `/tmp/anodize-shuttle`. This naming clarifies the role distinction from the audit optical disc.
 
-USB mount uses the `nix` crate (v0.29) with `MS_NOEXEC | MS_NOSUID | MS_NODEV` flags; tries vfat first, falls back to ext4. Optical drives are identified by `/sys/block/sr*`. Unmount uses `umount2(MNT_DETACH)` so the binary never leaves a stale mount entry on failure.
+The ceremony binary discovers shuttles and optical drives internally via Linux sysfs (`/sys/block/`). Shuttle partitions are mounted with `nix::mount::mount(2)` (requires `CAP_SYS_ADMIN`, granted via NixOS `security.wrappers` capability wrapper with `cap_sys_admin=ep`). No udisks2 or automount daemon is involved. The shuttle remains mounted throughout the ceremony and is the output target for the Export phase.
+
+Mount uses the `nix` crate (v0.29) with `MS_NOEXEC | MS_NOSUID | MS_NODEV` flags; tries vfat first, falls back to ext4. Optical drives are identified by `/sys/block/sr*`. Unmount uses `umount2(MNT_DETACH)` so the binary never leaves a stale mount entry on failure.
 
 ### Append-only signed audit log
 
@@ -218,6 +220,7 @@ Pre-hashing in Rust rather than using `CKM_ECDSA_SHA384` is necessary because So
 | Logging | `tracing 0.1` + `tracing-subscriber` | Plain text on console; audit log is separate |
 | Errors | `thiserror 2` in libs, `anyhow 1` in binaries | |
 | Audit serialization | `serde_json` | JSONL audit records |
+| SSS | `anodize-sss` (internal) | Shamir over GF(256), 256-word wordlist encoding, CRC-8 checksums |
 
 ---
 
@@ -230,7 +233,62 @@ Pre-hashing in Rust rather than using `CKM_ECDSA_SHA384` is necessary because So
 
 ---
 
-## CSR policy (Phase 2)
+## Shamir Secret Sharing for HSM PIN
+
+The HSM PIN is a 32-byte random value split via Shamir over GF(256) (`anodize-sss` crate). Share parameters (threshold *k*, total *n*, custodian names) are chosen at root-init and stored as metadata in `STATE.JSON` on the audit disc. Shares are never stored on disc — custodians hold paper transcripts using a 256-word wordlist encoding with CRC-8 checksums.
+
+**Share commitments**: each share has a SHA-256 commitment `H(index || custodian_name || y_bytes)` stored in `STATE.JSON`. At quorum time, the presented share is checked against its commitment before reconstruction proceeds, preventing share-index spoofing.
+
+**PIN verification hash**: `H(pin_bytes)` stored in `STATE.JSON` allows pre-login verification, avoiding wasting PKCS#11 retry attempts on reconstructed-PIN mismatches.
+
+---
+
+## Ceremony pipeline
+
+The ceremony TUI has two phases: **Setup** and **Ceremony**. Setup runs once per session; Ceremony can execute multiple operations.
+
+### Setup
+
+Setup gates the ceremony by verifying prerequisites in order:
+
+1. **Clock** — operator confirms UTC time accuracy
+2. **Shuttle** — detect and mount shuttle USB with `profile.toml`
+3. **Profile** — parse and validate `profile.toml`
+4. **Disc** — detect write-once optical disc, load prior sessions + `STATE.JSON`
+
+No PIN entry occurs during setup. PIN acquisition is deferred to the Quorum phase of each ceremony operation.
+
+### Ceremony operations
+
+After setup completes, the operator selects an operation. Each operation follows a six-phase pipeline:
+
+1. **Preflight** — load `STATE.JSON`, verify disc chain, detect WAL recovery
+2. **Planning** — configure parameters (operation-specific sub-screens)
+3. **Commit** — write intent WAL session to disc (crash-safe point)
+4. **Quorum** — collect threshold shares from custodians, reconstruct PIN, verify against commitment + hash. For `InitRoot` (no prior PIN), this phase generates the random PIN and performs SSS distribution instead.
+5. **Execute** — HSM login with reconstructed PIN, perform crypto operation, HSM logout
+6. **Export** — write record session to disc, copy artifacts to shuttle
+
+### Operations
+
+- **`InitRoot`** — generate root CA keypair, split PIN into shares, distribute to custodians, build root cert + initial CRL. This is the primary first-ceremony operation.
+- **`SignCsr`** — sign an intermediate CSR from the shuttle
+- **`RevokeCert`** — add revocation entry + issue new CRL
+- **`IssueCrl`** — re-sign the current revocation list
+- **`RekeyShares`** — reconstruct old PIN, generate new PIN, `C_SetPIN`, split new shares, verify new shares, commit
+- **`MigrateDisc`** — migrate all sessions to a new optical disc (no HSM involvement; Quorum skipped)
+
+### Crash recoverability
+
+Before any irreversible operation (HSM key generation, `C_SetPIN`), the intent WAL session is committed to disc. The WAL contains enough state to recover: the old PIN hash (for re-key), the operation parameters, and intermediate results. If the ceremony machine crashes, the next session can detect and resume from the WAL.
+
+### Pedantic config validation
+
+All config and state structs use `#[serde(deny_unknown_fields)]` to reject typos and unexpected fields at parse time.
+
+---
+
+## CSR policy
 
 Conservative by default. When signing a CSR to produce an intermediate:
 
@@ -292,96 +350,20 @@ The operator interaction surface is entirely the numbered ratatui TUI menu.
 
 ---
 
-## Phased implementation plan
+## Implementation milestones
 
-### Phase 0 — Bootstrap (done)
-- Cargo workspace, 7-crate skeleton
-- `rust-toolchain.toml` pinned to stable
-- `deny.toml` for supply-chain policy
-- CI: `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`, `cargo deny check`
-- Makefile
-
-### Phase 1 — HSM abstraction (done)
-- `anodize-hsm`: `Hsm` trait, `Pkcs11Hsm`, `HsmActor`
-- `softhsm2.conf.template` fixture
-- Integration tests: generate P-384 keypair, sign, verify signature with `p384` crate
-
-### Phase 2 — CA core (done)
-- `anodize-config`: `Profile` / `CaConfig` / `HsmConfig` structs; `PinSource` with custom `Deserialize` for `"prompt"` / `"env:VAR"` / `"file:/path"`; runtime `tracing::warn` for non-`prompt` sources
-- `anodize-ca`: `P384HsmSigner<H: Hsm>` bridging `Hsm` to x509-cert builder; `build_root_cert`, `sign_intermediate_csr` (CSR sig verified before field parsing, extension allowlist enforced, all others rejected), `issue_crl`
-- SoftHSM2 integration tests: `build_root_cert_roundtrip`, `sign_csr_happy_path`, `csr_with_extra_extension_rejected`, `issue_crl_encodes_revoked_serials`
-
-### Phase 3 — Audit log (done)
-- `anodize-audit`: `Record` struct, JSONL append, `AuditLog::create/open/append`, `verify_log` free function
-- `genesis_hash(root_cert_der)` = SHA-256(root cert DER) — ties genesis to the specific ceremony
-- Corruption test: single-byte flip detected at correct record index
-
-### Phase 4 — Ceremony TUI (done)
-- `anodize-tui` (`anodize-ceremony` binary): ratatui ceremony wizard; disc-before-USB invariant enforced structurally — USB write step only reachable from `DiscDone` state; cert DER held in RAM until disc write succeeds
-- PIN input masked with random-length noise: display length ∈ [8, 20], independent of actual PIN length, refreshed on every keystroke. Prevents shoulder-surf length disclosure without requiring a CSPRNG — `SystemTime::now().subsec_nanos()` is sufficient for a human-visible display. Field shows 0 stars only when empty (confirms cleared), nonzero otherwise.
-- Runbooks (`docs/ceremony-init.md`, `docs/ceremony-sign.md`): deferred to Phase 5
-
-### Phase 5 — Live ISO (done)
-- `flake.nix` (workspace root) + `nix/iso.nix`: Nix flake with `crane` + `rust-overlay` builds `anodize-ceremony` and `anodize` packages; `nix build .#iso` produces the bootable image
-- Minimal NixOS ISO: no network stack, ephemeral tmpfs, read-only squashfs root; packages: `anodize-ceremony`, `softhsm`, `opensc`
-- udev rules: YubiHSM 2 (`idVendor==1050`) and optical drives (`sr[0-9]*`) accessible to wheel group without root
-- `security.wrappers.anodize-ceremony` with `cap_sys_admin=ep` — grants only `CAP_SYS_ADMIN` for `mount(2)`; no setuid
-- Auto-login → ceremony shell on tty1 via getty; shell execs `/run/wrappers/bin/anodize-ceremony` directly; no arguments needed — binary handles device discovery internally
-- `systemd.tmpfiles.rules` create `/run/anodize` and `/run/anodize/usb` with correct ownership before launch
-- No udisks2 — USB discovery and mounting handled internally by the ceremony binary via sysfs + nix::mount
-- Sample profile at `/etc/anodize/profile.example.toml` on the ISO
-- **Builds run in Docker** (same philosophy as Rust CI): `make nix-check` runs the `nix` CI job via `act`; `make nix-iso` runs `nixos/nix` Docker image with `--privileged` for release ISO builds
-- Runbooks: `docs/ceremony-init.md` (root key ceremony), `docs/ceremony-sign.md` (intermediate signing + CRL)
-
-### Phase 6 — Self-managed disc lifecycle (done)
-- Pure-Rust ISO 9660 Level 2 writer (`media/iso9660.rs`): `build_iso` + `parse_iso` roundtrip; both-endian ECMA-119 fields; ≥300-sector padding for DVD-R SAO compatibility
-- SG_IO abstraction (`media/sgdev.rs`): `SgDev` wraps `/dev/sr*`; `cdb_in/cdb_out/cdb_none` over `sg_io` (0x2285) ioctl; SCSI CHECK CONDITION decoded to key/ASC/ASCQ
-- Typed MMC wrappers (`media/mmc.rs`): all disc operations (OPC, write params, reserve, WRITE(10), READ(10), sync cache, close track/session/disc)
-- Multi-session SAO archive: each CA operation appends one session; disc stays open; each session's ISO contains all prior sessions in timestamped subdirectories
-- `ClockCheck` TUI screen: operator confirms UTC clock before any timestamped session is written
-- Internal USB discovery and mounting: `scan_usb_partitions` via `/sys/block`, `mount_usb` via `nix::mount`, vfat→ext4 fallback
-- `--skip-disc` flag: writes staging ISO to `/run/anodize/staging` for dev/test without optical hardware
-- `write_session` background thread: OPC → write params → reserve NWA → WRITE(10) chunks → sync → close track → close session
-
-### Phase 5b — Ceremony UX overhaul
-
-#### USB renamed to "Shuttle"
-The USB stick carrying `profile.toml`, CSRs, and signed artifacts is now called the **shuttle** (`ANODIZE-SHUTTLE` volume label). CLI flag `--shuttle-mount`, default `/tmp/anodize-shuttle`. This clarifies the role distinction from the audit optical disc.
-
-#### Shamir Secret Sharing for HSM PIN (`anodize-sss`)
-The HSM PIN is a 32-byte random value split via Shamir over GF(256). Share parameters (threshold *k*, total *n*, custodian names) are chosen at root-init and stored as metadata in `STATE.JSON` on the audit disc. Shares are never stored on disc — custodians hold paper transcripts using a 256-word wordlist encoding with CRC-8 checksums.
-
-**Share commitments**: each share has a SHA-256 commitment `H(index || custodian_name || y_bytes)` stored in `STATE.JSON`. At quorum time, the presented share is checked against its commitment before reconstruction proceeds, preventing share-index spoofing.
-
-**PIN verification hash**: `H(pin_bytes)` stored in `STATE.JSON` allows pre-login verification, avoiding wasting PKCS#11 retry attempts on reconstructed-PIN mismatches.
-
-#### Ceremony phases
-The ceremony pipeline has six phases after setup:
-
-1. **Preflight** — load `STATE.JSON`, verify disc chain, detect recovery
-2. **Planning** — select operation, configure parameters
-3. **Commit** — write intent WAL to disc (crash-safe point)
-4. **Quorum** — collect shares, reconstruct PIN, verify against commitment + hash
-5. **Execute** — HSM login, perform crypto op, HSM logout
-6. **Export** — write artifacts to shuttle, finalize disc session
-
-#### Operations
-- `InitRoot` — generate root CA keypair, split PIN into shares, distribute to custodians
-- `GenerateRootCa` / `SignCsr` / `RevokeCert` / `IssueCrl` — existing ceremony ops
-- `RekeyShares` — reconstruct old PIN, generate new PIN, `C_SetPIN`, split new shares, verify new shares, commit
-- `MigrateDisc` — migrate audit log to new optical disc
-
-#### Crash recoverability invariant
-Before any irreversible operation (HSM key generation, `C_SetPIN`), the intent WAL session is committed to disc. The WAL contains enough state to recover: the old PIN hash (for re-key), the operation parameters, and intermediate results. If the ceremony machine crashes, the next session can detect and resume from the WAL.
-
-#### Pedantic config validation
-All config and state structs use `#[serde(deny_unknown_fields)]` to reject typos and unexpected fields at parse time.
-
-### Phase 6 — Production hardening (ongoing)
-- `cargo-deny` + `cargo-vet` in CI
-- Reproducible binary builds documented (commit hash → ISO hash)
-- Tabletop key-compromise drill: revoke intermediate, issue CRL, distribute
-- `docs/threat-model.md`: honest accounting of what Anodize does not protect against
+| Milestone | Status | Key deliverables |
+|---|---|---|
+| Bootstrap | done | Cargo workspace, CI pipeline, `deny.toml` |
+| HSM abstraction | done | `Hsm` trait, `Pkcs11Hsm`, `HsmActor`, SoftHSM2 integration tests |
+| CA core | done | `anodize-ca` (`build_root_cert`, `sign_intermediate_csr`, `issue_crl`), `P384HsmSigner`, `anodize-config` |
+| Audit log | done | `anodize-audit`, JSONL chain with SHA-256, `verify_log`, corruption tests |
+| Ceremony TUI | done | ratatui wizard, disc-before-shuttle invariant, PIN noise masking |
+| Live ISO | done | `flake.nix` + `nix/iso.nix`, capability wrapper, auto-login, Docker builds |
+| Disc lifecycle | done | Pure-Rust ISO 9660, SG_IO/MMC, multi-session SAO, `ClockCheck`, `--skip-disc` |
+| SSS + shuttle | done | `anodize-sss`, shuttle terminology, `STATE.JSON`, share commitments, quorum |
+| Ceremony pipeline | done | 6-phase pipeline, `InitRoot`, `RekeyShares`, `MigrateDisc`, crash recoverability |
+| Production hardening | ongoing | `cargo-deny` + `cargo-vet`, reproducible builds, threat model |
 
 ---
 
@@ -393,7 +375,7 @@ All config and state structs use `#[serde(deny_unknown_fields)]` to reject typos
 
 ---
 
-## Threat model (stub — Phase 6)
+## Threat model
 
 Where Anodize does *not* protect you:
 
