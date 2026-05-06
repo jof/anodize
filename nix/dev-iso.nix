@@ -81,13 +81,13 @@ in
   ];
 
   # Add SoftHSM2 to the PKCS#11 allowlist alongside the prod YubiHSM entry.
-  environment.variables = {
-    SOFTHSM2_MODULE = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
-    ANODIZE_PKCS11_MODULES = lib.mkForce (lib.concatStringsSep ":" [
-      "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so"
-      "${pkgs.yubihsm-shell}/lib/pkcs11/yubihsm_pkcs11.so"
-    ]);
-  };
+  # Base iso.nix already sets YUBIHSM_PKCS11_CONF — only override the keys
+  # that differ so we don't accidentally drop upstream variables.
+  environment.variables.SOFTHSM2_MODULE = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
+  environment.variables.ANODIZE_PKCS11_MODULES = lib.mkForce (lib.concatStringsSep ":" [
+    "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so"
+    "${pkgs.yubihsm-shell}/lib/pkcs11/yubihsm_pkcs11.so"
+  ]);
 
   # cdemu-daemon: userspace optical drive emulator, run as a user service.
   systemd.user.services.cdemu-daemon = {
