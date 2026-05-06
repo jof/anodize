@@ -24,9 +24,9 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(name = "anodize-ceremony", about = "Root CA key ceremony")]
 struct Cli {
-    /// Mount point for USB stick (created if absent).
-    #[arg(long, default_value = "/tmp/anodize-usb")]
-    usb_mount: PathBuf,
+    /// Mount point for shuttle USB stick (created if absent).
+    #[arg(long, default_value = "/tmp/anodize-shuttle")]
+    shuttle_mount: PathBuf,
 
     /// Skip optical disc burn; write disc artifacts to /tmp/anodize-staging instead.
     /// For development and testing only — never use in a real ceremony.
@@ -66,7 +66,7 @@ fn main() -> Result<()> {
     tui.enter()?;
 
     // Application state
-    let mut app = app::App::new(cli.usb_mount, cli.skip_disc);
+    let mut app = app::App::new(cli.shuttle_mount, cli.skip_disc);
 
     // Event handler: 100ms tick rate drives background polling
     let events = event::EventHandler::new(Duration::from_millis(100));
@@ -98,8 +98,8 @@ fn main() -> Result<()> {
     // Cleanup (Tui::Drop also handles this, but be explicit)
     tui.exit()?;
 
-    // Unmount USB if still mounted (so the next ceremony session can re-mount)
-    let _ = media::unmount(&app.usb_mountpoint);
+    // Unmount shuttle if still mounted (so the next ceremony session can re-mount)
+    let _ = media::unmount(&app.shuttle_mount);
 
     Ok(())
 }

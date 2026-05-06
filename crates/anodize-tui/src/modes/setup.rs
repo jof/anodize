@@ -13,7 +13,7 @@ use crate::components::Component;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupPhase {
     ClockCheck,
-    WaitUsb,
+    WaitShuttle,
     ProfileLoaded,
     EnterPin,
     WaitDisc,
@@ -23,7 +23,7 @@ impl SetupPhase {
     pub fn index(&self) -> usize {
         match self {
             Self::ClockCheck => 0,
-            Self::WaitUsb => 1,
+            Self::WaitShuttle => 1,
             Self::ProfileLoaded => 2,
             Self::EnterPin => 3,
             Self::WaitDisc => 4,
@@ -31,7 +31,7 @@ impl SetupPhase {
     }
 }
 
-/// Setup mode component: walks through clock verification, USB detection,
+/// Setup mode component: walks through clock verification, shuttle detection,
 /// profile loading, HSM PIN entry, and disc readiness.
 pub struct SetupMode {
     pub phase: SetupPhase,
@@ -53,7 +53,7 @@ impl SetupMode {
     ) {
         let title = match self.phase {
             SetupPhase::ClockCheck => "Clock Verification",
-            SetupPhase::WaitUsb => "Waiting for USB",
+            SetupPhase::WaitShuttle => "Waiting for USB",
             SetupPhase::ProfileLoaded => "Profile Loaded",
             SetupPhase::EnterPin => "HSM Authentication",
             SetupPhase::WaitDisc => "Insert Disc",
@@ -82,7 +82,7 @@ impl SetupMode {
                     "  [q]  Exit to correct clock, then relaunch".into(),
                 ]
             }
-            SetupPhase::WaitUsb => vec![
+            SetupPhase::WaitShuttle => vec![
                 String::new(),
                 "  Insert USB stick containing profile.toml.".into(),
                 String::new(),
@@ -96,7 +96,7 @@ impl SetupMode {
                         format!("  Org         : {}", p.ca.organization),
                         format!("  Country     : {}", p.ca.country),
                         format!("  HSM token   : {}", p.hsm.token_label),
-                        format!("  USB mount   : {}", app.usb_mountpoint.display()),
+                        format!("  Shuttle     : {}", app.shuttle_mount.display()),
                         String::new(),
                         "  [1]  Begin ceremony (HSM PIN entry)".into(),
                         "  [q]  Quit".into(),
@@ -156,7 +156,7 @@ impl Component for SetupMode {
                     return Action::ConfirmClock;
                 }
             }
-            SetupPhase::WaitUsb => {} // auto-advance in background_tick
+            SetupPhase::WaitShuttle => {} // auto-advance in background_tick
             SetupPhase::ProfileLoaded => {
                 if key.code == KeyCode::Char('1') {
                     return Action::AdvanceToPinEntry;

@@ -102,7 +102,7 @@ impl UtilitiesMode {
         lines.push(String::new());
 
         // Ceremony state
-        lines.push(format!("  USB mount: {}", app.usb_mountpoint.display()));
+        lines.push(format!("  USB mount: {}", app.shuttle_mount.display()));
         lines.push(format!("  Skip disc: {}", app.skip_disc));
         if let Some(ref p) = app.profile {
             lines.push(format!("  Profile: {} / {}", p.ca.common_name, p.ca.organization));
@@ -154,7 +154,7 @@ impl UtilitiesMode {
         // Try staging log first, then USB log
         let candidates = [
             std::path::PathBuf::from("/run/anodize/staging/audit.log"),
-            app.usb_mountpoint.join("audit.log"),
+            app.shuttle_mount.join("audit.log"),
         ];
         let log_path = candidates.iter().find(|p| p.exists());
 
