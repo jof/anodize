@@ -66,6 +66,18 @@ in
     pkgs.sg3_utils              # SCSI diagnostic tools
     pkgs.softhsm                # SoftHSM2 PKCS#11 module (dev/testing)
     pkgs.opensc                 # PKCS#11 utilities (pkcs11-tool, etc.)
+    pkgs.iproute2               # ip(8) — network diagnostics
+
+    # Quick network info for remote SSH access.
+    (pkgs.writeShellScriptBin "anodize-netinfo" ''
+      echo "=== Network Interfaces ==="
+      ${pkgs.iproute2}/bin/ip -brief addr show
+      echo
+      echo "=== SSH Host Keys ==="
+      for f in /etc/ssh/ssh_host_*_key.pub; do
+        ${pkgs.openssh}/bin/ssh-keygen -lf "$f"
+      done
+    '')
   ];
 
   # Add SoftHSM2 to the PKCS#11 allowlist alongside the prod YubiHSM entry.
