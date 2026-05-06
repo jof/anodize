@@ -88,8 +88,8 @@ impl App {
 
     pub(crate) fn tick_wait_disc(&mut self, need_blank: bool) {
         if self.skip_disc {
-            self.optical_dev = Some(PathBuf::from("/run/anodize/staging"));
-            self.sessions_remaining = Some(100);
+            self.disc.optical_dev = Some(PathBuf::from("/run/anodize/staging"));
+            self.disc.sessions_remaining = Some(100);
             let label = if need_blank {
                 "--skip-disc mode: target disc ready. Press [1]."
             } else {
@@ -107,7 +107,7 @@ impl App {
                     let n = scan.sessions.len();
                     let cap_summary = &scan.capacity_summary;
                     let remaining = scan.sessions_remaining;
-                    self.sessions_remaining = Some(remaining);
+                    self.disc.sessions_remaining = Some(remaining);
                     if need_blank && n > 0 {
                         self.set_status(format!(
                             "Disc in {} has {n} session(s) — need a blank disc for migration.",
@@ -123,14 +123,14 @@ impl App {
                         ));
                         continue;
                     }
-                    self.optical_dev = Some(dev.clone());
+                    self.disc.optical_dev = Some(dev.clone());
                     if !need_blank {
-                        self.prior_sessions = scan.sessions;
-                        self.session_state =
-                            load_session_state_from_sessions(&self.prior_sessions);
-                        if let Some(ref state) = self.session_state {
+                        self.disc.prior_sessions = scan.sessions;
+                        self.disc.session_state =
+                            load_session_state_from_sessions(&self.disc.prior_sessions);
+                        if let Some(ref state) = self.disc.session_state {
                             // Populate revocation list and CRL number from state
-                            self.crl_number = Some(state.crl_number);
+                            self.data.crl_number = Some(state.crl_number);
                             tracing::info!(
                                 version = state.version,
                                 crl_number = state.crl_number,
@@ -164,7 +164,7 @@ impl App {
                 Err(_) => {}
             }
         }
-        self.optical_dev = None;
+        self.disc.optical_dev = None;
         if let Some(msg) = rw_rejection {
             self.set_status(msg);
         } else if drives.is_empty() {
@@ -180,23 +180,23 @@ impl App {
     // ── Intent burn tick ──────────────────────────────────────────────────────
 
     pub(crate) fn tick_intent_burn(&mut self) {
-        if let Some(rx) = &self.burn_rx {
+        if let Some(rx) = &self.disc.burn_rx {
             if let Ok(result) = rx.try_recv() {
-                self.burn_rx = None;
+                self.disc.burn_rx = None;
                 match result {
                     Err(e) => {
                         self.set_status(format!("Intent disc write failed: {e}"));
                         self.setup.phase = SetupPhase::WaitDisc;
-                        self.optical_dev = None;
+                        self.disc.optical_dev = None;
                     }
                     Ok(()) => {
-                        if let Some(intent) = self.pending_intent_session.take() {
-                            self.intent_session_dir_name = Some(intent.dir_name.clone());
-                            self.prior_sessions.push(intent);
+                        if let Some(intent) = self.disc.pending_intent_session.take() {
+                            self.disc.intent_session_dir_name = Some(intent.dir_name.clone());
+                            self.disc.prior_sessions.push(intent);
                         }
                         match self.current_op.clone() {
                             Some(Operation::InitRoot) | Some(Operation::GenerateRootCa) => {
-                                match self.pending_key_action {
+                                match self.disc.pending_key_action {
                                     Some(1) => self.do_generate_and_build(),
                                     Some(2) => self.do_find_and_build(),
                                     _ => {
@@ -222,14 +222,14 @@ impl App {
     // ── Record burn tick ──────────────────────────────────────────────────────
 
     pub(crate) fn tick_record_burn(&mut self) {
-        if let Some(rx) = &self.burn_rx {
+        if let Some(rx) = &self.disc.burn_rx {
             if let Ok(result) = rx.try_recv() {
-                self.burn_rx = None;
+                self.disc.burn_rx = None;
                 match result {
                     Ok(()) => {
                         self.ceremony.state = CeremonyState::DiscDone;
                         let disc_label = self
-                            .optical_dev
+                            .disc.optical_dev
                             .as_deref()
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "/run/anodize/staging".into());
@@ -250,7 +250,7 @@ impl App {
                             "Burn failed: {e} — reinsert disc and retry."
                         ));
                         self.ceremony.state = CeremonyState::OperationSelect;
-                        self.optical_dev = None;
+                        self.disc.optical_dev = None;
                     }
                 }
             }
@@ -282,9 +282,9 @@ impl App {
             self.set_status(format!("Login failed: {e}"));
             return;
         }
-        self.actor = Some(actor);
+        self.hw.actor = Some(actor);
         self.setup.phase = SetupPhase::WaitDisc;
-        self.hsm_state = HwState::Ready("logged in".into());
+        self.hw.hsm_state = HwState::Ready("logged in".into());
         self.set_status(
             "Logged in. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc) and press [1].",
         );
@@ -296,14 +296,14 @@ impl App {
         self.current_op = Some(op.clone());
         match op {
             Operation::InitRoot => {
-                if self.session_state.is_some() {
+                if self.disc.session_state.is_some() {
                     self.set_status("Root already initialized on this disc. Use RekeyShares to change PIN.");
                     self.current_op = None;
                     self.ceremony.state = CeremonyState::OperationSelect;
                     return;
                 }
-                self.init_root_custodian_buf.clear();
-                self.init_root_custodian_names.clear();
+                self.sss.custodian_buf.clear();
+                self.sss.custodian_names.clear();
                 self.ceremony.state = CeremonyState::InitRootCustodianSetup;
                 self.set_status("Enter custodian names (comma-separated), then press Enter.");
             }
@@ -319,9 +319,9 @@ impl App {
             Operation::RevokeCert => {
                 self.do_load_revocation();
                 if self.ceremony.state == CeremonyState::RevokeInput {
-                    self.revoke_phase = 0;
-                    self.revoke_serial_buf.clear();
-                    self.revoke_reason_buf.clear();
+                    self.data.revoke_phase = 0;
+                    self.data.revoke_serial_buf.clear();
+                    self.data.revoke_reason_buf.clear();
                     self.set_status(
                         "Enter certificate serial number (digits). Press Enter to continue.",
                     );
@@ -334,15 +334,15 @@ impl App {
                 }
             }
             Operation::RekeyShares => {
-                if self.session_state.is_none() {
+                if self.disc.session_state.is_none() {
                     self.set_status("No STATE.JSON — run InitRoot first.");
                     self.current_op = None;
                     self.ceremony.state = CeremonyState::OperationSelect;
                     return;
                 }
                 // Enter quorum phase: custodians re-enter shares
-                let sss = self.session_state.as_ref().unwrap().sss.clone();
-                self.share_input = Some(
+                let sss = self.disc.session_state.as_ref().unwrap().sss.clone();
+                self.sss.share_input = Some(
                     crate::components::share_input::ShareInput::new(sss, 32),
                 );
                 self.ceremony.state = CeremonyState::RekeyQuorum;
@@ -359,7 +359,7 @@ impl App {
     pub(crate) fn do_init_root_confirm_custodians(&mut self) {
         // Parse custodian names from comma-separated input
         let names: Vec<String> = self
-            .init_root_custodian_buf
+            .sss.custodian_buf
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -439,12 +439,12 @@ impl App {
             last_audit_hash: String::new(),
         };
 
-        self.session_state = Some(state);
-        self.init_root_custodian_names = names.clone();
-        self.init_root_shares = Some(shares.clone());
+        self.disc.session_state = Some(state);
+        self.sss.custodian_names = names.clone();
+        self.sss.shares = Some(shares.clone());
 
         // Create ShareReveal component
-        self.share_reveal = Some(crate::components::share_reveal::ShareReveal::new(
+        self.sss.share_reveal = Some(crate::components::share_reveal::ShareReveal::new(
             shares,
             &names,
         ));
@@ -457,7 +457,7 @@ impl App {
         tracing::info!(
             threshold,
             total,
-            custodians = ?self.init_root_custodian_names,
+            custodians = ?self.sss.custodian_names,
             "InitRoot: SSS split complete, entering share reveal"
         );
     }
@@ -467,15 +467,15 @@ impl App {
     pub(crate) fn do_rekey_quorum_complete(&mut self) {
         // Collect shares from the input component
         let shares: Vec<anodize_sss::Share> = self
-            .share_input
+            .sss.share_input
             .as_ref()
             .map(|si| si.collected.iter().map(|c| c.share.clone()).collect())
             .unwrap_or_default();
-        self.share_input = None;
+        self.sss.share_input = None;
 
         // Reconstruct PIN
         let threshold = self
-            .session_state
+            .disc.session_state
             .as_ref()
             .map(|s| s.sss.threshold)
             .unwrap_or(2);
@@ -495,7 +495,7 @@ impl App {
             hex::encode(Sha256::digest(&pin_bytes))
         };
         let expected = self
-            .session_state
+            .disc.session_state
             .as_ref()
             .map(|s| s.sss.pin_verify_hash.as_str())
             .unwrap_or("");
@@ -509,8 +509,8 @@ impl App {
 
         // Store reconstructed PIN for re-splitting
         self.pin_buf = hex::encode(&pin_bytes);
-        self.init_root_custodian_buf.clear();
-        self.init_root_custodian_names.clear();
+        self.sss.custodian_buf.clear();
+        self.sss.custodian_names.clear();
         self.ceremony.state = CeremonyState::RekeyCustodianSetup;
         self.set_status("PIN verified. Enter new custodian names (comma-separated).");
 
@@ -520,7 +520,7 @@ impl App {
     pub(crate) fn do_rekey_confirm_custodians(&mut self) {
         // Parse new custodian names
         let names: Vec<String> = self
-            .init_root_custodian_buf
+            .sss.custodian_buf
             .split(',')
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
@@ -538,7 +538,7 @@ impl App {
         let total = names.len() as u8;
         let threshold = 2u8;
 
-        // Decode the stored PIN hex back to bytes
+        // PIN length: 32 bytes
         let pin_bytes = match hex::decode(&self.pin_buf) {
             Ok(b) => b,
             Err(e) => {
@@ -573,7 +573,7 @@ impl App {
             })
             .collect();
 
-        if let Some(ref mut state) = self.session_state {
+        if let Some(ref mut state) = self.disc.session_state {
             state.sss.threshold = threshold;
             state.sss.total = total;
             state.sss.custodians = custodians;
@@ -581,11 +581,11 @@ impl App {
             // pin_verify_hash stays the same (same PIN)
         }
 
-        self.init_root_custodian_names = names.clone();
-        self.init_root_shares = Some(shares.clone());
+        self.sss.custodian_names = names.clone();
+        self.sss.shares = Some(shares.clone());
 
         // Create ShareReveal component
-        self.share_reveal = Some(crate::components::share_reveal::ShareReveal::new(
+        self.sss.share_reveal = Some(crate::components::share_reveal::ShareReveal::new(
             shares,
             &names,
         ));
@@ -598,7 +598,7 @@ impl App {
         tracing::info!(
             threshold,
             total,
-            custodians = ?self.init_root_custodian_names,
+            custodians = ?self.sss.custodian_names,
             "RekeyShares: re-split complete, entering share reveal"
         );
     }
@@ -624,7 +624,7 @@ impl App {
                 return;
             }
         };
-        self.csr_subject_display = Some(csr_subject);
+        self.data.csr_subject_display = Some(csr_subject);
 
         let profiles_len = self
             .profile
@@ -639,7 +639,7 @@ impl App {
             return;
         }
 
-        self.csr_der = Some(csr_bytes);
+        self.data.csr_der = Some(csr_bytes);
         self.ceremony.state = CeremonyState::LoadCsr;
         self.set_status(format!("CSR loaded. Select profile [1]–[{profiles_len}]."));
     }
@@ -647,28 +647,28 @@ impl App {
     // ── Mode 3: Add revocation entry ─────────────────────────────────────────
 
     pub(crate) fn do_add_revocation_entry(&mut self) {
-        let serial: u64 = match self.revoke_serial_buf.parse() {
+        let serial: u64 = match self.data.revoke_serial_buf.parse() {
             Ok(n) => n,
             Err(_) => {
                 self.set_status(format!(
                     "Invalid serial number: {:?}. Must be a u64.",
-                    self.revoke_serial_buf
+                    self.data.revoke_serial_buf
                 ));
                 return;
             }
         };
 
-        if self.revocation_list.iter().any(|e| e.serial == serial) {
+        if self.data.revocation_list.iter().any(|e| e.serial == serial) {
             self.set_status(format!(
                 "Serial {serial} is already in the revocation list — duplicate not added."
             ));
             return;
         }
 
-        let reason = if self.revoke_reason_buf.is_empty() {
+        let reason = if self.data.revoke_reason_buf.is_empty() {
             None
         } else {
-            Some(self.revoke_reason_buf.clone())
+            Some(self.data.revoke_reason_buf.clone())
         };
 
         let rev_time = {
@@ -685,14 +685,14 @@ impl App {
             )
         };
 
-        self.revocation_list.push(RevocationEntry {
+        self.data.revocation_list.push(RevocationEntry {
             serial,
             revocation_time: rev_time,
             reason,
         });
 
-        if self.crl_number.is_none() {
-            self.crl_number = Some(next_crl_number_from_sessions(&self.prior_sessions));
+        if self.data.crl_number.is_none() {
+            self.data.crl_number = Some(next_crl_number_from_sessions(&self.disc.prior_sessions));
         }
 
         self.ceremony.state = CeremonyState::RevokePreview;
@@ -702,15 +702,15 @@ impl App {
     // ── Modes 3+4: Load revocation list from disc ────────────────────────────
 
     fn do_load_revocation(&mut self) {
-        self.root_cert_der = load_root_cert_der_from_sessions(&self.prior_sessions);
-        if self.root_cert_der.is_none() {
+        self.data.root_cert_der = load_root_cert_der_from_sessions(&self.disc.prior_sessions);
+        if self.data.root_cert_der.is_none() {
             self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
             self.current_op = None;
             return;
         }
 
-        self.revocation_list = load_revocation_from_sessions(&self.prior_sessions);
-        self.crl_number = Some(next_crl_number_from_sessions(&self.prior_sessions));
+        self.data.revocation_list = load_revocation_from_sessions(&self.disc.prior_sessions);
+        self.data.crl_number = Some(next_crl_number_from_sessions(&self.disc.prior_sessions));
 
         match self.current_op {
             Some(Operation::RevokeCert) => {
@@ -727,12 +727,12 @@ impl App {
 
     fn do_migrate_confirm(&mut self) {
         let total_bytes: u64 = self
-            .prior_sessions
+            .disc.prior_sessions
             .iter()
             .flat_map(|s| s.files.iter())
             .map(|f| f.data.len() as u64)
             .sum();
-        self.migrate_total_bytes = total_bytes;
+        self.data.migrate_total_bytes = total_bytes;
 
         const RAM_WARN_THRESHOLD: u64 = 512 * 1024 * 1024;
         if total_bytes > RAM_WARN_THRESHOLD {
@@ -743,12 +743,12 @@ impl App {
             ));
         }
 
-        self.migrate_chain_ok = verify_audit_chain(&self.prior_sessions);
+        self.data.migrate_chain_ok = verify_audit_chain(&self.disc.prior_sessions);
         self.ceremony.state = CeremonyState::MigrateConfirm;
-        let chain_status = if self.migrate_chain_ok { "OK" } else { "FAIL" };
+        let chain_status = if self.data.migrate_chain_ok { "OK" } else { "FAIL" };
         self.set_status(format!(
             "Chain: {chain_status}  {} session(s)  {} bytes. [1] to proceed, [q] to abort.",
-            self.prior_sessions.len(),
+            self.disc.prior_sessions.len(),
             total_bytes
         ));
     }
@@ -764,7 +764,7 @@ impl App {
             }
         };
         let key = {
-            let actor = match self.actor.as_mut() {
+            let actor = match self.hw.actor.as_mut() {
                 Some(a) => a,
                 None => {
                     self.set_status("No HSM session");
@@ -779,7 +779,7 @@ impl App {
                 }
             }
         };
-        self.root_key = Some(key);
+        self.hw.root_key = Some(key);
         self.set_status(format!("Generated P-384 keypair (label={label:?})"));
         self.do_build_cert();
     }
@@ -793,7 +793,7 @@ impl App {
             }
         };
         let key = {
-            let actor = match self.actor.as_ref() {
+            let actor = match self.hw.actor.as_ref() {
                 Some(a) => a,
                 None => {
                     self.set_status("No HSM session");
@@ -808,7 +808,7 @@ impl App {
                 }
             }
         };
-        self.root_key = Some(key);
+        self.hw.root_key = Some(key);
         self.set_status(format!("Found existing key (label={label:?})"));
         self.do_build_cert();
     }
@@ -822,14 +822,14 @@ impl App {
                 return;
             }
         }
-        let actor = match self.actor.clone() {
+        let actor = match self.hw.actor.clone() {
             Some(a) => a,
             None => {
                 self.set_status("No HSM session");
                 return;
             }
         };
-        let key = match self.root_key {
+        let key = match self.hw.root_key {
             Some(k) => k,
             None => {
                 self.set_status("No key handle");
@@ -883,10 +883,10 @@ impl App {
         };
 
         let fp = sha256_fingerprint(&cert_der);
-        self.fingerprint = Some(fp);
+        self.data.fingerprint = Some(fp);
 
         // Update SessionState with root cert info (for InitRoot flow)
-        if let Some(ref mut state) = self.session_state {
+        if let Some(ref mut state) = self.disc.session_state {
             use base64::Engine;
             let cert_hash = {
                 use sha2::{Digest, Sha256};
@@ -897,8 +897,8 @@ impl App {
                 base64::engine::general_purpose::STANDARD.encode(&cert_der);
         }
 
-        self.cert_der = Some(cert_der);
-        self.crl_der = Some(crl_der);
+        self.data.cert_der = Some(cert_der);
+        self.data.crl_der = Some(crl_der);
         self.ceremony.state = CeremonyState::CertPreview;
         self.set_status("Certificate built. Verify fingerprint before writing.");
     }
@@ -921,7 +921,7 @@ impl App {
                 return;
             }
         };
-        let actor = match self.actor.clone() {
+        let actor = match self.hw.actor.clone() {
             Some(a) => a,
             None => {
                 self.set_status("No HSM session");
@@ -943,7 +943,7 @@ impl App {
             }
         };
 
-        let root_cert_der = match &self.root_cert_der {
+        let root_cert_der = match &self.data.root_cert_der {
             Some(d) => d.clone(),
             None => {
                 self.set_status("Root cert not loaded from disc");
@@ -958,7 +958,7 @@ impl App {
             }
         };
 
-        let csr_der = match self.csr_der.as_ref() {
+        let csr_der = match self.data.csr_der.as_ref() {
             Some(d) => d.clone(),
             None => {
                 self.set_status("No CSR loaded");
@@ -969,7 +969,7 @@ impl App {
         let (validity_days, path_len) = match self
             .profile
             .as_ref()
-            .and_then(|p| self.selected_profile_idx.map(|i| &p.cert_profiles[i]))
+            .and_then(|p| self.data.selected_profile_idx.map(|i| &p.cert_profiles[i]))
         {
             Some(prof) => (prof.validity_days, prof.path_len),
             None => {
@@ -1012,8 +1012,8 @@ impl App {
         };
 
         let fp = sha256_fingerprint(&cert_der);
-        self.fingerprint = Some(fp);
-        self.cert_der = Some(cert_der);
+        self.data.fingerprint = Some(fp);
+        self.data.cert_der = Some(cert_der);
         self.ceremony.state = CeremonyState::CertPreview;
         self.set_status("Intermediate cert signed. Verify fingerprint before writing.");
     }
@@ -1046,7 +1046,7 @@ impl App {
                 return;
             }
         };
-        let actor = match self.actor.clone() {
+        let actor = match self.hw.actor.clone() {
             Some(a) => a,
             None => {
                 self.set_status("No HSM session");
@@ -1068,7 +1068,7 @@ impl App {
             }
         };
 
-        let root_cert_der = match &self.root_cert_der {
+        let root_cert_der = match &self.data.root_cert_der {
             Some(d) => d.clone(),
             None => {
                 self.set_status("Root cert not on disc");
@@ -1083,7 +1083,7 @@ impl App {
             }
         };
 
-        let crl_number = match self.crl_number {
+        let crl_number = match self.data.crl_number {
             Some(n) => n,
             None => {
                 self.set_status("CRL number not determined");
@@ -1093,7 +1093,7 @@ impl App {
 
         // Convert RevocationEntry list to (serial, SystemTime, reason) triples
         let revoked: Vec<(u64, SystemTime, Option<anodize_ca::CrlReason>)> = self
-            .revocation_list
+            .data.revocation_list
             .iter()
             .map(|e| {
                 let t = parse_rfc3339_to_system_time(&e.revocation_time)
@@ -1117,7 +1117,7 @@ impl App {
             }
         };
 
-        self.crl_der = Some(crl_der);
+        self.data.crl_der = Some(crl_der);
         self.do_start_burn();
     }
 
@@ -1128,10 +1128,10 @@ impl App {
         if matches!(
             self.current_op,
             Some(Operation::SignCsr) | Some(Operation::RevokeCert) | Some(Operation::IssueCrl)
-        ) && self.root_cert_der.is_none()
+        ) && self.data.root_cert_der.is_none()
         {
-            self.root_cert_der = load_root_cert_der_from_sessions(&self.prior_sessions);
-            if self.root_cert_der.is_none() {
+            self.data.root_cert_der = load_root_cert_der_from_sessions(&self.disc.prior_sessions);
+            if self.data.root_cert_der.is_none() {
                 self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
                 return;
             }
@@ -1145,7 +1145,7 @@ impl App {
             }
         };
 
-        if !self.skip_disc && self.sessions_remaining.map(|r| r < 2).unwrap_or(false) {
+        if !self.skip_disc && self.disc.sessions_remaining.map(|r| r < 2).unwrap_or(false) {
             self.set_status("Disc full — cannot write intent session. Insert new disc.");
             return;
         }
@@ -1197,12 +1197,12 @@ impl App {
                 data: partial_log_bytes,
             }],
         };
-        let mut all_sessions = self.prior_sessions.clone();
+        let mut all_sessions = self.disc.prior_sessions.clone();
         all_sessions.push(intent_session.clone());
 
         let (tx, rx) = mpsc::channel();
-        self.burn_rx = Some(rx);
-        self.pending_intent_session = Some(intent_session);
+        self.disc.burn_rx = Some(rx);
+        self.disc.pending_intent_session = Some(intent_session);
 
         {
             if self.skip_disc {
@@ -1216,12 +1216,12 @@ impl App {
                         tx.send(Err(anyhow::anyhow!("write intent ISO: {e}"))).ok();
                     }
                 }
-            } else if let Some(dev) = self.optical_dev.clone() {
+            } else if let Some(dev) = self.disc.optical_dev.clone() {
                 media::write_session(&dev, all_sessions, false, tx);
             } else {
                 self.set_status("No optical device — cannot write intent");
-                self.burn_rx = None;
-                self.pending_intent_session = None;
+                self.disc.burn_rx = None;
+                self.disc.pending_intent_session = None;
                 return;
             }
         }
@@ -1248,7 +1248,7 @@ impl App {
                         )
                     })
                     .unwrap_or_default();
-                let action_str = match self.pending_key_action {
+                let action_str = match self.disc.pending_key_action {
                     Some(1) => "generate",
                     Some(2) => "find-existing",
                     _ => "unknown",
@@ -1273,7 +1273,7 @@ impl App {
             }
             Some(Operation::SignCsr) => {
                 let csr_hex = self
-                    .csr_der
+                    .data.csr_der
                     .as_ref()
                     .map(|b| {
                         b.iter()
@@ -1285,7 +1285,7 @@ impl App {
                     .profile
                     .as_ref()
                     .and_then(|p| {
-                        self.selected_profile_idx
+                        self.data.selected_profile_idx
                             .map(|i| p.cert_profiles[i].name.clone())
                     })
                     .unwrap_or_default();
@@ -1299,11 +1299,11 @@ impl App {
                 ))
             }
             Some(Operation::RevokeCert) => {
-                let serial: u64 = self.revoke_serial_buf.parse().unwrap_or(0);
-                let reason = if self.revoke_reason_buf.is_empty() {
+                let serial: u64 = self.data.revoke_serial_buf.parse().unwrap_or(0);
+                let reason = if self.data.revoke_reason_buf.is_empty() {
                     serde_json::Value::Null
                 } else {
-                    serde_json::Value::String(self.revoke_reason_buf.clone())
+                    serde_json::Value::String(self.data.revoke_reason_buf.clone())
                 };
                 Some((
                     "cert.revoke.intent".into(),
@@ -1311,8 +1311,8 @@ impl App {
                         "operation": "revoke-and-issue-crl",
                         "serial": serial,
                         "reason": reason,
-                        "crl_number": self.crl_number.unwrap_or(0),
-                        "revocation_count": self.revocation_list.len(),
+                        "crl_number": self.data.crl_number.unwrap_or(0),
+                        "revocation_count": self.data.revocation_list.len(),
                     }),
                 ))
             }
@@ -1320,8 +1320,8 @@ impl App {
                 "crl.intent".into(),
                 serde_json::json!({
                     "operation": "issue-crl",
-                    "crl_number": self.crl_number.unwrap_or(0),
-                    "revocation_count": self.revocation_list.len(),
+                    "crl_number": self.data.crl_number.unwrap_or(0),
+                    "revocation_count": self.data.revocation_list.len(),
                 }),
             )),
             _ => None,
@@ -1339,15 +1339,15 @@ impl App {
         };
 
         let all_sessions = if self.current_op == Some(Operation::MigrateDisc) {
-            self.migrate_sessions.clone()
+            self.data.migrate_sessions.clone()
         } else {
-            let mut sessions = self.prior_sessions.clone();
+            let mut sessions = self.disc.prior_sessions.clone();
             sessions.push(new_session);
             sessions
         };
 
         let (tx, rx) = mpsc::channel();
-        self.burn_rx = Some(rx);
+        self.disc.burn_rx = Some(rx);
 
         {
             if self.skip_disc {
@@ -1361,11 +1361,11 @@ impl App {
                         tx.send(Err(anyhow::anyhow!("write staging ISO: {e}"))).ok();
                     }
                 }
-            } else if let Some(dev) = &self.optical_dev {
+            } else if let Some(dev) = &self.disc.optical_dev {
                 media::write_session(dev, all_sessions, false, tx);
             } else {
                 self.set_status("No optical device — cannot burn");
-                self.burn_rx = None;
+                self.disc.burn_rx = None;
                 return;
             }
 
@@ -1377,7 +1377,7 @@ impl App {
     /// Build a STATE.JSON IsoFile from the current session_state.
     /// Returns None if no session state is set.
     fn build_state_json_file(&self) -> Option<IsoFile> {
-        self.session_state.as_ref().map(|state| IsoFile {
+        self.disc.session_state.as_ref().map(|state| IsoFile {
             name: anodize_config::state::STATE_FILENAME.into(),
             data: state.to_json(),
         })
@@ -1395,17 +1395,17 @@ impl App {
             .and_then(|v| v.get("entry_hash").and_then(|h| h.as_str().map(String::from)))
             .unwrap_or_default();
 
-        if let Some(ref mut state) = self.session_state {
+        if let Some(ref mut state) = self.disc.session_state {
             state.last_audit_hash = last_hash;
 
             // Update CRL number
-            if let Some(n) = self.crl_number {
+            if let Some(n) = self.data.crl_number {
                 state.crl_number = n;
             }
 
             // Update revocation list
-            if !self.revocation_list.is_empty() {
-                state.revocation_list = self.revocation_list.clone();
+            if !self.data.revocation_list.is_empty() {
+                state.revocation_list = self.data.revocation_list.clone();
             }
         }
     }
@@ -1426,12 +1426,12 @@ impl App {
                     }
                 };
                 let new_total = self
-                    .session_state
+                    .disc.session_state
                     .as_ref()
                     .map(|s| s.sss.total)
                     .unwrap_or(0);
                 let new_threshold = self
-                    .session_state
+                    .disc.session_state
                     .as_ref()
                     .map(|s| s.sss.threshold)
                     .unwrap_or(0);
@@ -1472,8 +1472,8 @@ impl App {
                 })
             }
             Some(Operation::InitRoot) | Some(Operation::GenerateRootCa) => {
-                let cert_der = self.cert_der.clone()?;
-                let crl_der = self.crl_der.clone()?;
+                let cert_der = self.data.cert_der.clone()?;
+                let crl_der = self.data.crl_der.clone()?;
 
                 let log_path = staging.join("audit.log");
                 let mut log = match AuditLog::open(&log_path) {
@@ -1483,7 +1483,7 @@ impl App {
                         return None;
                     }
                 };
-                let fp = self.fingerprint.clone().unwrap_or_default();
+                let fp = self.data.fingerprint.clone().unwrap_or_default();
                 let ca_name = self
                     .profile
                     .as_ref()
@@ -1494,7 +1494,7 @@ impl App {
                     serde_json::json!({
                         "subject": ca_name,
                         "fingerprint": fp,
-                        "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+                        "intent_session": self.disc.intent_session_dir_name.as_deref().unwrap_or(""),
                     }),
                 ) {
                     self.set_status(format!("Audit log append failed: {e}"));
@@ -1505,7 +1505,7 @@ impl App {
                     serde_json::json!({
                         "crl_number": 1,
                         "revocation_count": 0,
-                        "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+                        "intent_session": self.disc.intent_session_dir_name.as_deref().unwrap_or(""),
                     }),
                 ) {
                     self.set_status(format!("CRL audit append failed: {e}"));
@@ -1548,7 +1548,7 @@ impl App {
             }
 
             Some(Operation::SignCsr) => {
-                let cert_der = self.cert_der.clone()?;
+                let cert_der = self.data.cert_der.clone()?;
 
                 let log_path = staging.join("audit.log");
                 let mut log = match AuditLog::open(&log_path) {
@@ -1558,12 +1558,12 @@ impl App {
                         return None;
                     }
                 };
-                let fp = self.fingerprint.clone().unwrap_or_default();
+                let fp = self.data.fingerprint.clone().unwrap_or_default();
                 let profile_name = self
                     .profile
                     .as_ref()
                     .and_then(|p| {
-                        self.selected_profile_idx
+                        self.data.selected_profile_idx
                             .map(|i| p.cert_profiles[i].name.clone())
                     })
                     .unwrap_or_default();
@@ -1572,7 +1572,7 @@ impl App {
                     serde_json::json!({
                         "fingerprint": fp,
                         "profile": profile_name,
-                        "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+                        "intent_session": self.disc.intent_session_dir_name.as_deref().unwrap_or(""),
                     }),
                 ) {
                     self.set_status(format!("Audit log append failed: {e}"));
@@ -1611,9 +1611,9 @@ impl App {
             }
 
             Some(Operation::RevokeCert) => {
-                let crl_der = self.crl_der.clone()?;
-                let revoked_toml = serialize_revocation_list(&self.revocation_list).into_bytes();
-                let crl_number = self.crl_number.unwrap_or(0);
+                let crl_der = self.data.crl_der.clone()?;
+                let revoked_toml = serialize_revocation_list(&self.data.revocation_list).into_bytes();
+                let crl_number = self.data.crl_number.unwrap_or(0);
 
                 let log_path = staging.join("audit.log");
                 let mut log = match AuditLog::open(&log_path) {
@@ -1623,18 +1623,18 @@ impl App {
                         return None;
                     }
                 };
-                let serial: u64 = self.revoke_serial_buf.parse().unwrap_or(0);
-                let reason = if self.revoke_reason_buf.is_empty() {
+                let serial: u64 = self.data.revoke_serial_buf.parse().unwrap_or(0);
+                let reason = if self.data.revoke_reason_buf.is_empty() {
                     serde_json::Value::Null
                 } else {
-                    serde_json::Value::String(self.revoke_reason_buf.clone())
+                    serde_json::Value::String(self.data.revoke_reason_buf.clone())
                 };
                 if let Err(e) = log.append(
                     "cert.revoke",
                     serde_json::json!({
                         "serial": serial,
                         "reason": reason,
-                        "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+                        "intent_session": self.disc.intent_session_dir_name.as_deref().unwrap_or(""),
                     }),
                 ) {
                     self.set_status(format!("Audit log append failed: {e}"));
@@ -1644,8 +1644,8 @@ impl App {
                     "crl.issue",
                     serde_json::json!({
                         "crl_number": crl_number,
-                        "revocation_count": self.revocation_list.len(),
-                        "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+                        "revocation_count": self.data.revocation_list.len(),
+                        "intent_session": self.disc.intent_session_dir_name.as_deref().unwrap_or(""),
                     }),
                 ) {
                     self.set_status(format!("CRL audit append failed: {e}"));
@@ -1688,8 +1688,8 @@ impl App {
             }
 
             Some(Operation::IssueCrl) => {
-                let crl_der = self.crl_der.clone()?;
-                let crl_number = self.crl_number.unwrap_or(0);
+                let crl_der = self.data.crl_der.clone()?;
+                let crl_number = self.data.crl_number.unwrap_or(0);
 
                 let log_path = staging.join("audit.log");
                 let mut log = match AuditLog::open(&log_path) {
@@ -1703,8 +1703,8 @@ impl App {
                     "crl.issue",
                     serde_json::json!({
                         "crl_number": crl_number,
-                        "revocation_count": self.revocation_list.len(),
-                        "intent_session": self.intent_session_dir_name.as_deref().unwrap_or(""),
+                        "revocation_count": self.data.revocation_list.len(),
+                        "intent_session": self.disc.intent_session_dir_name.as_deref().unwrap_or(""),
                     }),
                 ) {
                     self.set_status(format!("Audit log append failed: {e}"));
@@ -1765,13 +1765,13 @@ impl App {
 
         match self.current_op.clone() {
             Some(Operation::GenerateRootCa) => {
-                if let Some(cert_der) = &self.cert_der {
+                if let Some(cert_der) = &self.data.cert_der {
                     if let Err(e) = std::fs::write(shuttle.join("root.crt"), cert_der) {
                         self.set_status(format!("Shuttle write failed (root.crt): {e}"));
                         return;
                     }
                 }
-                if let Some(crl_der) = &self.crl_der {
+                if let Some(crl_der) = &self.data.crl_der {
                     if let Err(e) = std::fs::write(shuttle.join("root.crl"), crl_der) {
                         self.set_status(format!("Shuttle write failed (root.crl): {e}"));
                         return;
@@ -1779,7 +1779,7 @@ impl App {
                 }
             }
             Some(Operation::SignCsr) => {
-                if let Some(cert_der) = &self.cert_der {
+                if let Some(cert_der) = &self.data.cert_der {
                     if let Err(e) = std::fs::write(shuttle.join("intermediate.crt"), cert_der) {
                         self.set_status(format!("Shuttle write failed (intermediate.crt): {e}"));
                         return;
@@ -1787,12 +1787,12 @@ impl App {
                 }
             }
             Some(Operation::RevokeCert) => {
-                let revoked_toml = serialize_revocation_list(&self.revocation_list);
+                let revoked_toml = serialize_revocation_list(&self.data.revocation_list);
                 if let Err(e) = std::fs::write(shuttle.join("revoked.toml"), &revoked_toml) {
                     self.set_status(format!("Shuttle write failed (revoked.toml): {e}"));
                     return;
                 }
-                if let Some(crl_der) = &self.crl_der {
+                if let Some(crl_der) = &self.data.crl_der {
                     if let Err(e) = std::fs::write(shuttle.join("root.crl"), crl_der) {
                         self.set_status(format!("Shuttle write failed (root.crl): {e}"));
                         return;
@@ -1800,7 +1800,7 @@ impl App {
                 }
             }
             Some(Operation::IssueCrl) => {
-                if let Some(crl_der) = &self.crl_der {
+                if let Some(crl_der) = &self.data.crl_der {
                     if let Err(e) = std::fs::write(shuttle.join("root.crl"), crl_der) {
                         self.set_status(format!("Shuttle write failed (root.crl): {e}"));
                         return;
@@ -1841,7 +1841,7 @@ impl App {
         // ShareReveal / ShareInput overlay for InitRoot and Rekey states
         match self.ceremony.state {
             CeremonyState::InitRootShareReveal | CeremonyState::RekeyShareReveal => {
-                if let Some(ref reveal) = self.share_reveal {
+                if let Some(ref reveal) = self.sss.share_reveal {
                     reveal.render(frame, area);
                     return;
                 }
@@ -1849,7 +1849,7 @@ impl App {
             CeremonyState::InitRootShareVerify
             | CeremonyState::RekeyShareVerify
             | CeremonyState::RekeyQuorum => {
-                if let Some(ref input) = self.share_input {
+                if let Some(ref input) = self.sss.share_input {
                     input.render(frame, area);
                     return;
                 }

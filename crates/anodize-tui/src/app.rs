@@ -28,6 +28,116 @@ use crate::modes::ceremony::CeremonyMode;
 use crate::modes::setup::{SetupMode, SetupPhase};
 use crate::modes::utilities::UtilitiesMode;
 
+/// Hardware / peripheral polling state.
+pub struct HwContext {
+    pub hsm_state: HwState,
+    pub disc_state: HwState,
+    pub shuttle_state: HwState,
+    pub actor: Option<HsmActor>,
+    pub root_key: Option<KeyHandle>,
+}
+
+impl HwContext {
+    fn new() -> Self {
+        Self {
+            hsm_state: HwState::Absent,
+            disc_state: HwState::Absent,
+            shuttle_state: HwState::Absent,
+            actor: None,
+            root_key: None,
+        }
+    }
+}
+
+/// Disc / session management state.
+pub struct DiscContext {
+    pub optical_dev: Option<PathBuf>,
+    pub prior_sessions: Vec<SessionEntry>,
+    pub burn_rx: Option<Receiver<Result<()>>>,
+    pub sessions_remaining: Option<u16>,
+    pub intent_session_dir_name: Option<String>,
+    pub pending_key_action: Option<u8>, // 1=generate, 2=find-existing
+    pub pending_intent_session: Option<SessionEntry>,
+    pub session_state: Option<SessionState>,
+}
+
+impl DiscContext {
+    fn new() -> Self {
+        Self {
+            optical_dev: None,
+            prior_sessions: Vec::new(),
+            burn_rx: None,
+            sessions_remaining: None,
+            intent_session_dir_name: None,
+            pending_key_action: None,
+            pending_intent_session: None,
+            session_state: None,
+        }
+    }
+}
+
+/// Certificate / CRL / CSR / revocation / migration artefacts.
+pub struct CeremonyData {
+    pub cert_der: Option<Vec<u8>>,
+    pub fingerprint: Option<String>,
+    pub crl_der: Option<Vec<u8>>,
+    pub root_cert_der: Option<Vec<u8>>,
+    pub csr_der: Option<Vec<u8>>,
+    pub csr_subject_display: Option<String>,
+    pub selected_profile_idx: Option<usize>,
+    pub revocation_list: Vec<RevocationEntry>,
+    pub crl_number: Option<u64>,
+    pub revoke_serial_buf: String,
+    pub revoke_reason_buf: String,
+    pub revoke_phase: u8, // 0=serial entry, 1=reason entry
+    pub migrate_sessions: Vec<SessionEntry>,
+    pub migrate_chain_ok: bool,
+    pub migrate_total_bytes: u64,
+}
+
+impl CeremonyData {
+    fn new() -> Self {
+        Self {
+            cert_der: None,
+            fingerprint: None,
+            crl_der: None,
+            root_cert_der: None,
+            csr_der: None,
+            csr_subject_display: None,
+            selected_profile_idx: None,
+            revocation_list: Vec::new(),
+            crl_number: None,
+            revoke_serial_buf: String::new(),
+            revoke_reason_buf: String::new(),
+            revoke_phase: 0,
+            migrate_sessions: Vec::new(),
+            migrate_chain_ok: false,
+            migrate_total_bytes: 0,
+        }
+    }
+}
+
+/// SSS / custodian / share components for InitRoot & RekeyShares.
+pub struct SssContext {
+    pub custodian_buf: String,
+    pub shares: Option<Vec<anodize_sss::Share>>,
+    pub custodian_names: Vec<String>,
+    pub share_input: Option<crate::components::share_input::ShareInput>,
+    pub share_reveal: Option<crate::components::share_reveal::ShareReveal>,
+}
+
+impl SssContext {
+    fn new() -> Self {
+        Self {
+            custodian_buf: String::new(),
+            shares: None,
+            custodian_names: Vec::new(),
+            share_input: None,
+            share_reveal: None,
+        }
+    }
+}
+
 /// Top-level application state.
 pub struct App {
     pub running: bool,
@@ -37,10 +147,11 @@ pub struct App {
     pub log_view: bool,
     pub log_scroll: u16,
 
-    // Hardware state (polled on tick)
-    pub hsm_state: HwState,
-    pub disc_state: HwState,
-    pub shuttle_state: HwState,
+    // Sub-contexts
+    pub hw: HwContext,
+    pub disc: DiscContext,
+    pub data: CeremonyData,
+    pub sss: SssContext,
 
     // Mode components
     pub setup: SetupMode,
@@ -64,66 +175,12 @@ pub struct App {
     // Active operation
     pub current_op: Option<Operation>,
 
-    // HSM session
-    pub actor: Option<HsmActor>,
-    pub root_key: Option<KeyHandle>,
-
-    // Cert held in RAM until disc write succeeds (Mode 1)
-    pub cert_der: Option<Vec<u8>>,
-    pub fingerprint: Option<String>,
-
-    // CRL held in RAM until disc write succeeds (Modes 1, 3, 4)
-    pub crl_der: Option<Vec<u8>>,
-
-    // Ceremony state loaded from disc (STATE.JSON)
-    pub session_state: Option<SessionState>,
-
-    // Root cert DER loaded from disc for modes 2/3/4
-    pub root_cert_der: Option<Vec<u8>>,
-
-    // Mode 2: CSR signing
-    pub csr_der: Option<Vec<u8>>,
-    pub csr_subject_display: Option<String>,
-    pub selected_profile_idx: Option<usize>,
-
-    // Modes 3+4: revocation
-    pub revocation_list: Vec<RevocationEntry>,
-    pub crl_number: Option<u64>,
-
-    // Mode 3: revoke input state
-    pub revoke_serial_buf: String,
-    pub revoke_reason_buf: String,
-    pub revoke_phase: u8, // 0=serial entry, 1=reason entry
-
-    // Mode 5: migration
-    pub migrate_sessions: Vec<SessionEntry>,
-    pub migrate_chain_ok: bool,
-    pub migrate_total_bytes: u64,
-
     // PIN input — display length is randomised noise, never reveals actual length
     pub pin_buf: String,
     pub pin_display_len: usize,
 
-    // Disc management
-    pub optical_dev: Option<PathBuf>,
-    pub prior_sessions: Vec<SessionEntry>,
-    pub burn_rx: Option<Receiver<Result<()>>>,
-    pub sessions_remaining: Option<u16>,
-
-    // WAL intent session written before HSM key operation
-    pub intent_session_dir_name: Option<String>,
-    pub pending_key_action: Option<u8>, // 1=generate, 2=find-existing
-    pub pending_intent_session: Option<SessionEntry>,
-
     // Two-key confirmation dialog (modal overlay)
     pub confirm_dialog: Option<ConfirmDialog>,
-
-    // InitRoot ceremony state
-    pub init_root_custodian_buf: String,
-    pub init_root_shares: Option<Vec<anodize_sss::Share>>,
-    pub init_root_custodian_names: Vec<String>,
-    pub share_input: Option<crate::components::share_input::ShareInput>,
-    pub share_reveal: Option<crate::components::share_reveal::ShareReveal>,
 
     // Content area vertical scroll offset
     pub content_scroll: u16,
@@ -139,9 +196,10 @@ impl App {
             log_view: false,
             log_scroll: 0,
 
-            hsm_state: HwState::Absent,
-            disc_state: HwState::Absent,
-            shuttle_state: HwState::Absent,
+            hw: HwContext::new(),
+            disc: DiscContext::new(),
+            data: CeremonyData::new(),
+            sss: SssContext::new(),
 
             setup: SetupMode::new(),
             ceremony: CeremonyMode::new(),
@@ -155,39 +213,9 @@ impl App {
             profile: None,
             profile_toml_bytes: None,
             current_op: None,
-            actor: None,
-            root_key: None,
-            cert_der: None,
-            fingerprint: None,
-            crl_der: None,
-            session_state: None,
-            root_cert_der: None,
-            csr_der: None,
-            csr_subject_display: None,
-            selected_profile_idx: None,
-            revocation_list: Vec::new(),
-            crl_number: None,
-            revoke_serial_buf: String::new(),
-            revoke_reason_buf: String::new(),
-            revoke_phase: 0,
-            migrate_sessions: Vec::new(),
-            migrate_chain_ok: false,
-            migrate_total_bytes: 0,
             pin_buf: String::new(),
             pin_display_len: 0,
-            optical_dev: None,
-            prior_sessions: Vec::new(),
-            burn_rx: None,
-            sessions_remaining: None,
-            intent_session_dir_name: None,
-            pending_key_action: None,
-            pending_intent_session: None,
             confirm_dialog: None,
-            init_root_custodian_buf: String::new(),
-            init_root_shares: None,
-            init_root_custodian_names: Vec::new(),
-            share_input: None,
-            share_reveal: None,
             content_scroll: 0,
         }
     }
@@ -311,12 +339,12 @@ impl App {
                 if key.code == KeyCode::Esc {
                     return Action::InitRootAbort;
                 }
-                if let Some(ref mut reveal) = self.share_reveal {
+                if let Some(ref mut reveal) = self.sss.share_reveal {
                     if reveal.handle_key(key) {
                         // All shares revealed → advance to verification round
-                        self.share_reveal = None;
-                        if let Some(ref state) = self.session_state {
-                            self.share_input = Some(
+                        self.sss.share_reveal = None;
+                        if let Some(ref state) = self.disc.session_state {
+                            self.sss.share_input = Some(
                                 crate::components::share_input::ShareInput::new(
                                     state.sss.clone(),
                                     32, // PIN is 32 bytes
@@ -333,11 +361,11 @@ impl App {
                 if key.code == KeyCode::Esc {
                     return Action::InitRootAbort;
                 }
-                if let Some(ref mut input) = self.share_input {
+                if let Some(ref mut input) = self.sss.share_input {
                     input.handle_key(key);
                     if input.quorum_reached() {
-                        self.share_input = None;
-                        self.init_root_shares = None;
+                        self.sss.share_input = None;
+                        self.sss.shares = None;
                         // Verification passed → proceed to HSM key generation
                         self.ceremony.state = CeremonyState::KeyAction;
                         self.set_status(
@@ -353,7 +381,7 @@ impl App {
                 if key.code == KeyCode::Esc {
                     return Action::RekeyAbort;
                 }
-                if let Some(ref mut input) = self.share_input {
+                if let Some(ref mut input) = self.sss.share_input {
                     input.handle_key(key);
                     if input.quorum_reached() {
                         // Reconstruct PIN and verify
@@ -366,11 +394,11 @@ impl App {
                 if key.code == KeyCode::Esc {
                     return Action::RekeyAbort;
                 }
-                if let Some(ref mut reveal) = self.share_reveal {
+                if let Some(ref mut reveal) = self.sss.share_reveal {
                     if reveal.handle_key(key) {
-                        self.share_reveal = None;
-                        if let Some(ref state) = self.session_state {
-                            self.share_input = Some(
+                        self.sss.share_reveal = None;
+                        if let Some(ref state) = self.disc.session_state {
+                            self.sss.share_input = Some(
                                 crate::components::share_input::ShareInput::new(
                                     state.sss.clone(),
                                     32,
@@ -387,11 +415,11 @@ impl App {
                 if key.code == KeyCode::Esc {
                     return Action::RekeyAbort;
                 }
-                if let Some(ref mut input) = self.share_input {
+                if let Some(ref mut input) = self.sss.share_input {
                     input.handle_key(key);
                     if input.quorum_reached() {
-                        self.share_input = None;
-                        self.init_root_shares = None;
+                        self.sss.share_input = None;
+                        self.sss.shares = None;
                         // Verified → burn updated STATE.JSON directly
                         self.do_start_burn();
                     }
@@ -498,7 +526,7 @@ impl App {
             }
             Action::HsmLoggedIn => {
                 self.setup.phase = SetupPhase::WaitDisc;
-                self.hsm_state = HwState::Ready("logged in".into());
+                self.hw.hsm_state = HwState::Ready("logged in".into());
                 self.set_status(
                     "Logged in. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc) and press [1].",
                 );
@@ -512,8 +540,8 @@ impl App {
             }
             Action::ConfirmDisc => {
                 let ready = self.skip_disc
-                    || (self.optical_dev.is_some()
-                        && self.sessions_remaining.map(|r| r >= 2).unwrap_or(false));
+                    || (self.disc.optical_dev.is_some()
+                        && self.disc.sessions_remaining.map(|r| r >= 2).unwrap_or(false));
                 if ready {
                     self.update(Action::SetupComplete);
                 }
@@ -524,11 +552,11 @@ impl App {
                 self.do_select_operation(op);
             }
             Action::SelectKeyAction(n) => {
-                self.pending_key_action = Some(n);
+                self.disc.pending_key_action = Some(n);
                 self.do_write_intent();
             }
             Action::SelectCertProfile(idx) => {
-                self.selected_profile_idx = Some(idx);
+                self.data.selected_profile_idx = Some(idx);
                 self.ceremony.set_state_csr_preview();
                 self.set_status("Review CSR and profile. [1] to proceed, [q] to cancel.");
             }
@@ -565,30 +593,30 @@ impl App {
 
             // Revocation
             Action::RevokeInputChar(c) => {
-                if self.revoke_phase == 0 && c.is_ascii_digit() {
-                    self.revoke_serial_buf.push(c);
-                } else if self.revoke_phase == 1 {
-                    self.revoke_reason_buf.push(c);
+                if self.data.revoke_phase == 0 && c.is_ascii_digit() {
+                    self.data.revoke_serial_buf.push(c);
+                } else if self.data.revoke_phase == 1 {
+                    self.data.revoke_reason_buf.push(c);
                 }
             }
             Action::RevokeInputBackspace => {
-                if self.revoke_phase == 0 {
-                    self.revoke_serial_buf.pop();
+                if self.data.revoke_phase == 0 {
+                    self.data.revoke_serial_buf.pop();
                 } else {
-                    self.revoke_reason_buf.pop();
+                    self.data.revoke_reason_buf.pop();
                 }
             }
             Action::RevokeInputConfirm => {
                 self.do_add_revocation_entry();
             }
             Action::RevokeInputNextPhase => {
-                if self.revoke_phase == 0 && !self.revoke_serial_buf.is_empty() {
-                    self.revoke_phase = 1;
+                if self.data.revoke_phase == 0 && !self.data.revoke_serial_buf.is_empty() {
+                    self.data.revoke_phase = 1;
                     self.set_status("Reason (optional, Enter to skip): e.g. key-compromise");
                 }
             }
             Action::RevokeInputCancel => {
-                self.revoke_phase = 0;
+                self.data.revoke_phase = 0;
                 self.set_status("Enter certificate serial number (digits). Press Enter.");
             }
 
@@ -607,20 +635,20 @@ impl App {
 
             // InitRoot ceremony
             Action::InitRootInputChar(c) => {
-                self.init_root_custodian_buf.push(c);
+                self.sss.custodian_buf.push(c);
             }
             Action::InitRootInputBackspace => {
-                self.init_root_custodian_buf.pop();
+                self.sss.custodian_buf.pop();
             }
             Action::InitRootConfirmCustodians => {
                 self.do_init_root_confirm_custodians();
             }
             Action::InitRootAbort => {
-                self.init_root_custodian_buf.clear();
-                self.init_root_shares = None;
-                self.init_root_custodian_names.clear();
-                self.share_input = None;
-                self.share_reveal = None;
+                self.sss.custodian_buf.clear();
+                self.sss.shares = None;
+                self.sss.custodian_names.clear();
+                self.sss.share_input = None;
+                self.sss.share_reveal = None;
                 self.current_op = None;
                 self.ceremony.state = CeremonyState::OperationSelect;
                 self.set_status("InitRoot aborted.");
@@ -629,11 +657,11 @@ impl App {
                 self.do_rekey_confirm_custodians();
             }
             Action::RekeyAbort => {
-                self.init_root_custodian_buf.clear();
-                self.init_root_shares = None;
-                self.init_root_custodian_names.clear();
-                self.share_input = None;
-                self.share_reveal = None;
+                self.sss.custodian_buf.clear();
+                self.sss.shares = None;
+                self.sss.custodian_names.clear();
+                self.sss.share_input = None;
+                self.sss.share_reveal = None;
                 self.current_op = None;
                 self.ceremony.state = CeremonyState::OperationSelect;
                 self.set_status("RekeyShares aborted.");
@@ -641,10 +669,10 @@ impl App {
 
             // Migration
             Action::ConfirmMigrate => {
-                self.migrate_sessions = self.prior_sessions.clone();
-                self.prior_sessions.clear();
-                self.optical_dev = None;
-                self.sessions_remaining = None;
+                self.data.migrate_sessions = self.disc.prior_sessions.clone();
+                self.disc.prior_sessions.clear();
+                self.disc.optical_dev = None;
+                self.disc.sessions_remaining = None;
                 self.ceremony.set_state_wait_migrate_target();
                 self.set_status("Eject old disc. Insert blank new disc.");
             }
@@ -666,8 +694,8 @@ impl App {
 
             Action::ConfirmMigrateTarget => {
                 let ready = self.skip_disc
-                    || (self.optical_dev.is_some()
-                        && self.sessions_remaining.map(|r| r >= 50).unwrap_or(false));
+                    || (self.disc.optical_dev.is_some()
+                        && self.disc.sessions_remaining.map(|r| r >= 50).unwrap_or(false));
                 if ready {
                     self.do_start_burn();
                 }
@@ -770,9 +798,9 @@ impl App {
 
         // Hardware status bar
         let status_bar = StatusBar {
-            hsm: &self.hsm_state,
-            disc: &self.disc_state,
-            usb: &self.shuttle_state,
+            hsm: &self.hw.hsm_state,
+            disc: &self.hw.disc_state,
+            usb: &self.hw.shuttle_state,
         };
         frame.render_widget(status_bar, chunks[4]);
 

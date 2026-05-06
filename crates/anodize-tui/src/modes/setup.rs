@@ -115,16 +115,16 @@ impl SetupMode {
                 ]
             }
             SetupPhase::WaitDisc => {
-                let disc_info = match &app.optical_dev {
+                let disc_info = match &app.disc.optical_dev {
                     Some(dev) => {
-                        let cap = app
+                        let cap = app.disc
                             .sessions_remaining
                             .map(|r| format!(", {r} sessions remaining"))
                             .unwrap_or_default();
                         format!(
                             "  Disc ready in {}  ({} prior session(s){cap})",
                             dev.display(),
-                            app.prior_sessions.len()
+                            app.disc.prior_sessions.len()
                         )
                     }
                     None => "  No appendable disc detected. Insert write-once disc.".into(),

@@ -111,14 +111,14 @@ impl UtilitiesMode {
         } else {
             lines.push("  Profile: (not loaded)".into());
         }
-        lines.push(format!("  HSM logged in: {}", app.actor.is_some()));
-        if let Some(ref dev) = app.optical_dev {
+        lines.push(format!("  HSM logged in: {}", app.hw.actor.is_some()));
+        if let Some(ref dev) = app.disc.optical_dev {
             lines.push(format!("  Optical device: {}", dev.display()));
         }
-        if let Some(rem) = app.sessions_remaining {
+        if let Some(rem) = app.disc.sessions_remaining {
             lines.push(format!("  Disc sessions remaining: {rem}"));
         }
-        if let Some(ref fp) = app.fingerprint {
+        if let Some(ref fp) = app.data.fingerprint {
             lines.push(format!("  Root cert fingerprint: {fp}"));
         }
 
@@ -160,7 +160,7 @@ impl UtilitiesMode {
 
         // Collect AUDIT.LOG content from disc sessions (prior_sessions)
         let disc_audit: Vec<u8> = app
-            .prior_sessions
+            .disc.prior_sessions
             .iter()
             .rev()
             .find_map(|s| {
@@ -205,7 +205,7 @@ impl UtilitiesMode {
             // Show disc-based audit log
             lines.push(format!(
                 "  Source: disc ({} session(s))",
-                app.prior_sessions.len()
+                app.disc.prior_sessions.len()
             ));
             lines.push(String::new());
             Self::append_audit_records(&mut lines, &disc_audit);
@@ -253,12 +253,12 @@ impl UtilitiesMode {
         let cfg_token = profile.hsm.token_label.as_str();
         let cfg_key = profile.hsm.key_label.as_str();
         let cfg_spec = format!("{:?}", profile.hsm.key_spec);
-        let logged_in = app.actor.is_some();
+        let logged_in = app.hw.actor.is_some();
 
         lines.push(format!("  Module: {}", profile.hsm.module_path.display()));
         lines.push(String::new());
 
-        let Some(ref actor) = app.actor else {
+        let Some(ref actor) = app.hw.actor else {
             lines.push("  HSM not connected — log in first to browse slots.".into());
             return lines;
         };

@@ -181,13 +181,13 @@ impl CeremonyMode {
     fn build_body(&self, app: &crate::app::App) -> Vec<String> {
         match &self.state {
             CeremonyState::OperationSelect => {
-                let n_sessions = app.prior_sessions.len();
+                let n_sessions = app.disc.prior_sessions.len();
                 let disc_label = if n_sessions == 0 {
                     "  Blank disc \u{2014} no prior sessions.".into()
                 } else {
                     format!("  Disc: {n_sessions} prior session(s).")
                 };
-                let state_label = if let Some(ref state) = app.session_state {
+                let state_label = if let Some(ref state) = app.disc.session_state {
                     let names: Vec<&str> = state.sss.custodians.iter().map(|c| c.name.as_str()).collect();
                     format!(
                         "  STATE.JSON: v{}, {}/{} SSS, custodians: {}",
@@ -273,12 +273,12 @@ impl CeremonyMode {
             }
 
             CeremonyState::CsrPreview => {
-                let subject = app.csr_subject_display.as_deref().unwrap_or("(unknown)");
+                let subject = app.data.csr_subject_display.as_deref().unwrap_or("(unknown)");
                 let profile_name = app
                     .profile
                     .as_ref()
                     .and_then(|p| {
-                        app.selected_profile_idx
+                        app.data.selected_profile_idx
                             .map(|i| p.cert_profiles[i].name.as_str())
                     })
                     .unwrap_or("?");
@@ -295,7 +295,7 @@ impl CeremonyMode {
             }
 
             CeremonyState::CertPreview => {
-                let fp = app.fingerprint.as_deref().unwrap_or("(none)");
+                let fp = app.data.fingerprint.as_deref().unwrap_or("(none)");
                 let ca = app.profile.as_ref().map(|p| &p.ca);
                 let (cn, org, country) = ca
                     .map(|c| (
@@ -304,7 +304,7 @@ impl CeremonyMode {
                         c.country.as_str(),
                     ))
                     .unwrap_or(("?", "?", "?"));
-                let has_crl = app.crl_der.is_some();
+                let has_crl = app.data.crl_der.is_some();
                 let mut lines = vec![
                     String::new(),
                     format!("  Subject  : CN={cn}, O={org}, C={country}"),
@@ -326,26 +326,26 @@ impl CeremonyMode {
             }
 
             CeremonyState::RevokeInput => {
-                let phase_hint = if app.revoke_phase == 0 {
+                let phase_hint = if app.data.revoke_phase == 0 {
                     "Enter serial number (digits only):"
                 } else {
                     "Enter reason (optional, press Enter to skip):"
                 };
                 vec![
                     String::new(),
-                    format!("  {} revoked cert(s) on record.", app.revocation_list.len()),
+                    format!("  {} revoked cert(s) on record.", app.data.revocation_list.len()),
                     String::new(),
                     format!("  {phase_hint}"),
                     String::new(),
-                    format!("  Serial : {}", app.revoke_serial_buf),
-                    format!("  Reason : {}", app.revoke_reason_buf),
+                    format!("  Serial : {}", app.data.revoke_serial_buf),
+                    format!("  Reason : {}", app.data.revoke_reason_buf),
                     String::new(),
                     "  Enter to confirm each field. Esc (on reason) to go back.".into(),
                 ]
             }
 
             CeremonyState::RevokePreview => {
-                let crl_num = app.crl_number.unwrap_or(0);
+                let crl_num = app.data.crl_number.unwrap_or(0);
                 let mut lines = vec![
                     String::new(),
                     format!("  New CRL number: {crl_num}"),
@@ -353,7 +353,7 @@ impl CeremonyMode {
                     "  Updated revocation list:".into(),
                     String::new(),
                 ];
-                for entry in &app.revocation_list {
+                for entry in &app.data.revocation_list {
                     let reason = entry.reason.as_deref().unwrap_or("(no reason)");
                     lines.push(format!(
                         "    serial={:>20}  time={}  reason={}",
@@ -367,8 +367,8 @@ impl CeremonyMode {
             }
 
             CeremonyState::CrlPreview => {
-                let crl_num = app.crl_number.unwrap_or(0);
-                let count = app.revocation_list.len();
+                let crl_num = app.data.crl_number.unwrap_or(0);
+                let count = app.data.revocation_list.len();
                 let mut lines = vec![
                     String::new(),
                     format!("  CRL number      : {crl_num}"),
@@ -378,7 +378,7 @@ impl CeremonyMode {
                 if count == 0 {
                     lines.push("  (No certificates have been revoked.)".into());
                 } else {
-                    for entry in &app.revocation_list {
+                    for entry in &app.data.revocation_list {
                         let reason = entry.reason.as_deref().unwrap_or("(no reason)");
                         lines.push(format!(
                             "    serial={:>20}  time={}  reason={}",
@@ -410,12 +410,12 @@ impl CeremonyMode {
                     Some(Operation::MigrateDisc) => "Disc migration",
                     None => "Session",
                 };
-                let fp = app.fingerprint.as_deref().unwrap_or("(none)");
+                let fp = app.data.fingerprint.as_deref().unwrap_or("(none)");
                 let mut lines = vec![
                     String::new(),
                     format!("  {op_label} written to disc successfully."),
                 ];
-                if app.fingerprint.is_some() {
+                if app.data.fingerprint.is_some() {
                     lines.push(String::new());
                     lines.push(format!("  Fingerprint: {fp}"));
                 }
@@ -438,7 +438,7 @@ impl CeremonyMode {
                     "  Configure Shamir Secret Sharing for the HSM PIN.".into(),
                     String::new(),
                     "  Custodian names (comma-separated):".into(),
-                    format!("  > {}|", app.init_root_custodian_buf),
+                    format!("  > {}|", app.sss.custodian_buf),
                     String::new(),
                     "  After entering names, press [Enter] to set threshold.".into(),
                     "  Default threshold: 2-of-N (minimum for SSS).".into(),
@@ -469,7 +469,7 @@ impl CeremonyMode {
             }
 
             CeremonyState::RekeyQuorum => {
-                let info = if let Some(ref state) = app.session_state {
+                let info = if let Some(ref state) = app.disc.session_state {
                     format!(
                         "  Current scheme: {}-of-{}.  Need {} shares to proceed.",
                         state.sss.threshold, state.sss.total, state.sss.threshold
@@ -493,7 +493,7 @@ impl CeremonyMode {
                     "  Enter new custodian names for re-keyed shares.".into(),
                     String::new(),
                     "  Custodian names (comma-separated):".into(),
-                    format!("  > {}|", app.init_root_custodian_buf),
+                    format!("  > {}|", app.sss.custodian_buf),
                     String::new(),
                     "  [Enter]  Confirm    [Esc]  Abort".into(),
                 ]
@@ -519,19 +519,19 @@ impl CeremonyMode {
             }
 
             CeremonyState::MigrateConfirm => {
-                let chain_str = if app.migrate_chain_ok {
+                let chain_str = if app.data.migrate_chain_ok {
                     "OK \u{2714}"
                 } else {
                     "FAIL \u{2718}"
                 };
-                let mb = app.migrate_total_bytes / (1024 * 1024);
+                let mb = app.data.migrate_total_bytes / (1024 * 1024);
                 vec![
                     String::new(),
-                    format!("  Sessions  : {}", app.prior_sessions.len()),
+                    format!("  Sessions  : {}", app.disc.prior_sessions.len()),
                     format!("  Audit chain: {chain_str}"),
                     format!(
                         "  Total data: {} MiB ({} bytes)",
-                        mb, app.migrate_total_bytes
+                        mb, app.data.migrate_total_bytes
                     ),
                     String::new(),
                     "  Verify chain is OK before proceeding.".into(),
@@ -542,8 +542,8 @@ impl CeremonyMode {
             }
 
             CeremonyState::WaitMigrateTarget => {
-                let session_count = app.migrate_sessions.len();
-                let disc_info = match &app.optical_dev {
+                let session_count = app.data.migrate_sessions.len();
+                let disc_info = match &app.disc.optical_dev {
                     Some(dev) => format!("  Blank disc in {}. Press [1].", dev.display()),
                     None => "  Waiting for blank write-once disc\u{2026}".into(),
                 };
