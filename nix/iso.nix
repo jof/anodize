@@ -30,6 +30,11 @@ let
   # /run/wrappers/bin/anodize-ceremony, preventing two terminals from running
   # the ceremony simultaneously.
   ceremonyShell = (pkgs.writeShellScriptBin "ceremony-shell" ''
+    # Source NixOS environment.variables (YUBIHSM_PKCS11_CONF,
+    # ANODIZE_PKCS11_MODULES, etc.).  ceremony-shell is not a real shell so
+    # /etc/profile is never sourced by the login process.
+    [ -f /etc/set-environment ] && . /etc/set-environment
+
     # ttyS0 (serial port) reports 0×0 terminal size by default; the ratatui
     # TUI renders nothing in a zero-size frame.  Only override size when the
     # terminal has no dimensions — SSH and VT sessions already carry the
