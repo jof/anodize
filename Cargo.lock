@@ -73,6 +73,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "anodize-shuttle"
+version = "0.1.0"
+dependencies = [
+ "anodize-config",
+ "anyhow",
+ "clap",
+ "der",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml",
+ "x509-cert",
+]
+
+[[package]]
 name = "anodize-sss"
 version = "0.1.0"
 dependencies = [

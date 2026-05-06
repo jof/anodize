@@ -1,4 +1,4 @@
-.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev list-usb write-usb hash-iso verify-iso clean test fmt lint deny build-dev
+.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev list-usb write-usb hash-iso verify-iso clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -9,25 +9,44 @@ nix-check:
 	act push --job nix
 
 # ---------------------------------------------------------------------------
-# ISO builds via Docker + Nix (no local Nix installation required)
+# ISO builds via Nix
 #
-# A persistent Docker volume per architecture caches the Nix store across
-# runs so the first build takes 10-30 minutes and subsequent builds are
-# incremental.  Volumes are kept separate (nix-store-amd64 / nix-store-arm64)
-# because Nix store paths are architecture-specific.
+# Two modes, selected automatically by whether NIX_BUILDER is set:
 #
-# On Apple Silicon the amd64 builds run under QEMU emulation inside Docker
-# and will be slow.  Use dev-arm64 + qemu-aarch64 for fast iteration.
+#   Local (default) — Docker + Nix
+#     Runs Nix inside a Docker container with a persistent volume for the
+#     Nix store.  Works on any machine with Docker.  On Apple Silicon the
+#     amd64 builds run under Rosetta/QEMU emulation and may be slow; use
+#     dev-arm64 + qemu-aarch64 for fast iteration.
+#
+#   Remote — SSH + Nix on a remote x86_64-linux host
+#     The source tree is rsynced to the builder, Nix runs there natively,
+#     and the ISO is copied back.  Much faster than emulation on macOS.
+#     The remote host needs: Nix with flakes enabled, current user as a
+#     trusted-user, rsync, and git.
+#
+# Environment variables:
+#   NIX_BUILDER       SSH destination (user@host or host).  When set,
+#                     the remote path is used.  Unset = local Docker.
+#   NIX_BUILDER_DIR   Remote working directory (default: /tmp/anodize-build).
+#   NIX_IMAGE         Docker image for local builds (default: nixos/nix:2.28.3).
+#   ALLOW_DIRTY       Set to 1 to skip the clean-tree check on prod ISOs.
+#
+# Examples:
+#   make prod-amd64                          # local Docker build
+#   NIX_BUILDER=10.0.0.5 make prod-amd64    # remote build
 # ---------------------------------------------------------------------------
 
-# Pin the Docker image so builds use the same Nix binary across machines.
-# Bump this when you intentionally want a newer Nix; don't rely on :latest.
+NIX_BUILDER ?=
+NIX_BUILDER_DIR ?= /tmp/anodize-build
+SSH_OPTS := -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+
+# Pin the Docker image so local builds use the same Nix binary across machines.
 NIX_IMAGE ?= nixos/nix:2.28.3
 
-# On macOS (Colima / Docker Desktop) the kernel inside the VM does not
-# support the seccomp BPF filters that the Nix sandbox tries to load.
-# Disabling filter-syscalls skips only the seccomp layer while keeping the
-# namespace-based sandbox intact.  Build output is identical either way.
+# On macOS the Docker VM kernel does not support the seccomp BPF filters that
+# the Nix sandbox tries to load.  Disabling filter-syscalls skips only the
+# seccomp layer; the namespace sandbox stays intact.
 ifeq ($(shell uname -s),Darwin)
 NIX_SANDBOX_FLAG := --option filter-syscalls false
 else
@@ -38,6 +57,21 @@ endif
 NIX_SOURCES := flake.nix flake.lock nix/iso.nix nix/dev-iso.nix
 
 # $(call nix-iso-build, <flake-output>, <dest-file>, <docker-platform>, <arch-tag>)
+ifdef NIX_BUILDER
+define nix-iso-build
+	rsync -az --delete \
+		-e 'ssh $(SSH_OPTS)' \
+		--filter=':- .gitignore' \
+		--exclude='.git' \
+		$(CURDIR)/ $(NIX_BUILDER):$(NIX_BUILDER_DIR)/
+	ssh $(SSH_OPTS) $(NIX_BUILDER) \
+		'. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
+		 cd $(NIX_BUILDER_DIR) && \
+		 nix build .#$(1) -L'
+	scp $(SSH_OPTS) '$(NIX_BUILDER):$(NIX_BUILDER_DIR)/result/iso/*.iso' $(2)
+	@echo "ISO ready: $(2)"
+endef
+else
 define nix-iso-build
 	docker volume create nix-store-$(4) 2>/dev/null || true
 	docker run --rm --privileged \
@@ -54,6 +88,7 @@ define nix-iso-build
 		       rm -f /src/$(2) && cp -L result/iso/*.iso /src/$(2)'
 	@echo "ISO ready: $(2)"
 endef
+endif
 
 # Production ISO (amd64).
 # Requires a clean git tree for bit-for-bit reproducibility.  Override with
@@ -87,9 +122,13 @@ anodize-dev-amd64.iso: $(NIX_SOURCES)
 anodize-dev-arm64.iso: $(NIX_SOURCES)
 	$(call nix-iso-build,dev-arm64,anodize-dev-arm64.iso,linux/arm64,arm64)
 
-# Delete the Docker Nix store volumes so the next build starts fresh.
-# Run this after updating flake.lock or when volumes are full/corrupt.
+# Reset the build cache.  Remote mode: wipe the remote directory.
+# Local mode: remove Docker Nix store volumes.
 nix-reset:
+ifdef NIX_BUILDER
+	ssh $(SSH_OPTS) $(NIX_BUILDER) 'rm -rf $(NIX_BUILDER_DIR)'
+	@echo "Remote build directory removed."
+else
 	@for arch in amd64 arm64; do \
 	  vol="nix-store-$$arch"; \
 	  if docker volume inspect "$$vol" >/dev/null 2>&1; then \
@@ -97,6 +136,7 @@ nix-reset:
 	    docker volume rm "$$vol"; \
 	  fi; \
 	done
+endif
 
 prod-amd64: anodize-prod-amd64.iso
 prod-arm64: anodize-prod-arm64.iso
@@ -371,6 +411,33 @@ build-dev:
 
 clean:
 	rm -rf anodize-prod-amd64.iso anodize-prod-arm64.iso anodize-dev-amd64.iso anodize-dev-arm64.iso anodize-prod-amd64.iso.sha256 fake-shuttle.img dev-disc /tmp/anodize-ovmf-vars.fd
+
+# One-time repo setup — configures git to use the committed hooks directory.
+setup:
+	git config core.hooksPath .githooks
+	@echo "Git hooks configured (.githooks/)."
+
+# ---------------------------------------------------------------------------
+# Shuttle USB preparation — build and run the shuttle CLI tool.
+#
+# The shuttle is the USB stick that carries profile.toml and artifacts
+# between the operator's workstation and the air-gapped ceremony machine.
+#
+# Build:        make build-shuttle
+# Lint a USB:   make shuttle-lint SHUTTLE_PATH=/Volumes/ANODIZE
+# Init a USB:   cargo run -p anodize-shuttle -- init --help
+# ---------------------------------------------------------------------------
+
+SHUTTLE_PATH ?=
+
+build-shuttle:
+	cargo build -p anodize-shuttle
+
+shuttle-lint:
+ifndef SHUTTLE_PATH
+	$(error SHUTTLE_PATH is required — set it to the mounted shuttle volume)
+endif
+	cargo run -p anodize-shuttle -- lint --path $(SHUTTLE_PATH)
 
 # Inner-loop shortcuts (no Docker overhead)
 fmt:

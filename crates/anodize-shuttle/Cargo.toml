@@ -1,0 +1,21 @@
+[package]
+name = "anodize-shuttle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "anodize-shuttle"
+path = "src/main.rs"
+
+[dependencies]
+anodize-config = { path = "../anodize-config" }
+clap           = { workspace = true }
+anyhow         = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+toml           = { workspace = true }
+sha2           = { workspace = true }
+hex            = { workspace = true }
+der            = { workspace = true }
+x509-cert      = { workspace = true }

@@ -6,6 +6,7 @@ members = [
     "crates/anodize-config",
     "crates/anodize-sss",
     "crates/anodize-tui",
+    "crates/anodize-shuttle",
 ]
 resolver = "2"
 
