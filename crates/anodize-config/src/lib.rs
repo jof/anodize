@@ -1,9 +1,13 @@
+pub mod events;
+pub mod state;
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Profile {
     pub ca: CaConfig,
     pub hsm: HsmConfig,
@@ -12,6 +16,7 @@ pub struct Profile {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CertProfile {
     pub name: String,
     pub validity_days: u32,
@@ -46,6 +51,7 @@ pub fn serialize_revocation_list(entries: &[RevocationEntry]) -> String {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaConfig {
     pub common_name: String,
     pub organization: String,
@@ -54,6 +60,7 @@ pub struct CaConfig {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HsmConfig {
     pub module_path: PathBuf,
     pub token_label: String,
