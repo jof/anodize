@@ -55,8 +55,8 @@ impl App {
                             let _ = media::unmount(&self.shuttle_mount);
                             return;
                         }
-                        if let Err(e) = profile.hsm.check_module_allowed() {
-                            self.set_status(format!("PKCS#11 module not allowed: {e}"));
+                        if let Err(e) = profile.hsm.resolve_module_path() {
+                            self.set_status(format!("PKCS#11 module not found: {e}"));
                             let _ = media::unmount(&self.shuttle_mount);
                             return;
                         }
@@ -271,7 +271,17 @@ impl App {
             }
         };
 
-        match Pkcs11Hsm::new(&cfg.module_path, &cfg.token_label) {
+        let module_path = match cfg.resolve_module_path() {
+            Ok(p) => p,
+            Err(e) => {
+                self.hw.hsm_state = HwState::Error(format!("{e}"));
+                self.set_status(format!("HSM detection failed: {e}"));
+                self.setup.phase = SetupPhase::ProfileLoaded;
+                return;
+            }
+        };
+
+        match Pkcs11Hsm::new(&module_path, &cfg.token_label) {
             Ok(_hsm) => {
                 let label = &cfg.token_label;
                 self.hw.hsm_state = HwState::Present(format!("token={label}"));
@@ -308,7 +318,15 @@ impl App {
             }
         };
 
-        let hsm = match Pkcs11Hsm::new(&cfg.module_path, &cfg.token_label) {
+        let module_path = match cfg.resolve_module_path() {
+            Ok(p) => p,
+            Err(e) => {
+                self.set_status(format!("PKCS#11 module error: {e}"));
+                return;
+            }
+        };
+
+        let hsm = match Pkcs11Hsm::new(&module_path, &cfg.token_label) {
             Ok(h) => h,
             Err(e) => {
                 self.set_status(format!("HSM open failed: {e}"));
