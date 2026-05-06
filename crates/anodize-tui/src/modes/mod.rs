@@ -6,7 +6,7 @@ use crate::components::phase_bar::{PhaseStatus, PhaseStep};
 
 /// Phase steps for the Setup mode.
 pub fn setup_phases(current: usize) -> Vec<PhaseStep> {
-    let labels = &["Clock", "USB", "Profile", "PIN", "Disc"];
+    let labels = &["Clock", "Shuttle", "Profile", "PIN", "Disc"];
     labels
         .iter()
         .enumerate()
@@ -46,7 +46,7 @@ pub fn utility_phases(screen: &utilities::UtilScreen) -> Vec<PhaseStep> {
 
 /// Phase steps for a ceremony operation.
 pub fn ceremony_phases(op_label: &'static str, current: usize) -> Vec<PhaseStep> {
-    let labels: &[&str] = &["Select", op_label, "Intent", "HSM Op", "Preview", "Burn", "USB", "Done"];
+    let labels: &[&str] = &["Select", op_label, "Commit", "Quorum", "Execute", "Burn", "Export", "Done"];
     labels
         .iter()
         .enumerate()

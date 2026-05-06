@@ -1,10 +1,12 @@
 /// Which CA operation is being performed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operation {
+    InitRoot,
     GenerateRootCa,
     SignCsr,
     RevokeCert,
     IssueCrl,
+    RekeyShares,
     MigrateDisc,
 }
 
@@ -31,13 +33,13 @@ pub enum Action {
     SelectOperation(Operation),
     SelectKeyAction(u8),       // 1=generate, 2=find-existing
     SelectCertProfile(usize),  // 0-indexed profile index
-    // Disc + USB
+    // Disc + Shuttle
     ConfirmDisc,
     DoWriteIntent,
     IntentBurnComplete,
     DoStartBurn,
     BurnComplete,
-    DoWriteUsb,
+    DoWriteShuttle,
     // Revocation input
     RevokeInputChar(char),
     RevokeInputBackspace,
@@ -52,6 +54,11 @@ pub enum Action {
     // Migration
     ConfirmMigrate,
     ConfirmMigrateTarget,
+    // InitRoot ceremony
+    InitRootInputChar(char),
+    InitRootInputBackspace,
+    InitRootConfirmCustodians,
+    InitRootAbort,
     // PIN input
     PinChar(char),
     PinBackspace,
