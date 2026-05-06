@@ -54,11 +54,14 @@ pub enum Action {
     // Migration
     ConfirmMigrate,
     ConfirmMigrateTarget,
-    // InitRoot ceremony
+    // InitRoot / RekeyShares shared custodian input
     InitRootInputChar(char),
     InitRootInputBackspace,
     InitRootConfirmCustodians,
     InitRootAbort,
+    // RekeyShares ceremony
+    RekeyConfirmCustodians,
+    RekeyAbort,
     // PIN input
     PinChar(char),
     PinBackspace,

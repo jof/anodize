@@ -347,6 +347,57 @@ impl App {
                 }
                 return Action::Noop;
             }
+
+            // RekeyShares: quorum input → reconstruct PIN
+            if self.ceremony.state == CeremonyState::RekeyQuorum {
+                if key.code == KeyCode::Esc {
+                    return Action::RekeyAbort;
+                }
+                if let Some(ref mut input) = self.share_input {
+                    input.handle_key(key);
+                    if input.quorum_reached() {
+                        // Reconstruct PIN and verify
+                        self.do_rekey_quorum_complete();
+                    }
+                }
+                return Action::Noop;
+            }
+            if self.ceremony.state == CeremonyState::RekeyShareReveal {
+                if key.code == KeyCode::Esc {
+                    return Action::RekeyAbort;
+                }
+                if let Some(ref mut reveal) = self.share_reveal {
+                    if reveal.handle_key(key) {
+                        self.share_reveal = None;
+                        if let Some(ref state) = self.session_state {
+                            self.share_input = Some(
+                                crate::components::share_input::ShareInput::new(
+                                    state.sss.clone(),
+                                    32,
+                                ),
+                            );
+                        }
+                        self.ceremony.state = CeremonyState::RekeyShareVerify;
+                        self.set_status("Verify new shares: each custodian re-enters their share.");
+                    }
+                }
+                return Action::Noop;
+            }
+            if self.ceremony.state == CeremonyState::RekeyShareVerify {
+                if key.code == KeyCode::Esc {
+                    return Action::RekeyAbort;
+                }
+                if let Some(ref mut input) = self.share_input {
+                    input.handle_key(key);
+                    if input.quorum_reached() {
+                        self.share_input = None;
+                        self.init_root_shares = None;
+                        // Verified → burn updated STATE.JSON directly
+                        self.do_start_burn();
+                    }
+                }
+                return Action::Noop;
+            }
         }
 
         // Delegate to the active mode's component
@@ -573,6 +624,19 @@ impl App {
                 self.current_op = None;
                 self.ceremony.state = CeremonyState::OperationSelect;
                 self.set_status("InitRoot aborted.");
+            }
+            Action::RekeyConfirmCustodians => {
+                self.do_rekey_confirm_custodians();
+            }
+            Action::RekeyAbort => {
+                self.init_root_custodian_buf.clear();
+                self.init_root_shares = None;
+                self.init_root_custodian_names.clear();
+                self.share_input = None;
+                self.share_reveal = None;
+                self.current_op = None;
+                self.ceremony.state = CeremonyState::OperationSelect;
+                self.set_status("RekeyShares aborted.");
             }
 
             // Migration

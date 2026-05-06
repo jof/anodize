@@ -334,8 +334,19 @@ impl App {
                 }
             }
             Operation::RekeyShares => {
-                // TODO: implement RekeyShares ceremony flow
-                self.set_status("RekeyShares not yet implemented.");
+                if self.session_state.is_none() {
+                    self.set_status("No STATE.JSON — run InitRoot first.");
+                    self.current_op = None;
+                    self.ceremony.state = CeremonyState::OperationSelect;
+                    return;
+                }
+                // Enter quorum phase: custodians re-enter shares
+                let sss = self.session_state.as_ref().unwrap().sss.clone();
+                self.share_input = Some(
+                    crate::components::share_input::ShareInput::new(sss, 32),
+                );
+                self.ceremony.state = CeremonyState::RekeyQuorum;
+                self.set_status("Enter threshold shares to reconstruct the PIN.");
             }
             Operation::MigrateDisc => {
                 self.do_migrate_confirm();
@@ -448,6 +459,147 @@ impl App {
             total,
             custodians = ?self.init_root_custodian_names,
             "InitRoot: SSS split complete, entering share reveal"
+        );
+    }
+
+    // ── RekeyShares: quorum → reconstruct PIN → new custodians → re-split ───
+
+    pub(crate) fn do_rekey_quorum_complete(&mut self) {
+        // Collect shares from the input component
+        let shares: Vec<anodize_sss::Share> = self
+            .share_input
+            .as_ref()
+            .map(|si| si.collected.iter().map(|c| c.share.clone()).collect())
+            .unwrap_or_default();
+        self.share_input = None;
+
+        // Reconstruct PIN
+        let threshold = self
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.threshold)
+            .unwrap_or(2);
+        let pin_bytes = match anodize_sss::reconstruct(&shares, threshold) {
+            Ok(b) => b,
+            Err(e) => {
+                self.set_status(format!("PIN reconstruction failed: {e}"));
+                self.ceremony.state = CeremonyState::OperationSelect;
+                self.current_op = None;
+                return;
+            }
+        };
+
+        // Verify against pin_verify_hash
+        let pin_hash = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&pin_bytes))
+        };
+        let expected = self
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.pin_verify_hash.as_str())
+            .unwrap_or("");
+
+        if pin_hash != expected {
+            self.set_status("PIN verify hash mismatch — shares may be corrupted.");
+            self.ceremony.state = CeremonyState::OperationSelect;
+            self.current_op = None;
+            return;
+        }
+
+        // Store reconstructed PIN for re-splitting
+        self.pin_buf = hex::encode(&pin_bytes);
+        self.init_root_custodian_buf.clear();
+        self.init_root_custodian_names.clear();
+        self.ceremony.state = CeremonyState::RekeyCustodianSetup;
+        self.set_status("PIN verified. Enter new custodian names (comma-separated).");
+
+        tracing::info!("RekeyShares: quorum reached, PIN verified, entering custodian setup");
+    }
+
+    pub(crate) fn do_rekey_confirm_custodians(&mut self) {
+        // Parse new custodian names
+        let names: Vec<String> = self
+            .init_root_custodian_buf
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if names.len() < 2 {
+            self.set_status("Need at least 2 custodians for SSS (threshold >= 2).");
+            return;
+        }
+        if names.len() > 255 {
+            self.set_status("Maximum 255 custodians.");
+            return;
+        }
+
+        let total = names.len() as u8;
+        let threshold = 2u8;
+
+        // Decode the stored PIN hex back to bytes
+        let pin_bytes = match hex::decode(&self.pin_buf) {
+            Ok(b) => b,
+            Err(e) => {
+                self.set_status(format!("Internal error decoding PIN: {e}"));
+                return;
+            }
+        };
+
+        // Re-split with new custodians
+        let shares = match anodize_sss::split(&pin_bytes, threshold, total) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_status(format!("SSS split failed: {e}"));
+                return;
+            }
+        };
+
+        // Compute new commitments
+        let mut share_commitments = Vec::with_capacity(shares.len());
+        for (share, name) in shares.iter().zip(names.iter()) {
+            let commitment = share.commitment(name);
+            share_commitments.push(hex::encode(commitment));
+        }
+
+        // Update SessionState SSS metadata
+        let custodians: Vec<anodize_config::state::Custodian> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| anodize_config::state::Custodian {
+                name: name.clone(),
+                index: (i + 1) as u8,
+            })
+            .collect();
+
+        if let Some(ref mut state) = self.session_state {
+            state.sss.threshold = threshold;
+            state.sss.total = total;
+            state.sss.custodians = custodians;
+            state.sss.share_commitments = share_commitments;
+            // pin_verify_hash stays the same (same PIN)
+        }
+
+        self.init_root_custodian_names = names.clone();
+        self.init_root_shares = Some(shares.clone());
+
+        // Create ShareReveal component
+        self.share_reveal = Some(crate::components::share_reveal::ShareReveal::new(
+            shares,
+            &names,
+        ));
+
+        self.ceremony.state = CeremonyState::RekeyShareReveal;
+        self.set_status(format!(
+            "Distributing {total} new shares ({threshold}-of-{total}). Hand device to each custodian."
+        ));
+
+        tracing::info!(
+            threshold,
+            total,
+            custodians = ?self.init_root_custodian_names,
+            "RekeyShares: re-split complete, entering share reveal"
         );
     }
 
@@ -1265,8 +1417,59 @@ impl App {
 
         match self.current_op.clone() {
             Some(Operation::RekeyShares) => {
-                // TODO: implement disc session for RekeyShares
-                return None;
+                let log_path = staging.join("audit.log");
+                let mut log = match AuditLog::open(&log_path) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.set_status(format!("Audit log reopen failed: {e}"));
+                        return None;
+                    }
+                };
+                let new_total = self
+                    .session_state
+                    .as_ref()
+                    .map(|s| s.sss.total)
+                    .unwrap_or(0);
+                let new_threshold = self
+                    .session_state
+                    .as_ref()
+                    .map(|s| s.sss.threshold)
+                    .unwrap_or(0);
+                if let Err(e) = log.append(
+                    "sss.rekey",
+                    serde_json::json!({
+                        "operation": "rekey-shares",
+                        "new_threshold": new_threshold,
+                        "new_total": new_total,
+                    }),
+                ) {
+                    self.set_status(format!("Audit log append failed: {e}"));
+                    return None;
+                }
+                drop(log);
+
+                let audit_bytes = match std::fs::read(&log_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.set_status(format!("Cannot read audit log: {e}"));
+                        return None;
+                    }
+                };
+
+                self.update_session_state_for_record(&audit_bytes);
+                let mut files = vec![IsoFile {
+                    name: "AUDIT.LOG".into(),
+                    data: audit_bytes,
+                }];
+                if let Some(state_file) = self.build_state_json_file() {
+                    files.push(state_file);
+                }
+
+                Some(SessionEntry {
+                    dir_name,
+                    timestamp: ts,
+                    files,
+                })
             }
             Some(Operation::InitRoot) | Some(Operation::GenerateRootCa) => {
                 let cert_der = self.cert_der.clone()?;
@@ -1635,18 +1838,23 @@ impl App {
     }
 
     pub(crate) fn render_ceremony_content(&self, frame: &mut Frame, area: Rect) {
-        // ShareReveal / ShareInput overlay for InitRoot states
-        if self.ceremony.state == CeremonyState::InitRootShareReveal {
-            if let Some(ref reveal) = self.share_reveal {
-                reveal.render(frame, area);
-                return;
+        // ShareReveal / ShareInput overlay for InitRoot and Rekey states
+        match self.ceremony.state {
+            CeremonyState::InitRootShareReveal | CeremonyState::RekeyShareReveal => {
+                if let Some(ref reveal) = self.share_reveal {
+                    reveal.render(frame, area);
+                    return;
+                }
             }
-        }
-        if self.ceremony.state == CeremonyState::InitRootShareVerify {
-            if let Some(ref input) = self.share_input {
-                input.render(frame, area);
-                return;
+            CeremonyState::InitRootShareVerify
+            | CeremonyState::RekeyShareVerify
+            | CeremonyState::RekeyQuorum => {
+                if let Some(ref input) = self.share_input {
+                    input.render(frame, area);
+                    return;
+                }
             }
+            _ => {}
         }
         self.ceremony.render_with_app(frame, area, self);
     }

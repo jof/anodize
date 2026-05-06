@@ -31,6 +31,11 @@ pub enum CeremonyState {
     InitRootCustodianSetup,
     InitRootShareReveal,
     InitRootShareVerify,
+    // RekeyShares flow
+    RekeyQuorum,
+    RekeyCustodianSetup,
+    RekeyShareReveal,
+    RekeyShareVerify,
     // Mode 5: Migrate
     MigrateConfirm,
     WaitMigrateTarget,
@@ -53,7 +58,9 @@ impl CeremonyMode {
     pub fn in_text_entry(&self) -> bool {
         matches!(
             self.state,
-            CeremonyState::RevokeInput | CeremonyState::InitRootCustodianSetup
+            CeremonyState::RevokeInput
+                | CeremonyState::InitRootCustodianSetup
+                | CeremonyState::RekeyCustodianSetup
         )
     }
 
@@ -91,9 +98,13 @@ impl CeremonyMode {
             CeremonyState::RevokeInput => "Revoke",
             CeremonyState::RevokePreview => "Preview",
             CeremonyState::CrlPreview => "CRL",
-            CeremonyState::InitRootCustodianSetup => "Custodians",
-            CeremonyState::InitRootShareReveal => "Distribute",
-            CeremonyState::InitRootShareVerify => "Verify",
+            CeremonyState::InitRootCustodianSetup
+            | CeremonyState::RekeyCustodianSetup => "Custodians",
+            CeremonyState::InitRootShareReveal
+            | CeremonyState::RekeyShareReveal => "Distribute",
+            CeremonyState::InitRootShareVerify
+            | CeremonyState::RekeyShareVerify => "Verify",
+            CeremonyState::RekeyQuorum => "Quorum",
             CeremonyState::MigrateConfirm => "Verify",
             CeremonyState::WaitMigrateTarget => "Wait",
             CeremonyState::Done => "Done",
@@ -107,16 +118,20 @@ impl CeremonyMode {
             CeremonyState::KeyAction
             | CeremonyState::LoadCsr
             | CeremonyState::RevokeInput
-            | CeremonyState::InitRootCustodianSetup => 1,
+            | CeremonyState::InitRootCustodianSetup
+            | CeremonyState::RekeyCustodianSetup => 1,
             CeremonyState::WritingIntent
             | CeremonyState::CsrPreview
             | CeremonyState::RevokePreview
             | CeremonyState::CrlPreview
             | CeremonyState::MigrateConfirm
-            | CeremonyState::InitRootShareReveal => 2,
+            | CeremonyState::InitRootShareReveal
+            | CeremonyState::RekeyQuorum => 2,
             CeremonyState::CertPreview
             | CeremonyState::WaitMigrateTarget
-            | CeremonyState::InitRootShareVerify => 3,
+            | CeremonyState::InitRootShareVerify
+            | CeremonyState::RekeyShareReveal
+            | CeremonyState::RekeyShareVerify => 3,
             CeremonyState::BurningDisc => 4,
             CeremonyState::DiscDone | CeremonyState::Done => 5,
         }
@@ -144,6 +159,10 @@ impl CeremonyMode {
             CeremonyState::InitRootCustodianSetup => "Root Init \u{2014} Custodian Setup",
             CeremonyState::InitRootShareReveal => "Root Init \u{2014} Distribute Shares",
             CeremonyState::InitRootShareVerify => "Root Init \u{2014} Verify Shares",
+            CeremonyState::RekeyQuorum => "Re-key Shares \u{2014} Quorum",
+            CeremonyState::RekeyCustodianSetup => "Re-key Shares \u{2014} New Custodians",
+            CeremonyState::RekeyShareReveal => "Re-key Shares \u{2014} Distribute New Shares",
+            CeremonyState::RekeyShareVerify => "Re-key Shares \u{2014} Verify New Shares",
             CeremonyState::MigrateConfirm => "Disc Migration \u{2014} Verify Chain",
             CeremonyState::WaitMigrateTarget => "Insert Blank Target Disc",
             CeremonyState::Done => "Ceremony Complete",
@@ -193,6 +212,7 @@ impl CeremonyMode {
                     "  [4]  Issue CRL refresh      (re-signs current revocation list)".into(),
                     "  [5]  Migrate disc           (copy all sessions to new disc)".into(),
                     "  [6]  Init root              (SSS PIN split + fresh root CA)".into(),
+                    "  [7]  Re-key shares          (change custodians, keep same PIN)".into(),
                 ]
             }
 
@@ -448,6 +468,56 @@ impl CeremonyMode {
                 ]
             }
 
+            CeremonyState::RekeyQuorum => {
+                let info = if let Some(ref state) = app.session_state {
+                    format!(
+                        "  Current scheme: {}-of-{}.  Need {} shares to proceed.",
+                        state.sss.threshold, state.sss.total, state.sss.threshold
+                    )
+                } else {
+                    "  ERROR: no STATE.JSON loaded.".into()
+                };
+                vec![
+                    String::new(),
+                    "  Custodians: enter your shares to reconstruct the PIN.".into(),
+                    info,
+                    String::new(),
+                    "  The share input component is active.".into(),
+                    "  [Esc]  Abort".into(),
+                ]
+            }
+
+            CeremonyState::RekeyCustodianSetup => {
+                vec![
+                    String::new(),
+                    "  Enter new custodian names for re-keyed shares.".into(),
+                    String::new(),
+                    "  Custodian names (comma-separated):".into(),
+                    format!("  > {}|", app.init_root_custodian_buf),
+                    String::new(),
+                    "  [Enter]  Confirm    [Esc]  Abort".into(),
+                ]
+            }
+
+            CeremonyState::RekeyShareReveal => {
+                vec![
+                    String::new(),
+                    "  New shares are being distributed to custodians.".into(),
+                    String::new(),
+                    "  Hand the device to each custodian in turn.".into(),
+                    "  Press [S] to show/hide the share, [Enter] to confirm transcription.".into(),
+                ]
+            }
+
+            CeremonyState::RekeyShareVerify => {
+                vec![
+                    String::new(),
+                    "  Verification round: each new custodian re-enters their share.".into(),
+                    String::new(),
+                    "  The share input component is active.".into(),
+                ]
+            }
+
             CeremonyState::MigrateConfirm => {
                 let chain_str = if app.migrate_chain_ok {
                     "OK \u{2714}"
@@ -520,6 +590,7 @@ impl Component for CeremonyMode {
                 KeyCode::Char('4') => Action::SelectOperation(Operation::IssueCrl),
                 KeyCode::Char('5') => Action::SelectOperation(Operation::MigrateDisc),
                 KeyCode::Char('6') => Action::SelectOperation(Operation::InitRoot),
+                KeyCode::Char('7') => Action::SelectOperation(Operation::RekeyShares),
                 _ => Action::Noop,
             },
 
@@ -619,6 +690,17 @@ impl Component for CeremonyMode {
 
             CeremonyState::InitRootShareReveal => Action::Noop, // handled by ShareReveal component
             CeremonyState::InitRootShareVerify => Action::Noop, // handled by ShareInput component
+
+            CeremonyState::RekeyQuorum => Action::Noop, // handled by ShareInput component
+            CeremonyState::RekeyCustodianSetup => match key.code {
+                KeyCode::Char(c) => Action::InitRootInputChar(c),
+                KeyCode::Backspace => Action::InitRootInputBackspace,
+                KeyCode::Enter => Action::RekeyConfirmCustodians,
+                KeyCode::Esc => Action::RekeyAbort,
+                _ => Action::Noop,
+            },
+            CeremonyState::RekeyShareReveal => Action::Noop, // handled by ShareReveal component
+            CeremonyState::RekeyShareVerify => Action::Noop, // handled by ShareInput component
 
             CeremonyState::Done => Action::Noop,
         }
