@@ -1,4 +1,4 @@
-.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev ssh-dev-vm list-usb write-usb write-usb-dev hash-iso verify-iso clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
+.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev ssh-dev-vm ceremony-dev-vm list-usb write-usb write-usb-dev hash-iso verify-iso clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -425,6 +425,19 @@ endif
 	ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 	    -i $(CURDIR)/scripts/dev-ssh-key \
 	    debug@$(DEV_VM_IP)
+
+# Run the ceremony TUI on a remote dev VM via SSH.
+# Sources /etc/set-environment so PKCS#11 env vars are available,
+# then exec's the sentinel as the ceremony user.
+# Usage: DEV_VM_IP=10.0.0.5 make ceremony-dev-vm
+ceremony-dev-vm:
+ifndef DEV_VM_IP
+	$(error DEV_VM_IP is required — set it to the dev VM's IP address)
+endif
+	ssh -t -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+	    -i $(CURDIR)/scripts/dev-ssh-key \
+	    debug@$(DEV_VM_IP) \
+	    'sudo -u ceremony sh -c ". /etc/set-environment && exec anodize-sentinel"'
 
 # Build anodize-ceremony with dev-softhsm-usb (never use in a real ceremony).
 build-dev:
