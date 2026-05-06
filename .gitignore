@@ -5,11 +5,11 @@ target/
 result
 result-*
 # Build artifacts (produced by make targets)
-anodize*.iso
-anodize*.iso.sha256
-fake-shuttle.img
+*.iso
+*.iso.sha256
 fake-usb.img
 fake-disc-usb.img
+fake-shuttle.img
 # cdemu dev session disc images (virtio-9p share from QEMU guest)
 dev-disc/
 # Editor swap files
