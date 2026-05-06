@@ -126,16 +126,16 @@ impl Share {
 // ── CRC-8 ───────────────────────────────────────────────────────────────────
 
 /// CRC-8/AUTOSAR (poly 0x2F) over `[index] || data`.
+///
+/// Branchless: the polynomial XOR uses an arithmetic mask instead of a branch.
 fn crc8_compute(index: u8, data: &[u8]) -> u8 {
     let mut crc: u8 = 0xFF;
     for &byte in std::iter::once(&index).chain(data.iter()) {
         crc ^= byte;
         for _ in 0..8 {
-            if crc & 0x80 != 0 {
-                crc = (crc << 1) ^ 0x2F;
-            } else {
-                crc <<= 1;
-            }
+            // mask = 0xFF when MSB is set, else 0x00
+            let mask = 0u8.wrapping_sub(crc >> 7);
+            crc = (crc << 1) ^ (0x2F & mask);
         }
     }
     crc ^ 0xFF
