@@ -136,6 +136,20 @@ make qemu-dev-sdl             # SDL window
 make qemu-aarch64             # near-native speed via HVF
 ```
 
+**SSH into the dev VM** (192.168.2.2 when booted via QEMU):
+
+```sh
+# ceremony user — drops into the sentinel TUI (same as ttyS0)
+ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
+    -i scripts/dev-ssh-key ceremony@192.168.2.2
+
+# debug user — bash shell, wheel group (access to /dev/sr*, /dev/vhba_ctl, etc.)
+ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
+    -i scripts/dev-ssh-key debug@192.168.2.2
+```
+
+The dev SSH key (`scripts/dev-ssh-key`) must be `chmod 600`. Both users are configured in `nix/dev-iso.nix`; prod ISOs have SSH disabled.
+
 **After a session**, inspect the BD-R image on your laptop:
 
 ```sh
