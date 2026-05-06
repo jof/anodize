@@ -119,8 +119,6 @@ in
   environment.systemPackages = [
     anodize-ceremony          # ceremony TUI (unwrapped — use /run/wrappers/bin/ at runtime)
     pkgs.yubihsm-shell        # YubiHSM 2 PKCS#11 module + shell utilities
-    pkgs.softhsm              # SoftHSM2 PKCS#11 module (dev/testing)
-    pkgs.opensc               # PKCS#11 utilities (pkcs11-tool, etc.)
   ];
 
   # Direct USB connection to YubiHSM 2 — no connector daemon required.
@@ -131,27 +129,13 @@ in
 
   # ── PKCS#11 backend selection ─────────────────────────────────────────────
   #
-  # The HSM backend is a *runtime* choice, not a build-time one.  A single
-  # ISO image ships both the SoftHSM2 and YubiHSM 2 PKCS#11 modules.  The
-  # operator's profile.toml (on the USB stick) sets module_path to pick which
-  # module the ceremony binary loads:
-  #
-  #   SoftHSM2 (dev/testing):
-  #     module_path = "/run/current-system/sw/lib/softhsm/libsofthsm2.so"
-  #
-  #   YubiHSM 2 (production hardware):
-  #     module_path = "/run/current-system/sw/lib/pkcs11/yubihsm_pkcs11.so"
-  #
   # ANODIZE_PKCS11_MODULES is an allowlist — the binary refuses any
   # module_path whose realpath is not in this colon-separated list.
+  # The dev ISO (dev-iso.nix) adds SoftHSM2 to the allowlist and packages.
 
   environment.variables = {
-    SOFTHSM2_MODULE     = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
     YUBIHSM_PKCS11_CONF = "/etc/yubihsm_pkcs11.conf";
-    ANODIZE_PKCS11_MODULES = lib.concatStringsSep ":" [
-      "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so"
-      "${pkgs.yubihsm-shell}/lib/pkcs11/yubihsm_pkcs11.so"
-    ];
+    ANODIZE_PKCS11_MODULES = "${pkgs.yubihsm-shell}/lib/pkcs11/yubihsm_pkcs11.so";
   };
 
   # Include a sample profile so operators know what to put on their USB stick.
@@ -167,9 +151,7 @@ in
 
     [hsm]
     # YubiHSM 2 (production hardware — PIN format: <key-id-hex>:<passphrase>):
-    #   module_path = "/run/current-system/sw/lib/pkcs11/yubihsm_pkcs11.so"
-    # SoftHSM2 (dev/testing):
-    module_path  = "/run/current-system/sw/lib/softhsm/libsofthsm2.so"
+    module_path  = "/run/current-system/sw/lib/pkcs11/yubihsm_pkcs11.so"
     token_label  = "anodize-root-2026"
     key_label    = "root-key"
     key_spec     = "ecdsa-p384"

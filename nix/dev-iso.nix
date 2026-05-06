@@ -60,9 +60,22 @@ in
     openssh.authorizedKeys.keyFiles = [ ../scripts/dev-ssh-key.pub ];
   };
 
-  # ── Diagnostic packages (dev ISOs) ────────────────────────────────────────
+  # ── Dev packages ────────────────────────────────────────────────────────────
 
-  environment.systemPackages = [ pkgs.sg3_utils ];
+  environment.systemPackages = [
+    pkgs.sg3_utils              # SCSI diagnostic tools
+    pkgs.softhsm                # SoftHSM2 PKCS#11 module (dev/testing)
+    pkgs.opensc                 # PKCS#11 utilities (pkcs11-tool, etc.)
+  ];
+
+  # Add SoftHSM2 to the PKCS#11 allowlist alongside the prod YubiHSM entry.
+  environment.variables = {
+    SOFTHSM2_MODULE = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
+    ANODIZE_PKCS11_MODULES = lib.mkForce (lib.concatStringsSep ":" [
+      "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so"
+      "${pkgs.yubihsm-shell}/lib/pkcs11/yubihsm_pkcs11.so"
+    ]);
+  };
 
   # cdemu-daemon: userspace optical drive emulator, run as a user service.
   systemd.user.services.cdemu-daemon = {
