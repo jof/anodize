@@ -8,7 +8,7 @@ For project goals, domain concepts, and the ceremony pipeline, see the [overview
 
 ### Dynamic linking is required
 
-PKCS#11 is a `dlopen`-at-runtime contract. The whole point of the abstraction is that the same binary loads `libsofthsm2.so` in dev and `yubihsm_pkcs11.so` in prod by changing a path in a config file. So:
+PKCS#11 is a `dlopen`-at-runtime contract. The whole point of the abstraction is that the same binary loads `libsofthsm2.so` in dev and `yubihsm_pkcs11.so` in prod by changing a module name in a config file. So:
 
 - The Anodize binary is built against **musl** and linked statically *for everything except the C runtime's dynamic loader*. This gives a single self-contained ELF that still has `dlopen`.
 - The ISO ships the PKCS#11 `.so` modules as separate files alongside the binary.
@@ -29,7 +29,7 @@ country      = "US"
 cdp_url      = "http://crl.example.com/root.crl"
 
 [hsm]
-module_path  = "/usr/lib/softhsm/libsofthsm2.so"   # or yubihsm_pkcs11.so
+module_name  = "libsofthsm2.so"   # or "yubihsm_pkcs11.so"
 token_label  = "anodize-root-2026"
 key_label    = "root-key"
 key_spec     = "ecdsa-p384"

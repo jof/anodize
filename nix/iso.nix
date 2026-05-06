@@ -151,7 +151,7 @@ in
 
     [hsm]
     # YubiHSM 2 (production hardware — PIN format: <key-id-hex>:<passphrase>):
-    module_path  = "/run/current-system/sw/lib/pkcs11/yubihsm_pkcs11.so"
+    module_name  = "yubihsm_pkcs11.so"
     token_label  = "anodize-root-2026"
     key_label    = "root-key"
     key_spec     = "ecdsa-p384"

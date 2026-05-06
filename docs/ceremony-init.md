@@ -45,7 +45,7 @@ country      = "US"
 cdp_url      = "http://crl.example.com/root.crl"  # must be reachable after ceremony
 
 [hsm]
-module_path  = "/run/current-system/sw/lib/yubihsm_pkcs11.so"
+module_name  = "yubihsm_pkcs11.so"
 token_label  = "anodize-root-2026"   # must match the token you initialised
 key_label    = "root-key"
 key_spec     = "ecdsa-p384"
