@@ -151,7 +151,7 @@ pub fn run(args: InitArgs) -> Result<()> {
 fn build_profile_toml(args: &InitArgs) -> String {
     let module_path = match args.mode {
         HsmMode::Softhsm2 => "/run/current-system/sw/lib/softhsm/libsofthsm2.so",
-        HsmMode::Yubihsm => "/run/current-system/sw/lib/yubihsm_pkcs11.so",
+        HsmMode::Yubihsm => "/run/current-system/sw/lib/pkcs11/yubihsm_pkcs11.so",
     };
 
     let cdp_line = match &args.cdp_url {
