@@ -27,22 +27,22 @@ use crate::modes::ceremony::CeremonyState;
 use crate::modes::setup::SetupPhase;
 
 impl App {
-    // ── USB scan tick ─────────────────────────────────────────────────────────
+    // ── Shuttle scan tick ─────────────────────────────────────────────────────
 
-    pub(crate) fn tick_wait_usb(&mut self) {
+    pub(crate) fn tick_wait_shuttle(&mut self) {
         let diagnostics = media::usb_scan_diagnostics();
         let candidates = media::scan_usb_partitions();
         if candidates.is_empty() {
             self.set_status(format!("Scanning… {diagnostics}"));
             return;
         }
-        match media::find_profile_usb(&candidates, &self.usb_mountpoint) {
+        match media::find_profile_usb(&candidates, &self.shuttle_mount) {
             Ok(Some((profile_path, dev_path))) => {
                 let _ = dev_path;
                 #[cfg(feature = "dev-softhsm-usb")]
-                if let Err(e) = configure_softhsm_from_usb(&self.usb_mountpoint) {
+                if let Err(e) = configure_softhsm_from_shuttle(&self.shuttle_mount) {
                     self.set_status(format!("SoftHSM2 USB setup failed: {e}"));
-                    let _ = media::unmount(&self.usb_mountpoint);
+                    let _ = media::unmount(&self.shuttle_mount);
                     return;
                 }
                 let raw_bytes = std::fs::read(&profile_path).unwrap_or_default();
@@ -54,12 +54,12 @@ impl App {
                                 "ERROR: pin_source is not 'prompt' — unsuitable for \
                                  ceremony. Fix profile.toml and re-insert USB.",
                             );
-                            let _ = media::unmount(&self.usb_mountpoint);
+                            let _ = media::unmount(&self.shuttle_mount);
                             return;
                         }
                         if let Err(e) = profile.hsm.check_module_allowed() {
                             self.set_status(format!("PKCS#11 module not allowed: {e}"));
-                            let _ = media::unmount(&self.usb_mountpoint);
+                            let _ = media::unmount(&self.shuttle_mount);
                             return;
                         }
                         self.profile = Some(profile);
@@ -69,7 +69,7 @@ impl App {
                     }
                     Err(e) => {
                         self.set_status(format!("Profile parse error: {e}"));
-                        let _ = media::unmount(&self.usb_mountpoint);
+                        let _ = media::unmount(&self.shuttle_mount);
                     }
                 }
             }
@@ -126,6 +126,18 @@ impl App {
                     self.optical_dev = Some(dev.clone());
                     if !need_blank {
                         self.prior_sessions = scan.sessions;
+                        self.session_state =
+                            load_session_state_from_sessions(&self.prior_sessions);
+                        if let Some(ref state) = self.session_state {
+                            // Populate revocation list and CRL number from state
+                            self.crl_number = Some(state.crl_number);
+                            tracing::info!(
+                                version = state.version,
+                                crl_number = state.crl_number,
+                                custodians = state.sss.custodians.len(),
+                                "STATE.JSON loaded from disc"
+                            );
+                        }
                     }
                     self.set_status(if need_blank {
                         format!(
@@ -183,7 +195,7 @@ impl App {
                             self.prior_sessions.push(intent);
                         }
                         match self.current_op.clone() {
-                            Some(Operation::GenerateRootCa) => {
+                            Some(Operation::InitRoot) | Some(Operation::GenerateRootCa) => {
                                 match self.pending_key_action {
                                     Some(1) => self.do_generate_and_build(),
                                     Some(2) => self.do_find_and_build(),
@@ -222,10 +234,12 @@ impl App {
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "/run/anodize/staging".into());
                         let op_label = match self.current_op {
+                            Some(Operation::InitRoot) => "Root init",
                             Some(Operation::GenerateRootCa) => "Root CA + CRL",
                             Some(Operation::SignCsr) => "Intermediate cert",
                             Some(Operation::RevokeCert) => "Revocation + CRL",
                             Some(Operation::IssueCrl) => "CRL refresh",
+                            Some(Operation::RekeyShares) => "Re-key shares",
                             Some(Operation::MigrateDisc) => "Disc migration",
                             None => "session",
                         };
@@ -281,6 +295,18 @@ impl App {
     pub(crate) fn do_select_operation(&mut self, op: Operation) {
         self.current_op = Some(op.clone());
         match op {
+            Operation::InitRoot => {
+                if self.session_state.is_some() {
+                    self.set_status("Root already initialized on this disc. Use RekeyShares to change PIN.");
+                    self.current_op = None;
+                    self.ceremony.state = CeremonyState::OperationSelect;
+                    return;
+                }
+                self.init_root_custodian_buf.clear();
+                self.init_root_custodian_names.clear();
+                self.ceremony.state = CeremonyState::InitRootCustodianSetup;
+                self.set_status("Enter custodian names (comma-separated), then press Enter.");
+            }
             Operation::GenerateRootCa => {
                 self.ceremony.state = CeremonyState::KeyAction;
                 self.set_status(
@@ -307,16 +333,128 @@ impl App {
                     self.set_status("Review CRL details. [1] to proceed, [q] to cancel.");
                 }
             }
+            Operation::RekeyShares => {
+                // TODO: implement RekeyShares ceremony flow
+                self.set_status("RekeyShares not yet implemented.");
+            }
             Operation::MigrateDisc => {
                 self.do_migrate_confirm();
             }
         }
     }
 
+    // ── InitRoot: confirm custodians → generate PIN → split → reveal ────────
+
+    pub(crate) fn do_init_root_confirm_custodians(&mut self) {
+        // Parse custodian names from comma-separated input
+        let names: Vec<String> = self
+            .init_root_custodian_buf
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if names.len() < 2 {
+            self.set_status("Need at least 2 custodians for SSS (threshold >= 2).");
+            return;
+        }
+        if names.len() > 255 {
+            self.set_status("Maximum 255 custodians.");
+            return;
+        }
+
+        let total = names.len() as u8;
+        // Default threshold: 2-of-N (minimum for SSS)
+        let threshold = 2u8;
+
+        // Generate random 32-byte PIN
+        let mut pin_bytes = vec![0u8; 32];
+        if let Err(e) = getrandom::getrandom(&mut pin_bytes) {
+            self.set_status(format!("CSPRNG failure: {e}"));
+            return;
+        }
+
+        // Split into shares
+        let shares = match anodize_sss::split(&pin_bytes, threshold, total) {
+            Ok(s) => s,
+            Err(e) => {
+                self.set_status(format!("SSS split failed: {e}"));
+                return;
+            }
+        };
+
+        // Compute commitments and PIN verify hash
+        let mut share_commitments = Vec::with_capacity(shares.len());
+        for (share, name) in shares.iter().zip(names.iter()) {
+            let commitment = share.commitment(name);
+            share_commitments.push(hex::encode(commitment));
+        }
+
+        let pin_verify_hash = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(&pin_bytes);
+            hex::encode(h.finalize())
+        };
+
+        // Store the PIN hex for HSM init later (held in memory only)
+        self.pin_buf = hex::encode(&pin_bytes);
+
+        // Build custodian metadata
+        let custodians: Vec<anodize_config::state::Custodian> = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| anodize_config::state::Custodian {
+                name: name.clone(),
+                index: (i + 1) as u8,
+            })
+            .collect();
+
+        // Prepare partial SessionState (root_cert fields filled after HSM keygen)
+        use anodize_config::state::{SessionState, SssMetadata, STATE_VERSION};
+        let state = SessionState {
+            version: STATE_VERSION,
+            root_cert_sha256: "0".repeat(64), // placeholder, updated after keygen
+            root_cert_der_b64: String::new(),  // placeholder
+            sss: SssMetadata {
+                threshold,
+                total,
+                custodians,
+                pin_verify_hash,
+                share_commitments,
+            },
+            revocation_list: vec![],
+            crl_number: 0,
+            last_audit_hash: String::new(),
+        };
+
+        self.session_state = Some(state);
+        self.init_root_custodian_names = names.clone();
+        self.init_root_shares = Some(shares.clone());
+
+        // Create ShareReveal component
+        self.share_reveal = Some(crate::components::share_reveal::ShareReveal::new(
+            shares,
+            &names,
+        ));
+
+        self.ceremony.state = CeremonyState::InitRootShareReveal;
+        self.set_status(format!(
+            "PIN generated. Distributing {total} shares ({threshold}-of-{total}). Hand device to each custodian."
+        ));
+
+        tracing::info!(
+            threshold,
+            total,
+            custodians = ?self.init_root_custodian_names,
+            "InitRoot: SSS split complete, entering share reveal"
+        );
+    }
+
     // ── Mode 2: Load CSR ──────────────────────────────────────────────────────
 
     fn do_load_csr(&mut self) {
-        let csr_path = self.usb_mountpoint.join("csr.der");
+        let csr_path = self.shuttle_mount.join("csr.der");
         let csr_bytes = match std::fs::read(&csr_path) {
             Ok(b) => b,
             Err(e) => {
@@ -594,6 +732,19 @@ impl App {
 
         let fp = sha256_fingerprint(&cert_der);
         self.fingerprint = Some(fp);
+
+        // Update SessionState with root cert info (for InitRoot flow)
+        if let Some(ref mut state) = self.session_state {
+            use base64::Engine;
+            let cert_hash = {
+                use sha2::{Digest, Sha256};
+                hex::encode(Sha256::digest(&cert_der))
+            };
+            state.root_cert_sha256 = cert_hash;
+            state.root_cert_der_b64 =
+                base64::engine::general_purpose::STANDARD.encode(&cert_der);
+        }
+
         self.cert_der = Some(cert_der);
         self.crl_der = Some(crl_der);
         self.ceremony.state = CeremonyState::CertPreview;
@@ -933,7 +1084,7 @@ impl App {
         genesis_hex: &str,
     ) -> Option<(String, serde_json::Value)> {
         match &self.current_op {
-            Some(Operation::GenerateRootCa) => {
+            Some(Operation::InitRoot) | Some(Operation::GenerateRootCa) => {
                 let (cn, org, country) = self
                     .profile
                     .as_ref()
@@ -1071,13 +1222,53 @@ impl App {
         }
     }
 
+    /// Build a STATE.JSON IsoFile from the current session_state.
+    /// Returns None if no session state is set.
+    fn build_state_json_file(&self) -> Option<IsoFile> {
+        self.session_state.as_ref().map(|state| IsoFile {
+            name: anodize_config::state::STATE_FILENAME.into(),
+            data: state.to_json(),
+        })
+    }
+
+    /// Update session_state to reflect the outcome of the current operation.
+    /// Must be called before build_state_json_file in build_burn_session.
+    fn update_session_state_for_record(&mut self, audit_bytes: &[u8]) {
+        // Compute last audit hash from the final line
+        let last_hash = audit_bytes
+            .split(|&b| b == b'\n')
+            .rev()
+            .find(|line| !line.is_empty())
+            .and_then(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+            .and_then(|v| v.get("entry_hash").and_then(|h| h.as_str().map(String::from)))
+            .unwrap_or_default();
+
+        if let Some(ref mut state) = self.session_state {
+            state.last_audit_hash = last_hash;
+
+            // Update CRL number
+            if let Some(n) = self.crl_number {
+                state.crl_number = n;
+            }
+
+            // Update revocation list
+            if !self.revocation_list.is_empty() {
+                state.revocation_list = self.revocation_list.clone();
+            }
+        }
+    }
+
     /// Build the SessionEntry for the current operation's disc burn.
     fn build_burn_session(&mut self, staging: &std::path::Path) -> Option<SessionEntry> {
         let ts = self.confirmed_time.unwrap_or_else(SystemTime::now);
         let dir_name = media::session_dir_name(ts) + "-record";
 
         match self.current_op.clone() {
-            Some(Operation::GenerateRootCa) => {
+            Some(Operation::RekeyShares) => {
+                // TODO: implement disc session for RekeyShares
+                return None;
+            }
+            Some(Operation::InitRoot) | Some(Operation::GenerateRootCa) => {
                 let cert_der = self.cert_der.clone()?;
                 let crl_der = self.crl_der.clone()?;
 
@@ -1127,23 +1318,29 @@ impl App {
                     }
                 };
 
+                self.update_session_state_for_record(&audit_bytes);
+                let mut files = vec![
+                    IsoFile {
+                        name: "ROOT.CRT".into(),
+                        data: cert_der,
+                    },
+                    IsoFile {
+                        name: "ROOT.CRL".into(),
+                        data: crl_der,
+                    },
+                    IsoFile {
+                        name: "AUDIT.LOG".into(),
+                        data: audit_bytes,
+                    },
+                ];
+                if let Some(state_file) = self.build_state_json_file() {
+                    files.push(state_file);
+                }
+
                 Some(SessionEntry {
                     dir_name,
                     timestamp: ts,
-                    files: vec![
-                        IsoFile {
-                            name: "ROOT.CRT".into(),
-                            data: cert_der,
-                        },
-                        IsoFile {
-                            name: "ROOT.CRL".into(),
-                            data: crl_der,
-                        },
-                        IsoFile {
-                            name: "AUDIT.LOG".into(),
-                            data: audit_bytes,
-                        },
-                    ],
+                    files,
                 })
             }
 
@@ -1188,19 +1385,25 @@ impl App {
                     }
                 };
 
+                self.update_session_state_for_record(&audit_bytes);
+                let mut files = vec![
+                    IsoFile {
+                        name: "INTERMEDIATE.CRT".into(),
+                        data: cert_der,
+                    },
+                    IsoFile {
+                        name: "AUDIT.LOG".into(),
+                        data: audit_bytes,
+                    },
+                ];
+                if let Some(state_file) = self.build_state_json_file() {
+                    files.push(state_file);
+                }
+
                 Some(SessionEntry {
                     dir_name,
                     timestamp: ts,
-                    files: vec![
-                        IsoFile {
-                            name: "INTERMEDIATE.CRT".into(),
-                            data: cert_der,
-                        },
-                        IsoFile {
-                            name: "AUDIT.LOG".into(),
-                            data: audit_bytes,
-                        },
-                    ],
+                    files,
                 })
             }
 
@@ -1255,23 +1458,29 @@ impl App {
                     }
                 };
 
+                self.update_session_state_for_record(&audit_bytes);
+                let mut files = vec![
+                    IsoFile {
+                        name: "REVOKED.TOML".into(),
+                        data: revoked_toml,
+                    },
+                    IsoFile {
+                        name: "ROOT.CRL".into(),
+                        data: crl_der,
+                    },
+                    IsoFile {
+                        name: "AUDIT.LOG".into(),
+                        data: audit_bytes,
+                    },
+                ];
+                if let Some(state_file) = self.build_state_json_file() {
+                    files.push(state_file);
+                }
+
                 Some(SessionEntry {
                     dir_name,
                     timestamp: ts,
-                    files: vec![
-                        IsoFile {
-                            name: "REVOKED.TOML".into(),
-                            data: revoked_toml,
-                        },
-                        IsoFile {
-                            name: "ROOT.CRL".into(),
-                            data: crl_der,
-                        },
-                        IsoFile {
-                            name: "AUDIT.LOG".into(),
-                            data: audit_bytes,
-                        },
-                    ],
+                    files,
                 })
             }
 
@@ -1308,19 +1517,25 @@ impl App {
                     }
                 };
 
+                self.update_session_state_for_record(&audit_bytes);
+                let mut files = vec![
+                    IsoFile {
+                        name: "ROOT.CRL".into(),
+                        data: crl_der,
+                    },
+                    IsoFile {
+                        name: "AUDIT.LOG".into(),
+                        data: audit_bytes,
+                    },
+                ];
+                if let Some(state_file) = self.build_state_json_file() {
+                    files.push(state_file);
+                }
+
                 Some(SessionEntry {
                     dir_name,
                     timestamp: ts,
-                    files: vec![
-                        IsoFile {
-                            name: "ROOT.CRL".into(),
-                            data: crl_der,
-                        },
-                        IsoFile {
-                            name: "AUDIT.LOG".into(),
-                            data: audit_bytes,
-                        },
-                    ],
+                    files,
                 })
             }
 
@@ -1339,55 +1554,61 @@ impl App {
         }
     }
 
-    // ── USB write ─────────────────────────────────────────────────────────────
+    // ── Shuttle write ─────────────────────────────────────────────────────
 
-    pub(crate) fn do_write_usb(&mut self) {
-        let usb = self.usb_mountpoint.clone();
+    pub(crate) fn do_write_shuttle(&mut self) {
+        let shuttle = self.shuttle_mount.clone();
         let staging_log = PathBuf::from("/run/anodize/staging/audit.log");
 
         match self.current_op.clone() {
             Some(Operation::GenerateRootCa) => {
                 if let Some(cert_der) = &self.cert_der {
-                    if let Err(e) = std::fs::write(usb.join("root.crt"), cert_der) {
-                        self.set_status(format!("USB write failed (root.crt): {e}"));
+                    if let Err(e) = std::fs::write(shuttle.join("root.crt"), cert_der) {
+                        self.set_status(format!("Shuttle write failed (root.crt): {e}"));
                         return;
                     }
                 }
                 if let Some(crl_der) = &self.crl_der {
-                    if let Err(e) = std::fs::write(usb.join("root.crl"), crl_der) {
-                        self.set_status(format!("USB write failed (root.crl): {e}"));
+                    if let Err(e) = std::fs::write(shuttle.join("root.crl"), crl_der) {
+                        self.set_status(format!("Shuttle write failed (root.crl): {e}"));
                         return;
                     }
                 }
             }
             Some(Operation::SignCsr) => {
                 if let Some(cert_der) = &self.cert_der {
-                    if let Err(e) = std::fs::write(usb.join("intermediate.crt"), cert_der) {
-                        self.set_status(format!("USB write failed (intermediate.crt): {e}"));
+                    if let Err(e) = std::fs::write(shuttle.join("intermediate.crt"), cert_der) {
+                        self.set_status(format!("Shuttle write failed (intermediate.crt): {e}"));
                         return;
                     }
                 }
             }
             Some(Operation::RevokeCert) => {
                 let revoked_toml = serialize_revocation_list(&self.revocation_list);
-                if let Err(e) = std::fs::write(usb.join("revoked.toml"), &revoked_toml) {
-                    self.set_status(format!("USB write failed (revoked.toml): {e}"));
+                if let Err(e) = std::fs::write(shuttle.join("revoked.toml"), &revoked_toml) {
+                    self.set_status(format!("Shuttle write failed (revoked.toml): {e}"));
                     return;
                 }
                 if let Some(crl_der) = &self.crl_der {
-                    if let Err(e) = std::fs::write(usb.join("root.crl"), crl_der) {
-                        self.set_status(format!("USB write failed (root.crl): {e}"));
+                    if let Err(e) = std::fs::write(shuttle.join("root.crl"), crl_der) {
+                        self.set_status(format!("Shuttle write failed (root.crl): {e}"));
                         return;
                     }
                 }
             }
             Some(Operation::IssueCrl) => {
                 if let Some(crl_der) = &self.crl_der {
-                    if let Err(e) = std::fs::write(usb.join("root.crl"), crl_der) {
-                        self.set_status(format!("USB write failed (root.crl): {e}"));
+                    if let Err(e) = std::fs::write(shuttle.join("root.crl"), crl_der) {
+                        self.set_status(format!("Shuttle write failed (root.crl): {e}"));
                         return;
                     }
                 }
+            }
+            Some(Operation::InitRoot) | Some(Operation::RekeyShares) => {
+                // No shuttle artifacts for these operations
+                self.ceremony.state = CeremonyState::Done;
+                self.set_status("Operation complete.");
+                return;
             }
             Some(Operation::MigrateDisc) | None => {
                 self.ceremony.state = CeremonyState::Done;
@@ -1396,15 +1617,15 @@ impl App {
             }
         }
 
-        // Copy audit log to USB for all non-migration operations
-        let usb_log = usb.join("audit.log");
-        if let Err(e) = std::fs::copy(&staging_log, &usb_log) {
-            self.set_status(format!("Audit log copy to USB failed: {e}"));
+        // Copy audit log to shuttle for all artifact-producing operations
+        let shuttle_log = shuttle.join("audit.log");
+        if let Err(e) = std::fs::copy(&staging_log, &shuttle_log) {
+            self.set_status(format!("Audit log copy to shuttle failed: {e}"));
             return;
         }
 
         self.ceremony.state = CeremonyState::Done;
-        self.set_status(format!("USB write complete: {}", usb.display()));
+        self.set_status(format!("Shuttle write complete: {}", shuttle.display()));
     }
 
     // ── Content rendering (avoids borrow splitting) ──────────────────────────
@@ -1414,6 +1635,19 @@ impl App {
     }
 
     pub(crate) fn render_ceremony_content(&self, frame: &mut Frame, area: Rect) {
+        // ShareReveal / ShareInput overlay for InitRoot states
+        if self.ceremony.state == CeremonyState::InitRootShareReveal {
+            if let Some(ref reveal) = self.share_reveal {
+                reveal.render(frame, area);
+                return;
+            }
+        }
+        if self.ceremony.state == CeremonyState::InitRootShareVerify {
+            if let Some(ref input) = self.share_input {
+                input.render(frame, area);
+                return;
+            }
+        }
         self.ceremony.render_with_app(frame, area, self);
     }
 }

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::SystemTime;
 
+use anodize_config::state::SessionState;
 use anodize_config::{Profile, RevocationEntry};
 use anodize_hsm::{HsmActor, KeyHandle};
 use anyhow::Result;
@@ -16,6 +17,7 @@ use ratatui::{
 
 use crate::action::{Action, Mode, Operation};
 use crate::components::confirm_dialog::ConfirmDialog;
+use crate::modes::ceremony::CeremonyState;
 use crate::components::mode_bar::ModeBar;
 use crate::components::phase_bar::PhaseBar;
 use crate::components::status_bar::{HwState, StatusBar};
@@ -38,7 +40,7 @@ pub struct App {
     // Hardware state (polled on tick)
     pub hsm_state: HwState,
     pub disc_state: HwState,
-    pub usb_state: HwState,
+    pub shuttle_state: HwState,
 
     // Mode components
     pub setup: SetupMode,
@@ -50,12 +52,12 @@ pub struct App {
 
     // CLI flags
     pub skip_disc: bool,
-    pub usb_mountpoint: PathBuf,
+    pub shuttle_mount: PathBuf,
 
     // Clock
     pub confirmed_time: Option<SystemTime>,
 
-    // USB / Profile
+    // Shuttle / Profile
     pub profile: Option<Profile>,
     pub profile_toml_bytes: Option<Vec<u8>>,
 
@@ -72,6 +74,9 @@ pub struct App {
 
     // CRL held in RAM until disc write succeeds (Modes 1, 3, 4)
     pub crl_der: Option<Vec<u8>>,
+
+    // Ceremony state loaded from disc (STATE.JSON)
+    pub session_state: Option<SessionState>,
 
     // Root cert DER loaded from disc for modes 2/3/4
     pub root_cert_der: Option<Vec<u8>>,
@@ -113,12 +118,19 @@ pub struct App {
     // Two-key confirmation dialog (modal overlay)
     pub confirm_dialog: Option<ConfirmDialog>,
 
+    // InitRoot ceremony state
+    pub init_root_custodian_buf: String,
+    pub init_root_shares: Option<Vec<anodize_sss::Share>>,
+    pub init_root_custodian_names: Vec<String>,
+    pub share_input: Option<crate::components::share_input::ShareInput>,
+    pub share_reveal: Option<crate::components::share_reveal::ShareReveal>,
+
     // Content area vertical scroll offset
     pub content_scroll: u16,
 }
 
 impl App {
-    pub fn new(usb_mountpoint: PathBuf, skip_disc: bool) -> Self {
+    pub fn new(shuttle_mount: PathBuf, skip_disc: bool) -> Self {
         Self {
             running: true,
             mode: Mode::Setup,
@@ -129,7 +141,7 @@ impl App {
 
             hsm_state: HwState::Absent,
             disc_state: HwState::Absent,
-            usb_state: HwState::Absent,
+            shuttle_state: HwState::Absent,
 
             setup: SetupMode::new(),
             ceremony: CeremonyMode::new(),
@@ -137,7 +149,7 @@ impl App {
 
             setup_complete: false,
             skip_disc,
-            usb_mountpoint,
+            shuttle_mount,
 
             confirmed_time: None,
             profile: None,
@@ -148,6 +160,7 @@ impl App {
             cert_der: None,
             fingerprint: None,
             crl_der: None,
+            session_state: None,
             root_cert_der: None,
             csr_der: None,
             csr_subject_display: None,
@@ -170,6 +183,11 @@ impl App {
             pending_key_action: None,
             pending_intent_session: None,
             confirm_dialog: None,
+            init_root_custodian_buf: String::new(),
+            init_root_shares: None,
+            init_root_custodian_names: Vec::new(),
+            share_input: None,
+            share_reveal: None,
             content_scroll: 0,
         }
     }
@@ -287,6 +305,50 @@ impl App {
             _ => {}
         }
 
+        // InitRoot share reveal/verify: delegate to owned components
+        if self.mode == Mode::Ceremony {
+            if self.ceremony.state == CeremonyState::InitRootShareReveal {
+                if key.code == KeyCode::Esc {
+                    return Action::InitRootAbort;
+                }
+                if let Some(ref mut reveal) = self.share_reveal {
+                    if reveal.handle_key(key) {
+                        // All shares revealed → advance to verification round
+                        self.share_reveal = None;
+                        if let Some(ref state) = self.session_state {
+                            self.share_input = Some(
+                                crate::components::share_input::ShareInput::new(
+                                    state.sss.clone(),
+                                    32, // PIN is 32 bytes
+                                ),
+                            );
+                        }
+                        self.ceremony.state = CeremonyState::InitRootShareVerify;
+                        self.set_status("Verification round: each custodian re-enters their share.");
+                    }
+                }
+                return Action::Noop;
+            }
+            if self.ceremony.state == CeremonyState::InitRootShareVerify {
+                if key.code == KeyCode::Esc {
+                    return Action::InitRootAbort;
+                }
+                if let Some(ref mut input) = self.share_input {
+                    input.handle_key(key);
+                    if input.quorum_reached() {
+                        self.share_input = None;
+                        self.init_root_shares = None;
+                        // Verification passed → proceed to HSM key generation
+                        self.ceremony.state = CeremonyState::KeyAction;
+                        self.set_status(
+                            "Shares verified. [1] Generate root keypair  [2] Use existing key",
+                        );
+                    }
+                }
+                return Action::Noop;
+            }
+        }
+
         // Delegate to the active mode's component
         match self.mode {
             Mode::Setup => self.setup.handle_key_event(key),
@@ -307,11 +369,11 @@ impl App {
         }
     }
 
-    /// Background polling for disc/USB state + burn completion.
+    /// Background polling for disc/shuttle state + burn completion.
     fn background_tick(&mut self) {
-        // USB scan during WaitUsb
-        if self.mode == Mode::Setup && self.setup.phase == SetupPhase::WaitUsb {
-            self.tick_wait_usb();
+        // Shuttle scan during WaitShuttle
+        if self.mode == Mode::Setup && self.setup.phase == SetupPhase::WaitShuttle {
+            self.tick_wait_shuttle();
         }
 
         // Disc scan during WaitDisc
@@ -349,12 +411,12 @@ impl App {
             // Setup flow
             Action::ConfirmClock => {
                 self.confirmed_time = Some(SystemTime::now());
-                self.setup.phase = SetupPhase::WaitUsb;
-                self.set_status("Scanning for USB stick with profile.toml…");
+                self.setup.phase = SetupPhase::WaitShuttle;
+                self.set_status("Scanning for shuttle USB with profile.toml…");
             }
             Action::ProfileLoaded => {
                 self.setup.phase = SetupPhase::ProfileLoaded;
-                self.set_status("Profile loaded from USB.");
+                self.set_status("Profile loaded from shuttle.");
             }
             Action::AdvanceToPinEntry => {
                 self.pin_buf.clear();
@@ -479,7 +541,7 @@ impl App {
                 self.set_status("Enter certificate serial number (digits). Press Enter.");
             }
 
-            // Disc/USB
+            // Disc/Shuttle
             Action::IntentBurnComplete => {}
             Action::DoWriteIntent => {
                 self.do_write_intent();
@@ -488,8 +550,29 @@ impl App {
                 self.do_start_burn();
             }
             Action::BurnComplete => {}
-            Action::DoWriteUsb => {
-                self.do_write_usb();
+            Action::DoWriteShuttle => {
+                self.do_write_shuttle();
+            }
+
+            // InitRoot ceremony
+            Action::InitRootInputChar(c) => {
+                self.init_root_custodian_buf.push(c);
+            }
+            Action::InitRootInputBackspace => {
+                self.init_root_custodian_buf.pop();
+            }
+            Action::InitRootConfirmCustodians => {
+                self.do_init_root_confirm_custodians();
+            }
+            Action::InitRootAbort => {
+                self.init_root_custodian_buf.clear();
+                self.init_root_shares = None;
+                self.init_root_custodian_names.clear();
+                self.share_input = None;
+                self.share_reveal = None;
+                self.current_op = None;
+                self.ceremony.state = CeremonyState::OperationSelect;
+                self.set_status("InitRoot aborted.");
             }
 
             // Migration
@@ -625,7 +708,7 @@ impl App {
         let status_bar = StatusBar {
             hsm: &self.hsm_state,
             disc: &self.disc_state,
-            usb: &self.usb_state,
+            usb: &self.shuttle_state,
         };
         frame.render_widget(status_bar, chunks[4]);
 

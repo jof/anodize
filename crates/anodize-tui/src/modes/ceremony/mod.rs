@@ -27,6 +27,10 @@ pub enum CeremonyState {
     RevokePreview,
     // Mode 4: Issue CRL refresh
     CrlPreview,
+    // InitRoot flow
+    InitRootCustodianSetup,
+    InitRootShareReveal,
+    InitRootShareVerify,
     // Mode 5: Migrate
     MigrateConfirm,
     WaitMigrateTarget,
@@ -47,7 +51,10 @@ impl CeremonyMode {
 
     /// Whether the user is entering text (affects 'q' quit and 'L' log toggle).
     pub fn in_text_entry(&self) -> bool {
-        self.state == CeremonyState::RevokeInput
+        matches!(
+            self.state,
+            CeremonyState::RevokeInput | CeremonyState::InitRootCustodianSetup
+        )
     }
 
     pub fn is_waiting_migrate_target(&self) -> bool {
@@ -84,6 +91,9 @@ impl CeremonyMode {
             CeremonyState::RevokeInput => "Revoke",
             CeremonyState::RevokePreview => "Preview",
             CeremonyState::CrlPreview => "CRL",
+            CeremonyState::InitRootCustodianSetup => "Custodians",
+            CeremonyState::InitRootShareReveal => "Distribute",
+            CeremonyState::InitRootShareVerify => "Verify",
             CeremonyState::MigrateConfirm => "Verify",
             CeremonyState::WaitMigrateTarget => "Wait",
             CeremonyState::Done => "Done",
@@ -94,13 +104,19 @@ impl CeremonyMode {
     pub fn phase_index(&self) -> usize {
         match self.state {
             CeremonyState::OperationSelect => 0,
-            CeremonyState::KeyAction | CeremonyState::LoadCsr | CeremonyState::RevokeInput => 1,
+            CeremonyState::KeyAction
+            | CeremonyState::LoadCsr
+            | CeremonyState::RevokeInput
+            | CeremonyState::InitRootCustodianSetup => 1,
             CeremonyState::WritingIntent
             | CeremonyState::CsrPreview
             | CeremonyState::RevokePreview
             | CeremonyState::CrlPreview
-            | CeremonyState::MigrateConfirm => 2,
-            CeremonyState::CertPreview | CeremonyState::WaitMigrateTarget => 3,
+            | CeremonyState::MigrateConfirm
+            | CeremonyState::InitRootShareReveal => 2,
+            CeremonyState::CertPreview
+            | CeremonyState::WaitMigrateTarget
+            | CeremonyState::InitRootShareVerify => 3,
             CeremonyState::BurningDisc => 4,
             CeremonyState::DiscDone | CeremonyState::Done => 5,
         }
@@ -125,6 +141,9 @@ impl CeremonyMode {
             CeremonyState::RevokeInput => "Revoke Certificate",
             CeremonyState::RevokePreview => "Revocation Preview \u{2014} VERIFY BEFORE COMMITTING",
             CeremonyState::CrlPreview => "CRL Issuance Preview",
+            CeremonyState::InitRootCustodianSetup => "Root Init \u{2014} Custodian Setup",
+            CeremonyState::InitRootShareReveal => "Root Init \u{2014} Distribute Shares",
+            CeremonyState::InitRootShareVerify => "Root Init \u{2014} Verify Shares",
             CeremonyState::MigrateConfirm => "Disc Migration \u{2014} Verify Chain",
             CeremonyState::WaitMigrateTarget => "Insert Blank Target Disc",
             CeremonyState::Done => "Ceremony Complete",
@@ -149,15 +168,31 @@ impl CeremonyMode {
                 } else {
                     format!("  Disc: {n_sessions} prior session(s).")
                 };
+                let state_label = if let Some(ref state) = app.session_state {
+                    let names: Vec<&str> = state.sss.custodians.iter().map(|c| c.name.as_str()).collect();
+                    format!(
+                        "  STATE.JSON: v{}, {}/{} SSS, custodians: {}",
+                        state.version,
+                        state.sss.threshold,
+                        state.sss.total,
+                        names.join(", ")
+                    )
+                } else if n_sessions > 0 {
+                    "  STATE.JSON: not found (legacy disc)".into()
+                } else {
+                    "  STATE.JSON: (blank disc)".into()
+                };
                 vec![
                     String::new(),
                     disc_label,
+                    state_label,
                     String::new(),
                     "  [1]  Generate new root CA (fresh or resume key)".into(),
-                    "  [2]  Sign intermediate CSR  (requires csr.der on USB)".into(),
+                    "  [2]  Sign intermediate CSR  (requires csr.der on shuttle)".into(),
                     "  [3]  Revoke a certificate   (adds entry + issues new CRL)".into(),
                     "  [4]  Issue CRL refresh      (re-signs current revocation list)".into(),
                     "  [5]  Migrate disc           (copy all sessions to new disc)".into(),
+                    "  [6]  Init root              (SSS PIN split + fresh root CA)".into(),
                 ]
             }
 
@@ -346,10 +381,12 @@ impl CeremonyMode {
 
             CeremonyState::DiscDone => {
                 let op_label = match app.current_op {
+                    Some(Operation::InitRoot) => "Root init",
                     Some(Operation::GenerateRootCa) => "Root CA cert + initial CRL",
                     Some(Operation::SignCsr) => "Intermediate certificate",
                     Some(Operation::RevokeCert) => "Revocation record + CRL",
                     Some(Operation::IssueCrl) => "CRL refresh",
+                    Some(Operation::RekeyShares) => "Re-key shares",
                     Some(Operation::MigrateDisc) => "Disc migration",
                     None => "Session",
                 };
@@ -368,11 +405,47 @@ impl CeremonyMode {
                         lines.push("  [q]  Quit (migration complete; no USB export)".into());
                     }
                     _ => {
-                        lines.push("  [1]  Copy artifacts to USB".into());
-                        lines.push("  [q]  Quit without USB copy (disc is the primary record)".into());
+                        lines.push("  [1]  Copy artifacts to shuttle".into());
+                        lines.push("  [q]  Quit without shuttle copy (disc is the primary record)".into());
                     }
                 }
                 lines
+            }
+
+            CeremonyState::InitRootCustodianSetup => {
+                vec![
+                    String::new(),
+                    "  Configure Shamir Secret Sharing for the HSM PIN.".into(),
+                    String::new(),
+                    "  Custodian names (comma-separated):".into(),
+                    format!("  > {}|", app.init_root_custodian_buf),
+                    String::new(),
+                    "  After entering names, press [Enter] to set threshold.".into(),
+                    "  Default threshold: 2-of-N (minimum for SSS).".into(),
+                    String::new(),
+                    "  [Enter]  Confirm    [Esc]  Abort".into(),
+                ]
+            }
+
+            CeremonyState::InitRootShareReveal => {
+                vec![
+                    String::new(),
+                    "  Shares are being distributed to custodians.".into(),
+                    "  The share reveal component is active.".into(),
+                    String::new(),
+                    "  Hand the device to each custodian in turn.".into(),
+                    "  Press [S] to show/hide the share, [Enter] to confirm transcription.".into(),
+                ]
+            }
+
+            CeremonyState::InitRootShareVerify => {
+                vec![
+                    String::new(),
+                    "  Verification round: each custodian re-enters their share.".into(),
+                    "  This confirms transcription accuracy before HSM initialization.".into(),
+                    String::new(),
+                    "  The share input component is active.".into(),
+                ]
             }
 
             CeremonyState::MigrateConfirm => {
@@ -424,7 +497,7 @@ impl CeremonyMode {
                         Some(Operation::MigrateDisc) => {
                             "  Disc migration finished. Store new disc and archive old disc.".into()
                         }
-                        _ => format!("  USB  : {}  \u{2713}", app.usb_mountpoint.display()),
+                        _ => format!("  Shuttle : {}  \u{2713}", app.shuttle_mount.display()),
                     },
                     String::new(),
                     "  Remove and store both disc and USB separately.".into(),
@@ -446,6 +519,7 @@ impl Component for CeremonyMode {
                 KeyCode::Char('3') => Action::SelectOperation(Operation::RevokeCert),
                 KeyCode::Char('4') => Action::SelectOperation(Operation::IssueCrl),
                 KeyCode::Char('5') => Action::SelectOperation(Operation::MigrateDisc),
+                KeyCode::Char('6') => Action::SelectOperation(Operation::InitRoot),
                 _ => Action::Noop,
             },
 
@@ -513,7 +587,7 @@ impl Component for CeremonyMode {
 
             CeremonyState::DiscDone => {
                 if key.code == KeyCode::Char('1') {
-                    Action::DoWriteUsb
+                    Action::DoWriteShuttle
                 } else {
                     Action::Noop
                 }
@@ -534,6 +608,17 @@ impl Component for CeremonyMode {
                     Action::Noop
                 }
             }
+
+            CeremonyState::InitRootCustodianSetup => match key.code {
+                KeyCode::Char(c) => Action::InitRootInputChar(c),
+                KeyCode::Backspace => Action::InitRootInputBackspace,
+                KeyCode::Enter => Action::InitRootConfirmCustodians,
+                KeyCode::Esc => Action::InitRootAbort,
+                _ => Action::Noop,
+            },
+
+            CeremonyState::InitRootShareReveal => Action::Noop, // handled by ShareReveal component
+            CeremonyState::InitRootShareVerify => Action::Noop, // handled by ShareInput component
 
             CeremonyState::Done => Action::Noop,
         }
