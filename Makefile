@@ -422,16 +422,13 @@ ssh-dev:
 	@echo "Connected."
 	ssh $(SSH_OPTS) -p $(DEV_SSH_PORT) ceremony@localhost
 
-# Copy the cdemu BD-R disc content to dev-disc/ on the host (via 9p share).
-# cdemu's DeviceCreateBlank is purely in-memory — the filename is just metadata.
-# To inspect the disc after a ceremony, dd from /dev/sr0 to the 9p mount.
+# List per-session ISO files saved by the dev build to the 9p share.
+# The ceremony binary (with feature dev-softhsm-usb) writes each session's
+# ISO image to /run/anodize/share/session-NN.iso automatically.
 save-disc:
-	@echo "Copying BD-R disc image to $(DEV_DISC_DIR)/test-bdr.img …"
-	@ssh $(SSH_OPTS) -p $(DEV_SSH_PORT) debug@localhost \
-	    'sudo dd if=/dev/sr0 of=/run/anodize/share/test-bdr.img bs=64k status=progress 2>&1' \
-	  && echo "Saved." \
-	  || echo "Failed — is the VM running?"
-	@ls -lh $(DEV_DISC_DIR)/ 2>/dev/null || true
+	@echo "Session ISOs in $(DEV_DISC_DIR)/:"
+	@ls -lh $(DEV_DISC_DIR)/session-*.iso 2>/dev/null \
+	  || echo "  (none — run a ceremony first)"
 
 # Local QEMU — debug user (bash shell).
 ssh-dev-debug:

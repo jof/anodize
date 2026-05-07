@@ -399,6 +399,23 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
         "write_session_inner: ISO built, starting write at LBA {nwa}"
     );
 
+    // Dev only: persist each session ISO to the 9p share so the host can
+    // inspect the multi-session disc structure without fighting cdemu's
+    // in-memory-only storage.
+    #[cfg(feature = "dev-softhsm-usb")]
+    {
+        let session_num = info.sessions + 1; // next session number
+        let share = std::path::Path::new("/run/anodize/share");
+        if share.is_dir() {
+            let path = share.join(format!("session-{session_num:02}.iso"));
+            if let Err(e) = std::fs::write(&path, &image) {
+                tracing::warn!("dev: failed to save session ISO to {}: {e}", path.display());
+            } else {
+                tracing::info!("dev: saved session ISO to {}", path.display());
+            }
+        }
+    }
+
     // Write in 32-sector (64 KiB) chunks
     const CHUNK_SECTORS: usize = 32;
     let chunk_bytes = CHUNK_SECTORS * iso9660::SECTOR;
@@ -424,31 +441,22 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
     synchronize_cache(&sg).context("SYNCHRONIZE CACHE")?;
     tracing::info!("write_session_inner: SYNCHRONIZE CACHE done");
 
-    // Close track + session so the drive commits a proper session boundary.
+    // Always close track + session so the drive commits a proper session
+    // boundary.
     //
-    // BD-R SRM note: cdemu (and some real drives) finalize the disc when
-    // CLOSE SESSION is issued on BD-R, making subsequent sessions impossible.
-    // BD-R SRM commits data on SYNCHRONIZE CACHE so the session close is only
-    // needed for CD/DVD (where MODE SELECT configured multi-session above) or
-    // when finalizing the disc.  Skip CLOSE TRACK + CLOSE SESSION on BD-R for
-    // non-final writes to preserve appendability.
-    if is_final {
-        tracing::info!("write_session_inner: CLOSE TRACK");
-        close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
-        tracing::info!("write_session_inner: CLOSE TRACK done");
-        tracing::info!("write_session_inner: CLOSE DISC");
-        close_track_session(&sg, CloseTarget::Disc).context("CLOSE DISC")?;
-        tracing::info!("write_session_inner: CLOSE DISC done");
-    } else if !is_bdr {
-        tracing::info!("write_session_inner: CLOSE TRACK");
-        close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
-        tracing::info!("write_session_inner: CLOSE TRACK done");
-        tracing::info!("write_session_inner: CLOSE SESSION");
-        close_track_session(&sg, CloseTarget::Session).context("CLOSE SESSION")?;
-        tracing::info!("write_session_inner: CLOSE SESSION done");
-    } else {
-        tracing::info!("write_session_inner: skipping CLOSE TRACK/SESSION (BD-R SRM, non-final)");
-    }
+    // BD-R SRM note: real BD-R drives commit data on SYNCHRONIZE CACHE
+    // and closing the session is optional.  However cdemu needs the
+    // explicit CLOSE SESSION to commit the in-memory session into its
+    // disc model so subsequent reads and new sessions work.  Our patched
+    // cdemu no longer auto-finalizes BD-R on CLOSE SESSION (it only
+    // does so for CD media via mode page 0x05), so this is safe.
+    tracing::info!("write_session_inner: CLOSE TRACK");
+    close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
+    tracing::info!("write_session_inner: CLOSE TRACK done");
+
+    tracing::info!(is_final, "write_session_inner: CLOSE SESSION");
+    close_track_session(&sg, CloseTarget::Session).context("CLOSE SESSION")?;
+    tracing::info!("write_session_inner: CLOSE SESSION done");
 
     tracing::info!("write_session_inner: session write complete");
     Ok(())
