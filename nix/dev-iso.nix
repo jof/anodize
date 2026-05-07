@@ -84,11 +84,12 @@ in
   environment.variables.SOFTHSM2_MODULE = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
 
   # cdemu-daemon: userspace optical drive emulator, run as a user service.
-  # Auto-starts on login and pulls in cdemu-load-bdr to populate the drive.
+  # Started on demand by the sentinel's ensure_cdemu() via
+  # `systemctl --user start cdemu-load-bdr` (which pulls in cdemu-daemon
+  # via Requires=).  NOT wantedBy default.target to avoid session
+  # lifecycle issues when SSH sessions come and go.
   systemd.user.services.cdemu-daemon = {
     description = "CDEmu daemon — virtual optical drive";
-    wantedBy    = [ "default.target" ];
-    wants       = [ "cdemu-load-bdr.service" ];
     serviceConfig = {
       Type       = "simple";
       ExecStart  = "${cdemu-daemon}/bin/cdemu-daemon --num-devices=1";
