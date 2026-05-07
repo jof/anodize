@@ -137,6 +137,33 @@ impl Pkcs11Hsm {
         })
     }
 
+    /// Open the PKCS#11 module and use the first available slot with a token.
+    /// Use this for InitRoot when the desired token label does not yet exist.
+    pub fn open_first(module_path: &std::path::Path) -> Result<Self> {
+        let ctx = Pkcs11::new(module_path)?;
+        match ctx.initialize(CInitializeArgs::OsThreads) {
+            Ok(()) => {}
+            Err(cryptoki::error::Error::Pkcs11(
+                cryptoki::error::RvError::CryptokiAlreadyInitialized,
+                _,
+            )) => {}
+            Err(e) => return Err(HsmError::Pkcs11(e)),
+        }
+
+        let slot = ctx
+            .get_slots_with_token()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| HsmError::TokenNotFound("(no slots with tokens)".to_string()))?;
+
+        let session = ctx.open_rw_session(slot)?;
+
+        Ok(Self {
+            ctx,
+            session: Some(session),
+        })
+    }
+
     /// List all slots with a token present — useful for diagnostics and tests.
     pub fn list_slots(&self) -> Result<Vec<cryptoki::slot::Slot>> {
         Ok(self.ctx.get_slots_with_token()?)

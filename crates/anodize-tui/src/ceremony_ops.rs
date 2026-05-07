@@ -213,10 +213,16 @@ impl App {
                 }
                 match self.current_op.clone() {
                     Some(Operation::InitRoot) => {
-                        self.do_login_with_pin(&self.pin_buf.clone());
+                        // For key generation (action 1) the token may not
+                        // exist yet — open the first available slot instead
+                        // of searching by label.  For find-existing (action 2)
+                        // the token must already exist so use the normal path.
+                        if self.disc.pending_key_action == Some(1) {
+                            self.do_open_hsm_first_slot();
+                        } else {
+                            self.do_login_with_pin(&self.pin_buf.clone());
+                        }
                         if self.hw.actor.is_none() {
-                            // HSM login failed — cannot proceed.  Move to
-                            // Execute so the user sees the error and can retry.
                             tracing::error!("tick_intent_burn: HSM login failed after intent write");
                             self.ceremony.state = CeremonyPhase::Execute;
                             return;
@@ -335,6 +341,50 @@ impl App {
                 self.setup.phase = SetupPhase::ProfileLoaded;
             }
         }
+    }
+
+    // ── HSM open (first slot, no label match — for InitRoot key generation) ──
+
+    pub(crate) fn do_open_hsm_first_slot(&mut self) {
+        let pin_bytes = match hex::decode(&self.pin_buf) {
+            Ok(b) => b,
+            Err(e) => {
+                self.set_status(format!("Internal PIN decode error: {e}"));
+                return;
+            }
+        };
+        let pin = SecretString::new(hex::encode(&pin_bytes));
+
+        let cfg = match &self.profile {
+            Some(p) => &p.hsm,
+            None => {
+                self.set_status("No profile loaded");
+                return;
+            }
+        };
+
+        let module_path = match cfg.resolve_module_path() {
+            Ok(p) => p,
+            Err(e) => {
+                self.set_status(format!("PKCS#11 module error: {e}"));
+                return;
+            }
+        };
+
+        let hsm = match Pkcs11Hsm::open_first(&module_path) {
+            Ok(h) => h,
+            Err(e) => {
+                self.set_status(format!("HSM open (first slot) failed: {e}"));
+                return;
+            }
+        };
+        let mut actor = HsmActor::spawn(hsm);
+        if let Err(e) = actor.login(&pin) {
+            self.set_status(format!("HSM login failed: {e}"));
+            return;
+        }
+        self.hw.actor = Some(actor);
+        self.hw.hsm_state = HwState::Ready("authenticated (first slot)".into());
     }
 
     // ── HSM login via reconstructed PIN (called from Quorum phase) ───────────
