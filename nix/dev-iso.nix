@@ -112,8 +112,10 @@ in
         share=/run/anodize/share
 
         # Wait for the 9p mount (system mount unit, can't depend from user service).
+        # Note: mountpoint is from util-linux and not in the service's PATH,
+        # so use /proc/mounts instead.
         for i in $(seq 1 30); do
-          if mountpoint -q "$share" 2>/dev/null; then break; fi
+          if grep -q " $share " /proc/mounts 2>/dev/null; then break; fi
           if [ "$i" -eq 30 ]; then
             echo "ERROR: 9p share not mounted at $share after 30s" >&2
             exit 1
