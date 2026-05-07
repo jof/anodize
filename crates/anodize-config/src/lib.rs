@@ -62,18 +62,21 @@ pub struct CaConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HsmConfig {
-    #[serde(deserialize_with = "deserialize_module_name")]
-    pub module_name: String,
+    pub backend: HsmBackendKind,
     pub token_label: String,
     pub key_label: String,
     #[serde(default)]
     pub key_spec: KeySpec,
-    pub pin_source: PinSource,
-    /// Factory-default PIN for devices that don't support C_InitToken
-    /// (e.g. YubiHSM2: "0001password"). Used only during InitRoot bootstrap
-    /// to login and then C_SetPIN to the SSS-reconstructed secret.
-    #[serde(default)]
-    pub factory_pin: Option<String>,
+}
+
+/// Named HSM backend model. Each variant maps to a concrete implementation
+/// in `anodize-hsm` that knows its own module paths, factory credentials,
+/// and native SDK quirks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HsmBackendKind {
+    Softhsm,
+    Yubihsm,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]
@@ -83,56 +86,6 @@ pub enum KeySpec {
     EcdsaP384,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PinSource {
-    Prompt,
-    Env(String),
-    File(PathBuf),
-}
-
-impl PinSource {
-    pub fn warn_if_unsafe(&self) {
-        match self {
-            PinSource::Env(var) => {
-                tracing::warn!("pin_source=env:{} is not safe for ceremony use", var);
-            }
-            PinSource::File(path) => {
-                tracing::warn!(
-                    "pin_source=file:{} is not safe for ceremony use",
-                    path.display()
-                );
-            }
-            PinSource::Prompt => {}
-        }
-    }
-}
-
-impl<'de> Deserialize<'de> for PinSource {
-    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        if s == "prompt" {
-            return Ok(PinSource::Prompt);
-        }
-        if let Some(var) = s.strip_prefix("env:") {
-            if var.is_empty() {
-                return Err(serde::de::Error::custom(
-                    "env: pin_source requires a variable name",
-                ));
-            }
-            return Ok(PinSource::Env(var.to_string()));
-        }
-        if let Some(path) = s.strip_prefix("file:") {
-            if path.is_empty() {
-                return Err(serde::de::Error::custom("file: pin_source requires a path"));
-            }
-            return Ok(PinSource::File(PathBuf::from(path)));
-        }
-        Err(serde::de::Error::custom(format!(
-            "invalid pin_source {:?}: expected \"prompt\", \"env:VAR\", or \"file:/path\"",
-            s
-        )))
-    }
-}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -150,74 +103,8 @@ pub enum ConfigError {
     RevocationUtf8,
     #[error("revocation list TOML parse error: {source}")]
     RevocationToml { source: toml::de::Error },
-    #[error("PKCS#11 module {name:?} not found in search paths (set ANODIZE_PKCS11_MODULES or check module name)")]
-    ModuleNotFound { name: String },
 }
 
-/// Well-known directories to search when `ANODIZE_PKCS11_MODULES` is not set.
-const FALLBACK_MODULE_DIRS: &[&str] = &[
-    "/run/current-system/sw/lib/pkcs11",
-    "/run/current-system/sw/lib/softhsm",
-    "/usr/lib/softhsm",
-    "/usr/lib/pkcs11",
-    "/usr/lib/x86_64-linux-gnu/softhsm",
-    "/usr/lib/x86_64-linux-gnu/pkcs11",
-    "/usr/lib/aarch64-linux-gnu/softhsm",
-    "/usr/lib/aarch64-linux-gnu/pkcs11",
-];
-
-impl HsmConfig {
-    /// Resolve `module_name` to a full filesystem path.
-    ///
-    /// When `ANODIZE_PKCS11_MODULES` is set (always on the ISO), searches the
-    /// colon-separated path list for an entry whose filename matches
-    /// `module_name`. When absent (dev host builds), searches well-known
-    /// library directories.
-    pub fn resolve_module_path(&self) -> Result<PathBuf, ConfigError> {
-        let modules_env = std::env::var("ANODIZE_PKCS11_MODULES").ok();
-        resolve_module_name(&self.module_name, modules_env.as_deref())
-    }
-}
-
-fn resolve_module_name(
-    module_name: &str,
-    modules_env: Option<&str>,
-) -> Result<PathBuf, ConfigError> {
-    if let Some(modules) = modules_env {
-        for entry in modules.split(':').filter(|s| !s.is_empty()) {
-            let p = Path::new(entry);
-            if p.file_name().and_then(|f| f.to_str()) == Some(module_name) {
-                return Ok(p.into());
-            }
-        }
-        return Err(ConfigError::ModuleNotFound {
-            name: module_name.to_owned(),
-        });
-    }
-    for dir in FALLBACK_MODULE_DIRS {
-        let candidate = Path::new(dir).join(module_name);
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    Err(ConfigError::ModuleNotFound {
-        name: module_name.to_owned(),
-    })
-}
-
-fn deserialize_module_name<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
-    let s = String::deserialize(d)?;
-    if s.is_empty() {
-        return Err(serde::de::Error::custom("module_name must not be empty"));
-    }
-    if s.contains('/') || s.contains('\\') || s.contains("..") {
-        return Err(serde::de::Error::custom(format!(
-            "module_name must be a plain filename (no path separators), got {:?}",
-            s
-        )));
-    }
-    Ok(s)
-}
 
 pub fn load(path: &Path) -> Result<Profile, ConfigError> {
     let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
@@ -246,11 +133,10 @@ country      = "US"
 cdp_url      = "http://crl.example.com/root.crl"
 
 [hsm]
-module_name  = "libsofthsm2.so"
+backend      = "softhsm"
 token_label  = "anodize-root-2026"
 key_label    = "root-key"
 key_spec     = "ecdsa-p384"
-pin_source   = "prompt"
 "#;
 
     #[test]
@@ -263,56 +149,47 @@ pin_source   = "prompt"
             p.ca.cdp_url.as_deref(),
             Some("http://crl.example.com/root.crl")
         );
+        assert_eq!(p.hsm.backend, HsmBackendKind::Softhsm);
         assert_eq!(p.hsm.token_label, "anodize-root-2026");
         assert_eq!(p.hsm.key_label, "root-key");
         assert_eq!(p.hsm.key_spec, KeySpec::EcdsaP384);
-        assert_eq!(p.hsm.pin_source, PinSource::Prompt);
     }
 
     #[test]
-    fn pin_source_variants() {
-        let ps = |s: &str| -> PinSource {
-            let toml = format!(
-                "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
-                 [hsm]\nmodule_name=\"test.so\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"{}\"\n",
-                s
-            );
-            let p: Profile = toml::from_str(&toml).expect("parse");
-            p.hsm.pin_source
-        };
-
-        assert_eq!(ps("prompt"), PinSource::Prompt);
-        assert_eq!(ps("env:MY_VAR"), PinSource::Env("MY_VAR".into()));
-        assert_eq!(
-            ps("file:/run/anodize/pin"),
-            PinSource::File(PathBuf::from("/run/anodize/pin"))
-        );
-    }
-
-    #[test]
-    fn invalid_pin_source() {
+    fn backend_yubihsm() {
         let toml = "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
-                    [hsm]\nmodule_name=\"test.so\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"env:\"\n";
-        assert!(toml::from_str::<Profile>(toml).is_err());
+                    [hsm]\nbackend=\"yubihsm\"\ntoken_label=\"t\"\nkey_label=\"k\"\n";
+        let p: Profile = toml::from_str(toml).expect("parse");
+        assert_eq!(p.hsm.backend, HsmBackendKind::Yubihsm);
+    }
 
-        let toml2 = "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
-                     [hsm]\nmodule_name=\"test.so\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"unknown:foo\"\n";
-        assert!(toml::from_str::<Profile>(toml2).is_err());
+    #[test]
+    fn backend_rejects_unknown() {
+        let toml = "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
+                    [hsm]\nbackend=\"thales\"\ntoken_label=\"t\"\nkey_label=\"k\"\n";
+        assert!(toml::from_str::<Profile>(toml).is_err());
     }
 
     #[test]
     fn missing_required_field() {
         let toml = "[ca]\norganization=\"x\"\ncountry=\"US\"\n\
-                    [hsm]\nmodule_name=\"test.so\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"prompt\"\n";
+                    [hsm]\nbackend=\"softhsm\"\ntoken_label=\"t\"\nkey_label=\"k\"\n";
         assert!(toml::from_str::<Profile>(toml).is_err());
     }
 
     #[test]
     fn cdp_url_is_optional() {
         let toml = "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
-                    [hsm]\nmodule_name=\"test.so\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"prompt\"\n";
+                    [hsm]\nbackend=\"softhsm\"\ntoken_label=\"t\"\nkey_label=\"k\"\n";
         let p: Profile = toml::from_str(toml).expect("parse");
         assert!(p.ca.cdp_url.is_none());
+    }
+
+    #[test]
+    fn deny_unknown_hsm_fields() {
+        let toml = "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
+                    [hsm]\nbackend=\"softhsm\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"prompt\"\n";
+        assert!(toml::from_str::<Profile>(toml).is_err());
     }
 
     #[test]
@@ -324,10 +201,9 @@ organization = "Acme"
 country      = "US"
 
 [hsm]
-module_name = "test.so"
+backend     = "softhsm"
 token_label = "t"
 key_label   = "k"
-pin_source  = "prompt"
 
 [[cert_profiles]]
 name         = "sub-ca"
@@ -351,7 +227,7 @@ validity_days = 365
     #[test]
     fn cert_profiles_default_empty() {
         let toml = "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
-                    [hsm]\nmodule_name=\"test.so\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"prompt\"\n";
+                    [hsm]\nbackend=\"softhsm\"\ntoken_label=\"t\"\nkey_label=\"k\"\n";
         let p: Profile = toml::from_str(toml).expect("parse");
         assert!(p.cert_profiles.is_empty());
     }
@@ -401,78 +277,5 @@ revocation_time = "2026-05-15T12:00:00Z"
         let serialized = serialize_revocation_list(&[]);
         let reparsed = parse_revocation_list(serialized.as_bytes()).expect("re-parse empty");
         assert!(reparsed.is_empty());
-    }
-
-    // ── module_name validation ────────────────────────────────────────────────
-
-    #[test]
-    fn module_name_rejects_path_separators() {
-        let toml = "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
-                    [hsm]\nmodule_name=\"/usr/lib/foo.so\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"prompt\"\n";
-        assert!(toml::from_str::<Profile>(toml).is_err());
-
-        let toml2 = "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
-                     [hsm]\nmodule_name=\"../evil.so\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"prompt\"\n";
-        assert!(toml::from_str::<Profile>(toml2).is_err());
-
-        let toml3 = "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
-                     [hsm]\nmodule_name=\"sub/dir.so\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"prompt\"\n";
-        assert!(toml::from_str::<Profile>(toml3).is_err());
-    }
-
-    #[test]
-    fn module_name_rejects_empty() {
-        let toml = "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
-                    [hsm]\nmodule_name=\"\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"prompt\"\n";
-        assert!(toml::from_str::<Profile>(toml).is_err());
-    }
-
-    #[test]
-    fn module_name_accepts_plain_filename() {
-        let toml = "[ca]\ncommon_name=\"x\"\norganization=\"x\"\ncountry=\"US\"\n\
-                    [hsm]\nmodule_name=\"yubihsm_pkcs11.so\"\ntoken_label=\"t\"\nkey_label=\"k\"\npin_source=\"prompt\"\n";
-        let p: Profile = toml::from_str(toml).expect("parse");
-        assert_eq!(p.hsm.module_name, "yubihsm_pkcs11.so");
-    }
-
-    // ── resolve_module_name ──────────────────────────────────────────────────
-
-    #[test]
-    fn resolve_finds_in_env() {
-        let result = resolve_module_name(
-            "yubihsm_pkcs11.so",
-            Some("/nix/store/xxx/lib/pkcs11/yubihsm_pkcs11.so"),
-        );
-        assert_eq!(
-            result.unwrap(),
-            PathBuf::from("/nix/store/xxx/lib/pkcs11/yubihsm_pkcs11.so")
-        );
-    }
-
-    #[test]
-    fn resolve_colon_separated_env() {
-        let result = resolve_module_name(
-            "libsofthsm2.so",
-            Some("/nix/store/xxx/lib/pkcs11/yubihsm_pkcs11.so:/nix/store/yyy/lib/softhsm/libsofthsm2.so"),
-        );
-        assert_eq!(
-            result.unwrap(),
-            PathBuf::from("/nix/store/yyy/lib/softhsm/libsofthsm2.so")
-        );
-    }
-
-    #[test]
-    fn resolve_not_found_in_env() {
-        let result = resolve_module_name(
-            "nonexistent.so",
-            Some("/nix/store/xxx/lib/pkcs11/yubihsm_pkcs11.so"),
-        );
-        assert!(matches!(result.unwrap_err(), ConfigError::ModuleNotFound { .. }));
-    }
-
-    #[test]
-    fn resolve_env_absent_no_fallback_match() {
-        let result = resolve_module_name("nonexistent-xyzzy-anodize-test.so", None);
-        assert!(matches!(result.unwrap_err(), ConfigError::ModuleNotFound { .. }));
     }
 }
