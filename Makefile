@@ -144,15 +144,11 @@ prod-arm64: anodize-prod-arm64.iso
 dev-amd64:  anodize-dev-amd64.iso
 dev-arm64:  anodize-dev-arm64.iso
 
-# Create a 64 MiB FAT shuttle image pre-loaded with a SoftHSM2 profile and a
-# pre-initialized SoftHSM2 token for dev-softhsm-usb testing.
-# Requires: mtools (mcopy, mmd), softhsm2-util.
+# Create a 64 MiB FAT shuttle image with a profile.toml and an empty
+# SoftHSM2 token directory.  The actual token is initialized during the
+# ceremony's InitRoot phase via C_InitToken — no pre-seeded credentials.
+# Requires: mtools (mcopy, mmd).
 # Only built once — delete to recreate.
-#
-# Dev credentials written into this image:
-#   token label : anodize-root-2026
-#   user PIN    : 123456
-#   SO PIN      : 12345678
 fake-shuttle.img:
 	truncate -s 64M $@
 	mkfs.vfat $@
@@ -168,8 +164,9 @@ fake-shuttle.img:
 	    'key_label   = "root-key"' \
 	    'key_spec    = "ecdsa-p384"' \
 	    | mcopy -i $@ - ::profile.toml
-	bash scripts/init-softhsm-shuttle.sh $@
-	@echo "$@ ready (dev PIN: 123456)"
+	mmd -i $@ ::softhsm2
+	mmd -i $@ ::softhsm2/tokens
+	@echo "$@ ready"
 
 # ---------------------------------------------------------------------------
 # QEMU targets — boot ISOs locally for testing and development.
@@ -386,7 +383,7 @@ verify-iso: anodize-prod-amd64.iso.sha256
 # The BD-R image is stored on a virtio-9p share: dev-disc/test-bdr.img
 #
 # One-time setup:
-#   make fake-shuttle.img  # SoftHSM2 profile shuttle (PIN: 123456)
+#   make fake-shuttle.img  # SoftHSM2 profile shuttle (token init'd during ceremony)
 #   make dev-amd64        # dev ISO — first build slow, cached after
 #
 # Each dev session:

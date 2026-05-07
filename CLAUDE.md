@@ -23,7 +23,7 @@ make dev-amd64         # dev ISO (SoftHSM2 USB + cdemu inside the VM)
 make dev-arm64         # dev ISO for Apple Silicon
 
 # QEMU dev loop — requires dev ISO and fake shuttle; no host cdemu setup needed
-make fake-shuttle.img          # 64 MiB FAT profile USB, SoftHSM2 token, PIN: 123456
+make fake-shuttle.img          # 64 MiB FAT profile USB (token init'd during ceremony)
 make qemu-dev-nographic    # boot dev ISO amd64 (Ctrl-A X to quit)
 make qemu-dev-sdl          # same with SDL graphics window
 make qemu-aarch64          # boot dev ISO arm64 (Apple Silicon via HVF)
@@ -128,7 +128,7 @@ The cdemu dev ISO exercises the real SG_IO MMC disc write path (mmc.rs + sgdev.r
 **One-time setup** (delete files to regenerate):
 
 ```sh
-make fake-shuttle.img        # profile USB with SoftHSM2 token (dev PIN: 123456)
+make fake-shuttle.img        # profile USB (token init'd during ceremony)
 make dev-amd64           # dev ISO — first run is slow, cached after
 # or: make dev-arm64     # for Apple Silicon
 ```

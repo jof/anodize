@@ -122,6 +122,17 @@ pub trait HsmBackend: Send {
         user_pin: &SecretString,
         label: &str,
     ) -> Result<Box<dyn Hsm>>;
+
+    /// Enumerate **all** visible slots, including empty/uninitialized ones.
+    ///
+    /// Used during bootstrap when no token has been initialized yet —
+    /// `list_tokens()` returns empty in that case because there are no
+    /// tokens, but empty slots are still available for `C_InitToken`.
+    ///
+    /// Default: falls back to `list_tokens()`.
+    fn list_all_slots(&self) -> Result<Vec<SlotTokenInfo>> {
+        self.list_tokens()
+    }
 }
 
 /// Instantiate the appropriate backend for the given model.

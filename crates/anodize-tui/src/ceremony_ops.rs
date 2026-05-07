@@ -360,7 +360,7 @@ impl App {
             }
         };
 
-        let tokens = match backend.list_tokens() {
+        let mut tokens = match backend.list_tokens() {
             Ok(t) => t,
             Err(e) => {
                 self.set_status(format!("HSM enumerate failed: {e}"));
@@ -368,12 +368,24 @@ impl App {
             }
         };
 
+        // No initialized tokens — check for empty/uninitialized slots that
+        // C_InitToken can provision (e.g. SoftHSM2 with an empty token dir).
         if tokens.is_empty() {
-            self.set_status("No HSM tokens found. Insert a YubiHSM or HSM device.");
+            tokens = match backend.list_all_slots() {
+                Ok(s) => s,
+                Err(e) => {
+                    self.set_status(format!("HSM slot enumerate failed: {e}"));
+                    return;
+                }
+            };
+        }
+
+        if tokens.is_empty() {
+            self.set_status("No HSM slots found. Insert a YubiHSM or HSM device.");
             return;
         }
 
-        // Pick the first uninitialised token, or fall back to the first token.
+        // Pick the first uninitialised slot, or fall back to the first slot.
         let target = tokens.iter()
             .find(|t| !t.user_pin_initialized)
             .or_else(|| tokens.first());

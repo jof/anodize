@@ -182,6 +182,28 @@ impl HsmBackend for SoftHsmBackend {
         let hsm = module.bootstrap_token(slot_id, so_pin, user_pin, None, label)?;
         Ok(Box::new(hsm))
     }
+
+    fn list_all_slots(&self) -> Result<Vec<SlotTokenInfo>> {
+        let ctx = init_ctx(&self.module_path)?;
+        let slots = ctx.get_all_slots()?;
+        Ok(slots
+            .iter()
+            .map(|&s| {
+                token_info_from_slot(&ctx, s).unwrap_or(SlotTokenInfo {
+                    slot_id: s.id(),
+                    token_label: String::new(),
+                    model: String::new(),
+                    serial_number: String::new(),
+                    login_required: false,
+                    user_pin_initialized: false,
+                    user_pin_locked: false,
+                    min_pin_len: 0,
+                    max_pin_len: 0,
+                    token_initialized: false,
+                })
+            })
+            .collect())
+    }
 }
 
 // ---------------------------------------------------------------------------
