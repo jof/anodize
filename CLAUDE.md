@@ -255,6 +255,26 @@ make ssh-dev
 - `dev-disc/` should contain `session-01.iso` and `session-02.iso` (intent + cert sessions).
 - Status bar should show "Certificate built. Verify fingerprint before writing." at step 13.
 
+### Multi-session test (InitRoot → reboot → SignCsr)
+
+Tests disc persistence across VM reboots and quorum PIN reconstruction:
+
+```sh
+rm -f fake-shuttle.img && make fake-shuttle.img   # must include cert_profiles
+rm -rf dev-disc && mkdir dev-disc                 # clean slate
+expect scripts/e2e-multisession.expect            # ARCH=amd64 for x86_64
+```
+
+This runs two full ceremonies with a VM reboot in between:
+1. **Phase 1**: InitRoot — generates root CA, captures SSS shares, writes to disc
+2. **Inter-boot**: Host generates ephemeral P-384 CSR, injects `csr.der` into shuttle via `mcopy`
+3. **Phase 2**: SignCsr — loads existing disc, enters shares for quorum, signs CSR
+4. **Validation**: checks disc has ≥ 4 session ISOs, shuttle has both certs + audit log
+
+Key prerequisite: `nix/dev-iso.nix` `cdemu-load-bdr` service must detect and load existing BD-R images (not always create blank). ISO rebuild required after this change.
+
+See `docs/ceremony-multisession-test.md` for full details and troubleshooting.
+
 ### Tests as you go
 
 Each new function or module gets a test in the same commit that introduces it — not deferred to later. Follow the pattern already established in `anodize-hsm`:

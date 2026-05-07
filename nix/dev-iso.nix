@@ -123,13 +123,26 @@ in
           sleep 1
         done
 
-        # Create blank BD-R image at the 9p-shared path.
-        ${pkgs.glib}/bin/gdbus call --session \
-          --dest net.sf.cdemu.CDEmuDaemon \
-          --object-path /Daemon \
-          --method net.sf.cdemu.CDEmuDaemon.DeviceCreateBlank \
-          0 "$share/test-bdr.img" \
-          "{'writer-id': <'WRITER-ISO'>, 'medium-type': <'bdr'>}"
+        if [ -s "$share/test-bdr.img" ]; then
+          # Load existing BD-R image — preserves prior session data so
+          # multi-session ceremonies work across VM reboots.
+          echo "Loading existing BD-R image from $share/test-bdr.img"
+          ${pkgs.glib}/bin/gdbus call --session \
+            --dest net.sf.cdemu.CDEmuDaemon \
+            --object-path /Daemon \
+            --method net.sf.cdemu.CDEmuDaemon.DeviceLoad \
+            0 "['$share/test-bdr.img']" \
+            "{'writer-id': <'WRITER-ISO'>}"
+        else
+          # Create blank BD-R image at the 9p-shared path.
+          echo "Creating new blank BD-R image at $share/test-bdr.img"
+          ${pkgs.glib}/bin/gdbus call --session \
+            --dest net.sf.cdemu.CDEmuDaemon \
+            --object-path /Daemon \
+            --method net.sf.cdemu.CDEmuDaemon.DeviceCreateBlank \
+            0 "$share/test-bdr.img" \
+            "{'writer-id': <'WRITER-ISO'>, 'medium-type': <'bdr'>}"
+        fi
       '';
     };
   };

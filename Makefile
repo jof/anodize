@@ -157,12 +157,18 @@ fake-shuttle.img:
 	    'common_name  = "Example Root CA"' \
 	    'organization = "Example Corp"' \
 	    'country      = "US"' \
+	    'cdp_url      = "http://crl.example.com/root.crl"' \
 	    '' \
 	    '[hsm]' \
 	    'backend     = "softhsm"' \
 	    'token_label = "anodize-root-2026"' \
 	    'key_label   = "root-key"' \
 	    'key_spec    = "ecdsa-p384"' \
+	    '' \
+	    '[[cert_profiles]]' \
+	    'name          = "sub-ca"' \
+	    'validity_days = 1825' \
+	    'path_len      = 0' \
 	    | mcopy -i $@ - ::profile.toml
 	mmd -i $@ ::softhsm2
 	mmd -i $@ ::softhsm2/tokens
