@@ -178,48 +178,57 @@ impl App {
     // ── Intent burn tick ──────────────────────────────────────────────────────
 
     pub(crate) fn tick_intent_burn(&mut self) {
-        if let Some(rx) = &self.disc.burn_rx {
-            if let Ok(result) = rx.try_recv() {
-                self.disc.burn_rx = None;
-                match result {
-                    Err(e) => {
-                        self.set_status(format!("Intent disc write failed: {e}"));
-                        self.setup.phase = SetupPhase::WaitDisc;
-                        self.disc.optical_dev = None;
-                    }
-                    Ok(()) => {
-                        if let Some(intent) = self.disc.pending_intent_session.take() {
-                            self.disc.intent_session_dir_name = Some(intent.dir_name.clone());
-                            self.disc.prior_sessions.push(intent);
-                        }
-                        match self.current_op.clone() {
-                            Some(Operation::InitRoot) => {
-                                // PIN is already in pin_buf from the SSS split.
-                                // Login to HSM and proceed directly.
-                                self.do_login_with_pin(&self.pin_buf.clone());
-                                match self.disc.pending_key_action {
-                                    Some(1) => self.do_generate_and_build(),
-                                    Some(2) => self.do_find_and_build(),
-                                    _ => {
-                                        self.set_status("Unknown key action");
-                                        self.ceremony.state = CeremonyPhase::OperationSelect;
-                                    }
-                                }
-                            }
-                            Some(Operation::SignCsr)
-                            | Some(Operation::RevokeCert)
-                            | Some(Operation::IssueCrl) => {
-                                // These need HSM login via quorum share reconstruction.
-                                self.enter_quorum_phase();
-                            }
+        let result = match &self.disc.burn_rx {
+            Some(rx) => match rx.try_recv() {
+                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    tracing::error!("tick_intent_burn: channel disconnected!");
+                    Some(Err(anyhow::anyhow!("disc write channel disconnected")))
+                }
+                Ok(r) => {
+                    tracing::info!("tick_intent_burn: received result from channel");
+                    Some(r)
+                }
+            },
+            None => return,
+        };
+        self.disc.burn_rx = None;
+        match result {
+            Some(Err(e)) => {
+                self.set_status(format!("Intent disc write failed: {e}"));
+                self.setup.phase = SetupPhase::WaitDisc;
+                self.disc.optical_dev = None;
+            }
+            Some(Ok(())) => {
+                tracing::info!("tick_intent_burn: write OK, advancing state");
+                if let Some(intent) = self.disc.pending_intent_session.take() {
+                    self.disc.intent_session_dir_name = Some(intent.dir_name.clone());
+                    self.disc.prior_sessions.push(intent);
+                }
+                match self.current_op.clone() {
+                    Some(Operation::InitRoot) => {
+                        self.do_login_with_pin(&self.pin_buf.clone());
+                        match self.disc.pending_key_action {
+                            Some(1) => self.do_generate_and_build(),
+                            Some(2) => self.do_find_and_build(),
                             _ => {
-                                self.set_status("Unknown operation after intent");
+                                self.set_status("Unknown key action");
                                 self.ceremony.state = CeremonyPhase::OperationSelect;
                             }
                         }
                     }
+                    Some(Operation::SignCsr)
+                    | Some(Operation::RevokeCert)
+                    | Some(Operation::IssueCrl) => {
+                        self.enter_quorum_phase();
+                    }
+                    _ => {
+                        self.set_status("Unknown operation after intent");
+                        self.ceremony.state = CeremonyPhase::OperationSelect;
+                    }
                 }
             }
+            None => unreachable!(),
         }
     }
 

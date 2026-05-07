@@ -20,7 +20,7 @@ in
 
   # Virtual SCSI HBA kernel module.
   # Creates /dev/sr0 (block) and /dev/sg0 (SCSI generic) for cdemu virtual drives.
-  boot.kernelModules       = [ "vhba" ];
+  boot.kernelModules       = [ "vhba" "sg" ];
   boot.extraModulePackages = [ config.boot.kernelPackages.vhba ];
 
   # vhba_ctl: allow the ceremony user (group "wheel") to communicate with the
@@ -28,6 +28,7 @@ in
   # /dev/vhba_ctl to register the virtual SCSI host adapter.
   services.udev.extraRules = ''
     SUBSYSTEM=="misc", KERNEL=="vhba_ctl", MODE="0660", GROUP="wheel"
+    SUBSYSTEM=="scsi_generic", MODE="0660", GROUP="wheel"
   '';
 
   # ── Networking (dev ISOs) ──────────────────────────────────────────────────

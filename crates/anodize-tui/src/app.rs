@@ -522,6 +522,7 @@ impl App {
 
         // Intent burn completion
         if self.ceremony.is_writing_intent() {
+            tracing::debug!("background_tick: ceremony is_writing_intent, calling tick_intent_burn");
             self.tick_intent_burn();
         }
 
