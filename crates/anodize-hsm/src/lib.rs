@@ -2,7 +2,7 @@ use cryptoki::{
     context::{CInitializeArgs, Pkcs11},
     mechanism::Mechanism,
     object::{Attribute, AttributeType, ObjectClass},
-    session::Session,
+    session::{Session, UserType},
     types::AuthPin,
 };
 use secrecy::{ExposeSecret, SecretString};
@@ -94,7 +94,107 @@ pub trait Hsm: Send {
 }
 
 // ---------------------------------------------------------------------------
-// PKCS#11 backend
+// Shared initialisation helper
+// ---------------------------------------------------------------------------
+
+fn init_ctx(module_path: &std::path::Path) -> Result<Pkcs11> {
+    let ctx = Pkcs11::new(module_path)?;
+    match ctx.initialize(CInitializeArgs::OsThreads) {
+        Ok(()) => {}
+        // A second open in the same process reuses the already-initialized
+        // library. PKCS#11 §11.4: the library stays initialized until the
+        // last C_Finalize call, so this is safe to ignore.
+        Err(cryptoki::error::Error::Pkcs11(
+            cryptoki::error::RvError::CryptokiAlreadyInitialized,
+            _,
+        )) => {}
+        Err(e) => return Err(HsmError::Pkcs11(e)),
+    }
+    Ok(ctx)
+}
+
+// ---------------------------------------------------------------------------
+// Pkcs11Module — pre-session management (enumerate, init token, bootstrap)
+// ---------------------------------------------------------------------------
+
+/// Module-level PKCS#11 handle for operations that don't require a session:
+/// device enumeration, token initialisation, and bootstrap.
+pub struct Pkcs11Module {
+    ctx: Pkcs11,
+}
+
+impl Pkcs11Module {
+    pub fn open(module_path: &std::path::Path) -> Result<Self> {
+        Ok(Self { ctx: init_ctx(module_path)? })
+    }
+
+    /// Enumerate all slots that have a token present.
+    pub fn list_tokens(&self) -> Result<Vec<SlotTokenInfo>> {
+        let slots = self.ctx.get_slots_with_token()?;
+        let mut result = Vec::new();
+        for slot in slots {
+            if let Ok(ti) = self.ctx.get_token_info(slot) {
+                result.push(SlotTokenInfo {
+                    slot_id: slot.id(),
+                    token_label: ti.label().trim().to_string(),
+                    model: ti.model().trim().to_string(),
+                    serial_number: ti.serial_number().trim().to_string(),
+                    login_required: ti.login_required(),
+                    user_pin_initialized: ti.user_pin_initialized(),
+                    user_pin_locked: ti.user_pin_locked(),
+                    min_pin_len: ti.min_pin_length(),
+                    max_pin_len: ti.max_pin_length(),
+                    token_initialized: ti.token_initialized(),
+                });
+            }
+        }
+        Ok(result)
+    }
+
+    /// Bootstrap a token: C_InitToken → SO login → C_InitPIN → user login.
+    /// Returns a `Pkcs11Hsm` with an active user session, ready for key
+    /// generation.
+    ///
+    /// `slot_id` — the slot to initialise (from `list_tokens`).
+    /// `so_pin`  — Security Officer PIN to set on the token.
+    /// `user_pin`— User PIN to set (the SSS-reconstructed secret).
+    /// `label`   — desired token label (e.g. "anodize-root-2026").
+    pub fn bootstrap_token(
+        self,
+        slot_id: u64,
+        so_pin: &SecretString,
+        user_pin: &SecretString,
+        label: &str,
+    ) -> Result<Pkcs11Hsm> {
+        use cryptoki::slot::Slot;
+
+        let slot = Slot::try_from(slot_id)
+            .map_err(|_| HsmError::TokenNotFound(format!("invalid slot_id={slot_id}")))?;
+
+        let so_auth = AuthPin::new(so_pin.expose_secret().to_string());
+        let user_auth = AuthPin::new(user_pin.expose_secret().to_string());
+
+        // C_InitToken — sets label and SO PIN.
+        self.ctx.init_token(slot, &so_auth, label)?;
+
+        // Open RW session, login as SO, set user PIN.
+        let session = self.ctx.open_rw_session(slot)?;
+        session.login(UserType::So, Some(&so_auth))?;
+        session.init_pin(&user_auth)?;
+        session.logout()?;
+
+        // Re-login as normal user.
+        session.login(UserType::User, Some(&user_auth))?;
+
+        Ok(Pkcs11Hsm {
+            ctx: self.ctx,
+            session: Some(session),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pkcs11Hsm — session-level operations (login, keygen, sign)
 // ---------------------------------------------------------------------------
 
 pub struct Pkcs11Hsm {
@@ -106,18 +206,7 @@ impl Pkcs11Hsm {
     /// Open the PKCS#11 module at `module_path` and find the slot whose token
     /// label matches `token_label`. Does not log in; call `login()` next.
     pub fn new(module_path: &std::path::Path, token_label: &str) -> Result<Self> {
-        let ctx = Pkcs11::new(module_path)?;
-        match ctx.initialize(CInitializeArgs::OsThreads) {
-            Ok(()) => {}
-            // A second Pkcs11Hsm in the same process reuses the already-initialized
-            // library. PKCS#11 spec §11.4: the library stays initialized until the
-            // last C_Finalize call, so this is safe to ignore.
-            Err(cryptoki::error::Error::Pkcs11(
-                cryptoki::error::RvError::CryptokiAlreadyInitialized,
-                _,
-            )) => {}
-            Err(e) => return Err(HsmError::Pkcs11(e)),
-        }
+        let ctx = init_ctx(module_path)?;
 
         let slot = ctx
             .get_slots_with_token()?
@@ -137,24 +226,20 @@ impl Pkcs11Hsm {
         })
     }
 
-    /// Open the PKCS#11 module and use the first available slot with a token.
-    /// Use this for InitRoot when the desired token label does not yet exist.
-    pub fn open_first(module_path: &std::path::Path) -> Result<Self> {
-        let ctx = Pkcs11::new(module_path)?;
-        match ctx.initialize(CInitializeArgs::OsThreads) {
-            Ok(()) => {}
-            Err(cryptoki::error::Error::Pkcs11(
-                cryptoki::error::RvError::CryptokiAlreadyInitialized,
-                _,
-            )) => {}
-            Err(e) => return Err(HsmError::Pkcs11(e)),
-        }
+    /// Open the PKCS#11 module and find the slot whose token serial number
+    /// matches `serial`. Does not log in; call `login()` next.
+    pub fn open_by_serial(module_path: &std::path::Path, serial: &str) -> Result<Self> {
+        let ctx = init_ctx(module_path)?;
 
         let slot = ctx
             .get_slots_with_token()?
             .into_iter()
-            .next()
-            .ok_or_else(|| HsmError::TokenNotFound("(no slots with tokens)".to_string()))?;
+            .find(|&slot| {
+                ctx.get_token_info(slot)
+                    .map(|info| info.serial_number().trim() == serial.trim())
+                    .unwrap_or(false)
+            })
+            .ok_or_else(|| HsmError::TokenNotFound(format!("serial={serial}")))?;
 
         let session = ctx.open_rw_session(slot)?;
 

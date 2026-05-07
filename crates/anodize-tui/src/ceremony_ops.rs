@@ -10,7 +10,7 @@ use std::time::SystemTime;
 use anodize_audit::{genesis_hash, AuditLog};
 use anodize_ca::{build_root_cert, issue_crl, sign_intermediate_csr, P384HsmSigner};
 use anodize_config::{load as load_profile, serialize_revocation_list, PinSource, RevocationEntry};
-use anodize_hsm::{Hsm, HsmActor, KeySpec, Pkcs11Hsm};
+use anodize_hsm::{Hsm, HsmActor, KeySpec, Pkcs11Hsm, Pkcs11Module};
 use der::{Decode, Encode};
 use ratatui::{layout::Rect, Frame};
 use secrecy::SecretString;
@@ -218,7 +218,7 @@ impl App {
                         // of searching by label.  For find-existing (action 2)
                         // the token must already exist so use the normal path.
                         if self.disc.pending_key_action == Some(1) {
-                            self.do_open_hsm_first_slot();
+                            self.do_bootstrap_hsm();
                         } else {
                             self.do_login_with_pin(&self.pin_buf.clone());
                         }
@@ -343,9 +343,9 @@ impl App {
         }
     }
 
-    // ── HSM open (first slot, no label match — for InitRoot key generation) ──
+    // ── HSM bootstrap (InitRoot key generation — token may not exist yet) ────
 
-    pub(crate) fn do_open_hsm_first_slot(&mut self) {
+    pub(crate) fn do_bootstrap_hsm(&mut self) {
         let pin_bytes = match hex::decode(&self.pin_buf) {
             Ok(b) => b,
             Err(e) => {
@@ -353,7 +353,7 @@ impl App {
                 return;
             }
         };
-        let pin = SecretString::new(hex::encode(&pin_bytes));
+        let user_pin = SecretString::new(hex::encode(&pin_bytes));
 
         let cfg = match &self.profile {
             Some(p) => &p.hsm,
@@ -371,20 +371,72 @@ impl App {
             }
         };
 
-        let hsm = match Pkcs11Hsm::open_first(&module_path) {
-            Ok(h) => h,
+        let module = match Pkcs11Module::open(&module_path) {
+            Ok(m) => m,
             Err(e) => {
-                self.set_status(format!("HSM open (first slot) failed: {e}"));
+                self.set_status(format!("PKCS#11 module open failed: {e}"));
                 return;
             }
         };
-        let mut actor = HsmActor::spawn(hsm);
-        if let Err(e) = actor.login(&pin) {
-            self.set_status(format!("HSM login failed: {e}"));
+
+        let tokens = match module.list_tokens() {
+            Ok(t) => t,
+            Err(e) => {
+                self.set_status(format!("HSM enumerate failed: {e}"));
+                return;
+            }
+        };
+
+        if tokens.is_empty() {
+            self.set_status("No HSM tokens found. Insert a YubiHSM or HSM device.");
             return;
         }
+
+        // Pick the first uninitialised token, or fall back to the first token.
+        let target = tokens.iter()
+            .find(|t| !t.user_pin_initialized)
+            .or_else(|| tokens.first());
+        let target = match target {
+            Some(t) => t.clone(),
+            None => {
+                self.set_status("No suitable HSM token found.");
+                return;
+            }
+        };
+
+        tracing::info!(
+            serial = %target.serial_number,
+            slot_id = target.slot_id,
+            label = %target.token_label,
+            initialized = target.token_initialized,
+            pin_initialized = target.user_pin_initialized,
+            "do_bootstrap_hsm: selected token"
+        );
+
+        // SO PIN — use the same secret for now; production may want a
+        // separate SO PIN split.
+        let so_pin = user_pin.clone();
+
+        let hsm = match module.bootstrap_token(
+            target.slot_id,
+            &so_pin,
+            &user_pin,
+            &cfg.token_label,
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                self.set_status(format!("HSM bootstrap failed: {e}"));
+                return;
+            }
+        };
+
+        let serial = target.serial_number.clone();
+        let actor = HsmActor::spawn(hsm);
         self.hw.actor = Some(actor);
-        self.hw.hsm_state = HwState::Ready("authenticated (first slot)".into());
+        self.hw.hsm_state = HwState::Ready(
+            format!("bootstrapped (serial={serial}, label={})", cfg.token_label),
+        );
+        tracing::info!(serial, label = %cfg.token_label, "do_bootstrap_hsm: token ready");
     }
 
     // ── HSM login via reconstructed PIN (called from Quorum phase) ───────────
