@@ -14,3 +14,41 @@ operator. A future migration flow would let them carry the audit chain to a fres
 
 Separate TUI state or `--migrate-disc` CLI flag. Plan when multi-cert ceremony flow matures.
 
+## ~~State machine: intent burn → cert generation transition~~ (FIXED)
+
+Fixed: added `PostCommitError` phase to `CeremonyPhase`. `do_bootstrap_hsm`,
+`do_login_with_pin`, `do_generate_and_build`, `do_find_and_build`, and
+`do_build_cert` now return `Result<(), String>`. Extracted `post_intent_init_root`
+helper. `tick_intent_burn` transitions to `PostCommitError` on failure instead of
+silently advancing to `Execute`. Operator sees the error and can `[1]` retry or
+`[Esc]` abort. Safety-net removed.
+
+## Clock drift guard blocks disc write
+
+The "Clock drift > 5 min since ClockCheck" warning appears in the status bar after
+the ceremony takes several minutes (e.g. typing 34-word shares twice). Once the
+drift guard fires, the cert preview shows `[1] Proceed to disc write` but the
+write modal's confirm step doesn't advance. Either:
+- Relax the drift threshold for dev builds, or
+- Let the operator re-confirm the clock without restarting the entire ceremony.
+
+## TUI: add j/k scroll hint to share display panel
+
+The share distribution panel clips at ~5 lines of words (20 of 34). Scrolling with
+`j`/`k` works but isn't documented on-screen. Add a hint line like
+`[j/k] Scroll  [Enter] Continue` to the share reveal panel so custodians know to
+scroll.
+
+## TUI: share panel height
+
+Consider making the share panel expand to fill available terminal height, or
+auto-paginate shares into groups that fit the panel. Currently the panel is a fixed
+12-row box regardless of terminal size.
+
+## cdemu: verify multi-session append after CLOSE SESSION
+
+The intent session write confirmed `sessions=0 → write → CLOSE TRACK → CLOSE
+SESSION` all succeed. The disc reported `status=Incomplete sessions=1` on the
+second open, confirming the first session was committed and the disc remained
+appendable. Full end-to-end test (two complete session writes in one ceremony run)
+is blocked by the state machine bug above.
