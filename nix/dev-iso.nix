@@ -167,6 +167,6 @@ in
   fileSystems."/run/anodize/share" = {
     device  = "dev-disc";
     fsType  = "9p";
-    options = [ "trans=virtio" "version=9p2000.L" "msize=104857600" "nofail" "access=any" ];
+    options = [ "trans=virtio" "version=9p2000.L" "msize=104857600" "nofail" "access=any" "cache=none" ];
   };
 }
