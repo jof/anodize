@@ -119,6 +119,7 @@ fn setup_tracing() {
         Err(_) => return,
     };
 
+    let log_file = std::sync::Mutex::new(log_file);
     let subscriber = tracing_subscriber::registry().with(
         fmt::layer()
             .with_writer(log_file)

@@ -180,7 +180,10 @@ impl App {
     pub(crate) fn tick_intent_burn(&mut self) {
         let result = match &self.disc.burn_rx {
             Some(rx) => match rx.try_recv() {
-                Err(std::sync::mpsc::TryRecvError::Empty) => return,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    tracing::debug!("tick_intent_burn: channel present but empty");
+                    return;
+                }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     tracing::error!("tick_intent_burn: channel disconnected!");
                     Some(Err(anyhow::anyhow!("disc write channel disconnected")))
@@ -190,7 +193,10 @@ impl App {
                     Some(r)
                 }
             },
-            None => return,
+            None => {
+                tracing::error!("tick_intent_burn: burn_rx is None but state is Commit!");
+                return;
+            }
         };
         self.disc.burn_rx = None;
         match result {
