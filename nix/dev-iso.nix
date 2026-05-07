@@ -139,13 +139,13 @@ in
 
         # cdemu's DeviceCreateBlank saves the file as .iso regardless of
         # what path you pass, so always use .iso extension.
+        #
+        # NOTE: 9p mapped-xattr stores guest permissions in extended
+        # attributes.  cdemu creates files that end up owned by the host
+        # UID with 0600 mode, making them unreadable on the next boot.
+        # The host must strip xattrs between boots:
+        #   for f in dev-disc/*.iso; do xattr -c "$f"; chmod 666 "$f"; done
         if [ -s "$share/test-bdr.iso" ]; then
-          # Fix permissions: mapped-xattr stores restrictive guest perms in
-          # xattrs.  The ceremony creates files as 0600/uid=1000 but cdemu
-          # re-opens them in a context where those perms block access.
-          chmod 666 "$share"/test-bdr*.iso "$share"/session-*.iso 2>/dev/null || true
-          # Load existing BD-R image — preserves prior session data so
-          # multi-session ceremonies work across VM reboots.
           echo "Loading existing BD-R image from $share/test-bdr.iso"
           ${pkgs.glib}/bin/gdbus call --session \
             --dest net.sf.cdemu.CDEmuDaemon \
@@ -154,7 +154,6 @@ in
             0 "['$share/test-bdr.iso']" \
             "{'writer-id': <'WRITER-ISO'>}"
         else
-          # Create blank BD-R image at the 9p-shared path.
           echo "Creating new blank BD-R image at $share/test-bdr.iso"
           ${pkgs.glib}/bin/gdbus call --session \
             --dest net.sf.cdemu.CDEmuDaemon \
