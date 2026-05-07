@@ -405,39 +405,47 @@ qemu-dev-nographic: anodize-dev-amd64.iso fake-shuttle.img
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(subst -serial stdio,-nographic,$(QEMU_DEV_BASE))
 
-# Wait for SSH to be ready, then open an interactive session as the ceremony user.
-# Run this in a second terminal while qemu-dev or qemu-aarch64 is running.
-# Uses scripts/dev-ssh-key (committed dev-only keypair, localhost access only).
+# ── SSH into dev environments ───────────────────────────────────────────
+#
+#                  Local QEMU              Remote VM (DEV_VM_IP)
+#  ceremony user   make ssh-dev            make ssh-vm
+#  debug user      make ssh-dev-debug      make ssh-vm-debug
+#
+# All targets use scripts/dev-ssh-key (committed dev-only keypair).
+# Remote targets require: DEV_VM_IP=10.0.0.5 make ssh-vm
+
+SSH_OPTS = -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+	   -i $(CURDIR)/scripts/dev-ssh-key
+
+# Local QEMU — ceremony user (sentinel TUI).
 ssh-dev:
 	@echo "Waiting for SSH on localhost:$(DEV_SSH_PORT)..."
 	@until nc -z localhost $(DEV_SSH_PORT) 2>/dev/null; do sleep 1; done
 	@echo "Connected."
-	ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-	    -i $(CURDIR)/scripts/dev-ssh-key \
-	    -p $(DEV_SSH_PORT) ceremony@localhost
+	ssh $(SSH_OPTS) -p $(DEV_SSH_PORT) ceremony@localhost
 
-# SSH into a remote dev VM as the debug user (bash shell).
-# Usage: DEV_VM_IP=10.0.0.5 make ssh-dev-vm
-ssh-dev-vm:
+# Local QEMU — debug user (bash shell).
+ssh-dev-debug:
+	@echo "Waiting for SSH on localhost:$(DEV_SSH_PORT)..."
+	@until nc -z localhost $(DEV_SSH_PORT) 2>/dev/null; do sleep 1; done
+	@echo "Connected."
+	ssh $(SSH_OPTS) -p $(DEV_SSH_PORT) debug@localhost
+
+# Remote VM — ceremony user (sentinel TUI via sudo).
+# Sources /etc/set-environment so PKCS#11 env vars are available.
+ssh-vm:
 ifndef DEV_VM_IP
 	$(error DEV_VM_IP is required — set it to the dev VM's IP address)
 endif
-	ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-	    -i $(CURDIR)/scripts/dev-ssh-key \
-	    debug@$(DEV_VM_IP)
-
-# Run the ceremony TUI on a remote dev VM via SSH.
-# Sources /etc/set-environment so PKCS#11 env vars are available,
-# then exec's the sentinel as the ceremony user.
-# Usage: DEV_VM_IP=10.0.0.5 make ceremony-dev-vm
-ceremony-dev-vm:
-ifndef DEV_VM_IP
-	$(error DEV_VM_IP is required — set it to the dev VM's IP address)
-endif
-	ssh -t -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-	    -i $(CURDIR)/scripts/dev-ssh-key \
-	    debug@$(DEV_VM_IP) \
+	ssh -t $(SSH_OPTS) debug@$(DEV_VM_IP) \
 	    'sudo -u ceremony sh -c ". /etc/set-environment && exec anodize-sentinel"'
+
+# Remote VM — debug user (bash shell).
+ssh-vm-debug:
+ifndef DEV_VM_IP
+	$(error DEV_VM_IP is required — set it to the dev VM's IP address)
+endif
+	ssh $(SSH_OPTS) debug@$(DEV_VM_IP)
 
 # Build anodize-ceremony with dev-softhsm-usb (never use in a real ceremony).
 build-dev:
