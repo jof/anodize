@@ -157,6 +157,25 @@ ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
 
 The dev SSH key (`scripts/dev-ssh-key`) must be `chmod 600`. Both users are configured in `nix/dev-iso.nix`; prod ISOs have SSH disabled.
 
+**Three-terminal debug flow** (recommended for TUI development):
+
+```sh
+# Terminal 1 — QEMU VM
+make clean qemu-aarch64-nographic
+
+# Terminal 2 — ceremony TUI (press Enter at sentinel to start)
+make ssh-dev
+
+# Terminal 3 — debug log tail (ceremony.log is created when the ceremony starts)
+make ssh-dev-debug
+# then inside the debug shell:
+tail -f /run/anodize/ceremony.log
+```
+
+The ceremony binary writes structured tracing logs to `/run/anodize/ceremony.log` inside the VM. The log file is created when the ceremony binary starts (after pressing Enter at the sentinel screen), so start the tail after that.
+
+**Boot detection**: the VM does not emit a standard `login:` prompt — the ceremony user is auto-logged-in and the sentinel TUI starts immediately. Wait for `"ANODIZE ROOT CA CEREMONY"` or `"Press Enter to begin the ceremony"` to detect that the VM is ready.
+
 **After a session**, inspect the BD-R image on your laptop:
 
 ```sh

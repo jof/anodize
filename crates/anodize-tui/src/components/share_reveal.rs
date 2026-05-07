@@ -195,7 +195,7 @@ impl ShareReveal {
                 )));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "  [Enter] Confirm transcription   [S] Hide share",
+                    "  [Enter] Confirm transcription   [S] Hide share   [j/k] Scroll",
                     dim,
                 )));
             } else {

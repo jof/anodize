@@ -327,11 +327,12 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
     tracing::info!("write_session_inner: device opened");
 
     // Defense in depth: refuse to write to rewritable media even if caller already checked
-    if let Ok(profile) = get_current_profile(&sg) {
-        if profile_is_rewritable(profile) {
-            anyhow::bail!("refusing to write to rewritable media (profile {profile:#06x})");
-        }
+    let profile = get_current_profile(&sg).unwrap_or(0);
+    if profile_is_rewritable(profile) {
+        anyhow::bail!("refusing to write to rewritable media (profile {profile:#06x})");
     }
+    let is_bdr = matches!(profile, 0x0041 | 0x0042);
+    tracing::info!(profile = format_args!("{profile:#06x}"), is_bdr, "write_session_inner: profile");
 
     // Verify disc is appendable
     tracing::info!("write_session_inner: reading disc info");
@@ -362,23 +363,28 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
     tracing::debug!("write_session_inner: SEND OPC");
     let _ = send_opc(&sg);
 
-    // Configure TAO write parameters — optional; cdemu virtual drives may return
-    // ILLEGAL_REQUEST for MODE SELECT. Physical drives that don't support it use
-    // their own defaults. Silently ignore failures.
-    let multi = if is_final {
-        MultiSession::FinalSession
+    // MODE SELECT page 0x05 (CD/DVD Write Parameters) — only applicable to CD-R/RW and
+    // DVD±R/RW media.  BD-R uses Sequential Recording Mode (SRM) natively and does not
+    // define page 0x05; sending it can put some drives (including cdemu) into an
+    // inconsistent state that causes subsequent WRITE(10) to fail.
+    if !is_bdr {
+        let multi = if is_final {
+            MultiSession::FinalSession
+        } else {
+            MultiSession::Open
+        };
+        tracing::debug!("write_session_inner: SET WRITE PARAMETERS");
+        let _ = set_write_parameters(
+            &sg,
+            &WriteParams {
+                write_type: WriteType::Tao,
+                multi_session: multi,
+                bufe: true,
+            },
+        );
     } else {
-        MultiSession::Open
-    };
-    tracing::debug!("write_session_inner: SET WRITE PARAMETERS");
-    let _ = set_write_parameters(
-        &sg,
-        &WriteParams {
-            write_type: WriteType::Tao,
-            multi_session: multi,
-            bufe: true,
-        },
-    );
+        tracing::debug!("write_session_inner: skipping SET WRITE PARAMETERS (BD-R SRM)");
+    }
 
     // Reserve track — optional; cdemu virtual drives may not require this.
     tracing::debug!("write_session_inner: RESERVE TRACK");
@@ -419,8 +425,9 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
     tracing::info!("write_session_inner: SYNCHRONIZE CACHE done");
 
     // Close track + session after every write so the drive (and cdemu) commits
-    // a proper session boundary.  The multisession write parameter (set above)
-    // keeps the disc appendable.  For the final session, Disc close finalizes.
+    // a proper session boundary.  On CD/DVD the MODE SELECT multi-session flag
+    // (set above for non-BD media) keeps the disc appendable.  BD-R SRM is
+    // appendable by default.  For the final session, Disc close finalizes.
     tracing::info!("write_session_inner: CLOSE TRACK");
     close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
     tracing::info!("write_session_inner: CLOSE TRACK done");

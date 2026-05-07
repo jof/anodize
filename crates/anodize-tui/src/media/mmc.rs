@@ -122,7 +122,9 @@ pub fn read_track_info(dev: &SgDev, track: u8) -> Result<TrackInfo> {
 pub enum WriteType {
     /// Track-at-Once (TAO): write_type=0x01 in MMC mode page 0x05.
     /// Tracks are written one at a time; sessions are closed explicitly via
-    /// CLOSE TRACK SESSION. This is the correct value for multi-session BD-R.
+    /// CLOSE TRACK SESSION.  Only applicable to CD-R/RW and DVD±R/RW.
+    /// BD-R uses Sequential Recording Mode (SRM) natively and does not
+    /// use mode page 0x05.
     Tao = 0x01,
     #[allow(dead_code)]
     Dao = 0x02,

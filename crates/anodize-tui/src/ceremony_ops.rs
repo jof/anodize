@@ -187,7 +187,9 @@ impl App {
         self.disc.burn_rx = None;
         match result {
             Some(Err(e)) => {
-                self.set_status(format!("Intent disc write failed: {e}"));
+                tracing::error!("tick_intent_burn: write failed: {e:#}");
+                self.set_status(format!("Intent disc write failed: {e:#}"));
+                self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.setup.phase = SetupPhase::WaitDisc;
                 self.disc.optical_dev = None;
             }
