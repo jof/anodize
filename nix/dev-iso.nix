@@ -84,10 +84,11 @@ in
   environment.variables.SOFTHSM2_MODULE = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
 
   # cdemu-daemon: userspace optical drive emulator, run as a user service.
-  # NOT wantedBy default.target — started on demand by the ceremony TUI
-  # so SSH sessions don't spawn competing VHBA registrations.
+  # Auto-starts on login and pulls in cdemu-load-bdr to populate the drive.
   systemd.user.services.cdemu-daemon = {
     description = "CDEmu daemon — virtual optical drive";
+    wantedBy    = [ "default.target" ];
+    wants       = [ "cdemu-load-bdr.service" ];
     serviceConfig = {
       Type       = "simple";
       ExecStart  = "${cdemu-daemon}/bin/cdemu-daemon --num-devices=1";
