@@ -209,7 +209,7 @@ impl Pkcs11Module {
             Err(e) => return Err(HsmError::Pkcs11(e)),
         }
 
-        // Strategy 2: login with factory PIN, then C_SetPIN.
+        // Strategy 2 & 3: login with factory PIN, optionally change it.
         let old_pin = factory_pin.ok_or_else(|| {
             HsmError::TokenNotFound(
                 "C_InitToken not supported and no factory_pin configured".to_string(),
@@ -219,12 +219,28 @@ impl Pkcs11Module {
 
         let session = self.ctx.open_rw_session(slot)?;
         session.login(UserType::User, Some(&old_auth))?;
-        session.set_pin(&old_auth, &user_auth)?;
-        session.logout()?;
 
-        // Re-login with new PIN.
-        session.login(UserType::User, Some(&user_auth))?;
-        tracing::info!("bootstrap_token: SetPIN fallback succeeded");
+        // Strategy 2: try C_SetPIN to rotate to the new user PIN.
+        match session.set_pin(&old_auth, &user_auth) {
+            Ok(()) => {
+                tracing::info!("bootstrap_token: C_SetPIN succeeded, re-logging in");
+                session.logout()?;
+                session.login(UserType::User, Some(&user_auth))?;
+            }
+            Err(cryptoki::error::Error::Pkcs11(
+                cryptoki::error::RvError::FunctionNotSupported,
+                _,
+            )) => {
+                // Strategy 3: device doesn't support PIN management via
+                // PKCS#11 (e.g. YubiHSM2). Stay logged in with factory
+                // credentials. Auth key rotation requires the native SDK.
+                tracing::warn!(
+                    "bootstrap_token: C_SetPIN not supported — proceeding \
+                     with factory credentials. Auth key rotation deferred."
+                );
+            }
+            Err(e) => return Err(HsmError::Pkcs11(e)),
+        }
 
         Ok(Pkcs11Hsm {
             ctx: self.ctx,
