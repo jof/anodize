@@ -151,19 +151,29 @@ impl Pkcs11Module {
         Ok(result)
     }
 
-    /// Bootstrap a token: C_InitToken → SO login → C_InitPIN → user login.
-    /// Returns a `Pkcs11Hsm` with an active user session, ready for key
-    /// generation.
+    /// Bootstrap a token and return an authenticated `Pkcs11Hsm`.
     ///
-    /// `slot_id` — the slot to initialise (from `list_tokens`).
-    /// `so_pin`  — Security Officer PIN to set on the token.
-    /// `user_pin`— User PIN to set (the SSS-reconstructed secret).
-    /// `label`   — desired token label (e.g. "anodize-root-2026").
+    /// Two strategies are attempted:
+    ///
+    /// 1. **C_InitToken path** (SoftHSM, generic PKCS#11): `C_InitToken` →
+    ///    SO login → `C_InitPIN` → user login.
+    /// 2. **SetPIN fallback** (YubiHSM2 and devices that don't support
+    ///    `C_InitToken`): login with `factory_pin` → `C_SetPIN` to
+    ///    `user_pin` → re-login with new PIN.
+    ///
+    /// `slot_id`     — target slot (from `list_tokens`).
+    /// `so_pin`      — Security Officer PIN (used as SO PIN if C_InitToken
+    ///                  succeeds).
+    /// `user_pin`    — User PIN to set (the SSS-reconstructed secret).
+    /// `factory_pin` — optional factory-default PIN for fallback path
+    ///                  (e.g. "0001password" for YubiHSM2).
+    /// `label`       — desired token label (e.g. "anodize-root-2026").
     pub fn bootstrap_token(
         self,
         slot_id: u64,
         so_pin: &SecretString,
         user_pin: &SecretString,
+        factory_pin: Option<&SecretString>,
         label: &str,
     ) -> Result<Pkcs11Hsm> {
         use cryptoki::slot::Slot;
@@ -174,17 +184,47 @@ impl Pkcs11Module {
         let so_auth = AuthPin::new(so_pin.expose_secret().to_string());
         let user_auth = AuthPin::new(user_pin.expose_secret().to_string());
 
-        // C_InitToken — sets label and SO PIN.
-        self.ctx.init_token(slot, &so_auth, label)?;
+        // Strategy 1: C_InitToken (full initialisation).
+        match self.ctx.init_token(slot, &so_auth, label) {
+            Ok(()) => {
+                tracing::info!("bootstrap_token: C_InitToken succeeded");
+                let session = self.ctx.open_rw_session(slot)?;
+                session.login(UserType::So, Some(&so_auth))?;
+                session.init_pin(&user_auth)?;
+                session.logout()?;
+                session.login(UserType::User, Some(&user_auth))?;
+                return Ok(Pkcs11Hsm {
+                    ctx: self.ctx,
+                    session: Some(session),
+                });
+            }
+            Err(cryptoki::error::Error::Pkcs11(
+                cryptoki::error::RvError::FunctionNotSupported,
+                _,
+            )) => {
+                tracing::info!(
+                    "bootstrap_token: C_InitToken not supported, trying SetPIN fallback"
+                );
+            }
+            Err(e) => return Err(HsmError::Pkcs11(e)),
+        }
 
-        // Open RW session, login as SO, set user PIN.
+        // Strategy 2: login with factory PIN, then C_SetPIN.
+        let old_pin = factory_pin.ok_or_else(|| {
+            HsmError::TokenNotFound(
+                "C_InitToken not supported and no factory_pin configured".to_string(),
+            )
+        })?;
+        let old_auth = AuthPin::new(old_pin.expose_secret().to_string());
+
         let session = self.ctx.open_rw_session(slot)?;
-        session.login(UserType::So, Some(&so_auth))?;
-        session.init_pin(&user_auth)?;
+        session.login(UserType::User, Some(&old_auth))?;
+        session.set_pin(&old_auth, &user_auth)?;
         session.logout()?;
 
-        // Re-login as normal user.
+        // Re-login with new PIN.
         session.login(UserType::User, Some(&user_auth))?;
+        tracing::info!("bootstrap_token: SetPIN fallback succeeded");
 
         Ok(Pkcs11Hsm {
             ctx: self.ctx,

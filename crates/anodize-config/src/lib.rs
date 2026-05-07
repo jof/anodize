@@ -69,6 +69,11 @@ pub struct HsmConfig {
     #[serde(default)]
     pub key_spec: KeySpec,
     pub pin_source: PinSource,
+    /// Factory-default PIN for devices that don't support C_InitToken
+    /// (e.g. YubiHSM2: "0001password"). Used only during InitRoot bootstrap
+    /// to login and then C_SetPIN to the SSS-reconstructed secret.
+    #[serde(default)]
+    pub factory_pin: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Default)]

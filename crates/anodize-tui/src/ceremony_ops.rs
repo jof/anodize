@@ -417,10 +417,13 @@ impl App {
         // separate SO PIN split.
         let so_pin = user_pin.clone();
 
+        let factory_pin = cfg.factory_pin.as_ref().map(|p| SecretString::new(p.clone()));
+
         let hsm = match module.bootstrap_token(
             target.slot_id,
             &so_pin,
             &user_pin,
+            factory_pin.as_ref(),
             &cfg.token_label,
         ) {
             Ok(h) => h,
