@@ -14,10 +14,7 @@ let
   });
 in
 {
-  # Keep ceremony user's systemd --user alive across TTY session restarts so
-  # cdemu-daemon (and its in-memory disc state) survives getty respawns.
   systemd.tmpfiles.rules = [
-    "f /var/lib/systemd/linger/ceremony"          # keep user manager alive across TTY restarts
     "d /run/anodize/share 0775 root wheel -"      # 9p mount point for dev-disc
   ];
 
@@ -90,9 +87,10 @@ in
   ]);
 
   # cdemu-daemon: userspace optical drive emulator, run as a user service.
+  # NOT wantedBy default.target — started on demand by the ceremony TUI
+  # so SSH sessions don't spawn competing VHBA registrations.
   systemd.user.services.cdemu-daemon = {
     description = "CDEmu daemon — virtual optical drive";
-    wantedBy    = [ "default.target" ];
     serviceConfig = {
       Type       = "simple";
       ExecStart  = "${cdemu-daemon}/bin/cdemu-daemon --num-devices=1";
@@ -102,9 +100,9 @@ in
   };
 
   # Load a blank BD-R image into cdemu slot 0 once the daemon is D-Bus-ready.
+  # Pulled in by cdemu-daemon via Wants= or started explicitly by the TUI.
   systemd.user.services.cdemu-load-bdr = {
     description = "Load blank BD-R into cdemu slot 0";
-    wantedBy    = [ "default.target" ];
     after       = [ "cdemu-daemon.service" ];
     requires    = [ "cdemu-daemon.service" ];
     serviceConfig = {

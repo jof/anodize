@@ -59,7 +59,7 @@ fn main() -> Result<()> {
     tui::init_panic_hook();
 
     // Set up tracing to file (best-effort — /run/anodize may not exist in dev)
-    let _guard = setup_tracing();
+    setup_tracing();
 
     // Terminal lifecycle
     let mut tui = tui::Tui::new()?;
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
 }
 
 /// Set up tracing-subscriber to write to /run/anodize/ceremony.log (or /tmp fallback).
-fn setup_tracing() -> Option<tracing::dispatcher::DefaultGuard> {
+fn setup_tracing() {
     use tracing_subscriber::{fmt, layer::SubscriberExt};
 
     let log_path = if std::path::Path::new("/run/anodize").exists() {
@@ -116,7 +116,7 @@ fn setup_tracing() -> Option<tracing::dispatcher::DefaultGuard> {
 
     let log_file = match std::fs::File::create(&log_path) {
         Ok(f) => f,
-        Err(_) => return None,
+        Err(_) => return,
     };
 
     let subscriber = tracing_subscriber::registry().with(
@@ -126,5 +126,7 @@ fn setup_tracing() -> Option<tracing::dispatcher::DefaultGuard> {
             .with_target(true),
     );
 
-    Some(tracing::subscriber::set_default(subscriber))
+    // Use set_global_default so spawned threads (e.g. the disc-write thread)
+    // also emit tracing output.
+    tracing::subscriber::set_global_default(subscriber).ok();
 }

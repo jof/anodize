@@ -26,6 +26,7 @@ pub enum Action {
     ProfileLoaded,
     HsmDetected,
     HsmDetectFailed(String),
+    HsmWarnAcknowledged,
     // Ceremony flow
     SetupComplete,
     SelectOperation(Operation),

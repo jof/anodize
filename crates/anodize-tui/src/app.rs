@@ -561,6 +561,12 @@ impl App {
                 self.set_status(format!("HSM detection failed: {msg}"));
                 self.setup.phase = SetupPhase::ProfileLoaded;
             }
+            Action::HsmWarnAcknowledged => {
+                self.setup.phase = SetupPhase::WaitDisc;
+                self.set_status(
+                    "Token missing acknowledged. Insert write-once disc and press [1].",
+                );
+            }
             Action::SetupComplete => {
                 self.setup_complete = true;
                 self.mode = Mode::Ceremony;

@@ -202,10 +202,7 @@ impl Component for SetupMode {
             SetupPhase::HsmDetect => {} // auto-advance after detection completes
             SetupPhase::HsmWarnTokenMissing => {
                 if key.code == KeyCode::Char('1') {
-                    self.phase = SetupPhase::WaitDisc;
-                    return Action::SetStatus(
-                        "Token missing acknowledged. Insert write-once disc and press [1].".into(),
-                    );
+                    return Action::HsmWarnAcknowledged;
                 }
             }
             SetupPhase::WaitDisc => {

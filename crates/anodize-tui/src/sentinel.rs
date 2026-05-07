@@ -115,6 +115,10 @@ fn main() -> Result<()> {
 
                 mem::forget(locked); // keeps fd (and flock) alive across exec
 
+                // Dev builds: ensure cdemu virtual optical drive is running.
+                #[cfg(feature = "dev-softhsm-usb")]
+                ensure_cdemu();
+
                 // ESC-c (RIS) resets the terminal before the TUI takes over,
                 // wiping the sentinel banner so ratatui starts with a clean slate.
                 print!("\x1bc");
@@ -227,6 +231,63 @@ fn print_banner() {
     println!("  Press [s] to power off.");
     println!("  Press [q] to exit.");
     println!();
+}
+
+/// Read the real UID of the current process from /proc/self/status.
+#[cfg(feature = "dev-softhsm-usb")]
+fn read_real_uid() -> Option<u32> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    status
+        .lines()
+        .find(|l| l.starts_with("Uid:"))
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+}
+
+/// Ensure the cdemu virtual optical drive is running (dev builds only).
+///
+/// Checks `systemctl --user is-active cdemu-load-bdr`; if not active, starts it
+/// (which pulls in cdemu-daemon via Requires=).  Best-effort — failures are
+/// printed but do not prevent the ceremony from launching.
+#[cfg(feature = "dev-softhsm-usb")]
+fn ensure_cdemu() {
+    // XDG_RUNTIME_DIR is required for `systemctl --user` to find the user
+    // manager socket.  PAM/logind normally sets this, but ceremony-shell
+    // sources /etc/set-environment which may not include it.
+    // Resolve real UID via /proc — avoids needing libc or nix 'user' feature.
+    let uid = read_real_uid().unwrap_or(1000);
+    let runtime_dir = format!("/run/user/{uid}");
+    std::env::set_var("XDG_RUNTIME_DIR", &runtime_dir);
+
+    // Already running?
+    if let Ok(out) = Command::new("systemctl")
+        .args(["--user", "is-active", "cdemu-load-bdr"])
+        .output()
+    {
+        if out.status.success() {
+            return; // already active
+        }
+    }
+
+    println!("  Starting cdemu virtual optical drive…\r");
+    match Command::new("systemctl")
+        .args(["--user", "start", "cdemu-load-bdr"])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            println!("  cdemu started.\r");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            println!("  WARNING: cdemu start failed (exit {}): {stderr}\r", out.status);
+        }
+        Err(e) => {
+            println!("  WARNING: could not run systemctl: {e}\r");
+        }
+    }
+
+    // Give cdemu-daemon a moment to register with VHBA and create /dev/sr0.
+    std::thread::sleep(std::time::Duration::from_secs(3));
 }
 
 /// Run `ip -brief addr show` and display the output (dev builds only).
