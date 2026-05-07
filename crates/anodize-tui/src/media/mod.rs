@@ -261,14 +261,19 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
         return Err("disc is finalized — insert a blank or appendable write-once disc".into());
     }
 
-    // Read sessions from tracks
+    // Read sessions from tracks.  Probe tracks 1..255 instead of
+    // relying on the disc-info session count, which can under-report
+    // on cdemu writable-load discs.
     let mut sessions: Vec<SessionEntry> = Vec::new();
-    if info.status != DiscStatus::Blank && info.sessions > 0 {
-        for track_num in 1..=info.sessions as u8 {
+    if info.status != DiscStatus::Blank {
+        for track_num in 1..=255u8 {
             let track = match read_track_info(&sg, track_num) {
                 Ok(t) => t,
-                Err(_) => continue,
+                Err(_) => break, // no more tracks
             };
+            if track.size_sectors == 0 {
+                continue; // blank/empty track
+            }
             // CD media reports a 150-sector pregap before the data area.
             // When start_lba wraps (>= 0x8000_0000), it's a negative CD-style
             // offset; skip to the data area.  BD-R/DVD start at 0 with no gap.
