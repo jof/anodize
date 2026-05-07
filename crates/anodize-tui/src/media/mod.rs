@@ -269,13 +269,21 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
                 Ok(t) => t,
                 Err(_) => continue,
             };
-            let n_sectors = track.size_sectors.max(1) as usize;
-            let mut image = vec![0u8; n_sectors * iso9660::SECTOR];
-            if let Err(e) = read_sectors(&sg, track.start_lba, &mut image) {
+            // CD media reports a 150-sector pregap before the data area.
+            // When start_lba wraps (>= 0x8000_0000), it's a negative CD-style
+            // offset; skip to the data area.  BD-R/DVD start at 0 with no gap.
+            let (read_lba, read_sectors_n) = if track.start_lba >= 0x8000_0000 {
+                let gap = 0u32.wrapping_sub(track.start_lba);
+                (0u32, track.size_sectors.saturating_sub(gap).max(1) as usize)
+            } else {
+                (track.start_lba, track.size_sectors.max(1) as usize)
+            };
+            let mut image = vec![0u8; read_sectors_n * iso9660::SECTOR];
+            if let Err(e) = read_sectors(&sg, read_lba, &mut image) {
                 tracing::warn!(
                     "cannot read session {} at LBA {}: {e}",
                     track_num,
-                    track.start_lba
+                    read_lba
                 );
                 continue;
             }
