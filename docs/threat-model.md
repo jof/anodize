@@ -8,7 +8,7 @@ This document describes the trust boundaries, attack surface, and mitigations fo
 
 | Boundary | Inside | Outside |
 |---|---|---|
-| HSM PKCS#11 interface | Private key material, PIN-gated signing | Anodize binary, ceremony operator |
+| HSM backend interface | Private key material, PIN-gated signing | Anodize binary, ceremony operator |
 | Air-gapped machine | Ceremony binary, RAM state, mounted shuttle | Network, external hosts |
 | Write-once disc | Committed audit sessions, `STATE.JSON` | RAM-resident artifacts pre-commit |
 | Shuttle USB | `profile.toml`, CSRs, signed artifacts | Operator's source environment |

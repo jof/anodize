@@ -6,15 +6,16 @@ For project goals, domain concepts, and the ceremony pipeline, see the [overview
 
 ## Architectural decisions
 
-### Dynamic linking is required
+### Pluggable HSM backends
 
-PKCS#11 is a `dlopen`-at-runtime contract. The whole point of the abstraction is that the same binary loads `libsofthsm2.so` in dev and `yubihsm_pkcs11.so` in prod by changing a module name in a config file. So:
+Anodize supports multiple HSM backends through a trait-based abstraction. Each backend implements the `HsmBackend` trait (device lifecycle: probe, bootstrap, open session) and the `Hsm` trait (session operations: login, sign, key generation). The `profile.toml` `backend` field selects which backend to use at runtime.
 
-- The Anodize binary is built against **musl** and linked statically *for everything except the C runtime's dynamic loader*. This gives a single self-contained ELF that still has `dlopen`.
-- The ISO ships the PKCS#11 `.so` modules as separate files alongside the binary.
-- A config file (or `--pkcs11-module` flag) selects which module to load.
+Two backends ship today:
 
-`cryptoki` (the maintained PKCS#11 binding) handles the `dlopen` via `Pkcs11::new(path)`. Static linkage of the PKCS#11 module would defeat the whole swap-ability that motivates the abstraction.
+- **`SoftHsmBackend`** — PKCS#11 via `cryptoki` + `dlopen`. Locates `libsofthsm2.so` from the `SOFTHSM2_MODULE` env var or well-known paths. Used in dev/CI.
+- **`YubiHsmBackend`** — native USB HID via the `yubihsm` crate. Talks directly to the YubiHSM 2 over `libusb`; no PKCS#11 wrapper or connector daemon required. Used in production.
+
+The SoftHSM backend still requires dynamic linking (`dlopen`) for the PKCS#11 module. The YubiHSM backend is pure Rust + libusb and does not use `dlopen`.
 
 ### One binary, two profiles
 
@@ -29,29 +30,26 @@ country      = "US"
 cdp_url      = "http://crl.example.com/root.crl"
 
 [hsm]
-module_name  = "libsofthsm2.so"   # or "yubihsm_pkcs11.so"
+backend      = "softhsm"   # or "yubihsm"
 token_label  = "anodize-root-2026"
 key_label    = "root-key"
 key_spec     = "ecdsa-p384"
-pin_source   = "prompt"   # "prompt" | "env:ANODIZE_PIN" | "file:/run/anodize/pin"
 ```
 
 ### HsmActor for thread safety
 
-PKCS#11's `C_Initialize` is process-global and `cryptoki`'s `Session` contains a raw pointer (`*mut u32`), making `Pkcs11Hsm` `!Sync`. The actor pattern resolves this without `unsafe`:
+Some HSM backends are `!Sync` (e.g., `cryptoki`'s `Session` contains a raw pointer). The actor pattern resolves this without `unsafe`:
 
-- `Pkcs11Hsm` is owned exclusively by a dedicated thread.
+- The `Hsm` implementation (a `Box<dyn Hsm>`) is owned exclusively by a dedicated thread.
 - `HsmActor` wraps it with `SyncSender<HsmRequest>` rendezvous channels.
 - `HsmActor` is `Send + Sync + Clone`. Cloning gives a second handle to the same session — all requests are serialised on the actor thread, so sharing is safe.
 
 ```
-caller thread ──SyncSender<HsmRequest>──► hsm-actor thread (owns Pkcs11Hsm)
+caller thread ──SyncSender<HsmRequest>──► hsm-actor thread (owns Box<dyn Hsm>)
               ◄──SyncSender<Result<T>>───
 ```
 
-### Multiple Pkcs11Hsm instances
-
-`C_Initialize` returns `CKR_CRYPTOKI_ALREADY_INITIALIZED` when called a second time in the same process. `Pkcs11Hsm::new` treats this as success — the library is already running and the new context can issue C-level calls normally. This allows unit tests and binaries that create more than one `Pkcs11Hsm` (e.g., opening two different tokens) to work without special handling.
+The `HsmBackend::open_session()` and `HsmBackend::bootstrap()` methods return a `Box<dyn Hsm>`, which is passed to `HsmActor::spawn()`. The caller never needs to know the concrete backend type.
 
 ### Two binaries (one crate)
 
@@ -151,30 +149,37 @@ The `verify_log` function (in `anodize-audit`) walks the file, recomputes hashes
 
 ## The Hsm trait
 
-The soft-vs-hard swap lives entirely behind this trait:
+Two trait layers separate device lifecycle from session operations:
 
 ```rust
+/// Device lifecycle — probe, bootstrap, open session.
+pub trait HsmBackend: Send {
+    fn probe_token(&self, label: &str) -> Result<bool>;
+    fn list_tokens(&self) -> Result<Vec<SlotTokenInfo>>;
+    fn bootstrap(&self, slot: u64, so_pin: &str, user_pin: &str, label: &str) -> Result<Box<dyn Hsm>>;
+    fn open_session(&self, token_label: &str, pin: &SecretString) -> Result<Box<dyn Hsm>>;
+}
+
+/// Session operations — signing, key management.
 pub trait Hsm: Send {
     fn login(&mut self, pin: &SecretString) -> Result<()>;
     fn logout(&mut self) -> Result<()>;
-
     fn find_key(&self, label: &str) -> Result<KeyHandle>;
     fn generate_keypair(&mut self, label: &str, spec: KeySpec) -> Result<KeyHandle>;
-
-    /// `data` is hashed-then-signed inside the HSM for ECDSA/RSA.
-    /// Private key material never crosses this boundary.
     fn sign(&self, key: KeyHandle, mech: SignMech, data: &[u8]) -> Result<Vec<u8>>;
-
-    /// Returns DER-encoded SubjectPublicKeyInfo.
     fn public_key_der(&self, key: KeyHandle) -> Result<Vec<u8>>;
+    fn list_slot_details(&self) -> Result<Vec<SlotTokenInfo>>;
 }
 ```
 
 Implementations:
-- `Pkcs11Hsm` — production + dev. One backend covers SoftHSM2 and YubiHSM 2.
-- `HsmActor` — `Send + Sync + Clone` wrapper via actor thread (see above).
+- `SoftHsmBackend` / `Pkcs11Hsm` — SoftHSM2 via PKCS#11 (`cryptoki` crate). Dev and CI.
+- `YubiHsmBackend` / `YubiHsmSession` — YubiHSM 2 via native USB (`yubihsm` crate). Production.
+- `HsmActor` — `Send + Sync + Clone` wrapper via actor thread (see above). Wraps any `Box<dyn Hsm>`.
 
-`KeyHandle` stores both `priv_handle` and `pub_handle: Option<ObjectHandle>`. Storing the public key handle directly from `generate_key_pair` avoids a label-based object search that fails on some SoftHSM2 builds.
+The factory function `create_backend(kind: HsmBackendKind) -> Result<Box<dyn HsmBackend>>` instantiates the appropriate backend from the profile config.
+
+`KeyHandle` stores `priv_id: u64` and `pub_id: Option<u64>` — backend-agnostic numeric identifiers. For PKCS#11, these are object handles; for YubiHSM, they are key IDs.
 
 ### X.509 signing bridge
 
@@ -183,7 +188,7 @@ The x509-cert builder requires a signer that implements `signature::Keypair` + `
 - Stores a `p384::ecdsa::VerifyingKey` (parsed from `hsm.public_key_der()` at construction time).
 - `try_sign(msg)` pre-hashes `msg` with SHA-384 in Rust, then calls `hsm.sign(key, EcdsaSha384, digest)` using raw `CKM_ECDSA`. The returned 96-byte P1363 result is converted to DER via `p384::ecdsa::Signature::try_from(bytes)?.to_der()`.
 
-Pre-hashing in Rust rather than using `CKM_ECDSA_SHA384` is necessary because SoftHSM2 2.6.x (the Ubuntu package version) returns `CKR_MECHANISM_INVALID` for the combined hash-sign mechanism. `CKM_ECDSA` with a pre-computed digest works on both SoftHSM2 and YubiHSM 2.
+For the SoftHSM backend, the combined `CKM_ECDSA_SHA384` mechanism is tried first; if the token returns `CKR_MECHANISM_INVALID` (SoftHSM2 2.6.x), the code falls back to pre-hashing with SHA-384 in Rust and signing the digest with raw `CKM_ECDSA`. The YubiHSM backend always pre-hashes in Rust and calls `sign_ecdsa_prehash_raw`.
 
 ### CRL construction
 
@@ -197,7 +202,8 @@ Pre-hashing in Rust rather than using `CKM_ECDSA_SHA384` is necessary because So
 
 | Need | Crate | Rationale |
 |---|---|---|
-| PKCS#11 | `cryptoki 0.7` | Maintained, real `dlopen`, production-proven |
+| PKCS#11 (SoftHSM) | `cryptoki 0.7` | Maintained, real `dlopen`, production-proven |
+| YubiHSM native | `yubihsm 0.42` | Official Yubico SDK, USB HID via `libusb` |
 | X.509 building | `x509-cert 0.2` + `der 0.7` + `spki 0.7` | More control than `rcgen`. We construct the TbsCertificate and hand bytes to the HSM for signing. `rcgen` wants to own the signing key — we can't allow that. |
 | ECDSA | `p384 0.13` with `ecdsa`, `pkcs8` features | Verification in tests; VerifyingKey from SPKI DER for HsmSigner |
 | DER signature | `ecdsa` with `der` feature | `ecdsa::der::Signature<C>` for X.509 builder; `From<ecdsa::Signature<C>>` for P1363→DER |
@@ -227,7 +233,7 @@ The HSM PIN is a 32-byte random value split via Shamir over GF(256) (`anodize-ss
 
 **Share commitments**: each share has a SHA-256 commitment `H(index || custodian_name || y_bytes)` stored in `STATE.JSON`. At quorum time, the presented share is checked against its commitment before reconstruction proceeds, preventing share-index spoofing.
 
-**PIN verification hash**: `H(pin_bytes)` stored in `STATE.JSON` allows pre-login verification, avoiding wasting PKCS#11 retry attempts on reconstructed-PIN mismatches.
+**PIN verification hash**: `H(pin_bytes)` stored in `STATE.JSON` allows pre-login verification, avoiding wasting HSM retry attempts on reconstructed-PIN mismatches.
 
 ---
 
@@ -285,8 +291,8 @@ boot.tmpOnTmpfs = true;              # ephemeral state only in RAM
 
 Packages included:
 - `anodize-ceremony` (the TUI binary)
-- `softhsm2` (dev/testing)
-- `opensc` + `yubihsm-shell` (prod)
+- `libusb1` (USB HID access for YubiHSM 2 native backend)
+- Dev ISO adds: `softhsm2`, `opensc`, `sg3_utils`
 - No SSH, no package manager, no shell for the operator
 
 The operator interaction surface is entirely the numbered ratatui TUI menu.
@@ -298,7 +304,7 @@ The operator interaction surface is entirely the numbered ratatui TUI menu.
 | Milestone | Status | Key deliverables |
 |---|---|---|
 | Bootstrap | done | Cargo workspace, CI pipeline, `deny.toml` |
-| HSM abstraction | done | `Hsm` trait, `Pkcs11Hsm`, `HsmActor`, SoftHSM2 integration tests |
+| HSM abstraction | done | `Hsm` + `HsmBackend` traits, `SoftHsmBackend`, `YubiHsmBackend`, `HsmActor`, SoftHSM2 integration tests |
 | CA core | done | `anodize-ca` (`build_root_cert`, `sign_intermediate_csr`, `issue_crl`), `P384HsmSigner`, `anodize-config` |
 | Audit log | done | `anodize-audit`, JSONL chain with SHA-256, `verify_log`, corruption tests |
 | Ceremony TUI | done | ratatui wizard, disc-before-shuttle invariant, PIN noise masking |

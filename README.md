@@ -3,7 +3,7 @@
 > An offline Rust root CA. Like aluminum's oxide layer, the rust *is* the protection.
 > ("Anodize" — to deliberately oxidize for protection. Also: to make *not a node*.)
 
-Anodize is a small, auditable root-CA tool written in Rust. It runs air-gapped from a verified live ISO on a laptop, talks to its signing key only through a PKCS#11 module, and produces byte-identical ISO builds via Nix.
+Anodize is a small, auditable root-CA tool written in Rust. It runs air-gapped from a verified live ISO on a laptop, talks to its signing key through a pluggable HSM backend (SoftHSM2 via PKCS#11 for dev, YubiHSM 2 via native USB for production), and produces byte-identical ISO builds via Nix.
 
 ## What it does
 
@@ -27,7 +27,7 @@ Anodize is a small, auditable root-CA tool written in Rust. It runs air-gapped f
 | Dev / CI | SoftHSM2 | `--skip-disc` flag; writes staging ISO to `/run/anodize/staging` |
 | Production | YubiHSM 2 | BD-R or DVD-R in an optical drive (SG_IO SAO) |
 
-The `Hsm` trait abstracts both HSM backends. The binary has no compile-time knowledge of which backend it will use.
+The `Hsm` and `HsmBackend` traits abstract both HSM backends. A `create_backend()` factory function instantiates the appropriate backend from the `backend` field in `profile.toml`. The binary has no compile-time knowledge of which backend it will use.
 
 ## Security invariants
 
@@ -35,7 +35,7 @@ The `Hsm` trait abstracts both HSM backends. The binary has no compile-time know
 - **Write-ahead log**: before any HSM key operation, an intent session (AUDIT.LOG with a `cert.root.intent` record anchored to SHA-256(profile.toml)) is committed to disc. The HSM only signs after that disc commit confirms. A signed cert cannot exist without a disc record of intent.
 - **Log genesis**: audit log `prev_hash[0]` = SHA-256(profile.toml bytes) — established before the HSM key operation (WAL prerequisite); any stable operator-chosen byte sequence works as an anchor
 - **CSR validation**: signature verified before any field is parsed
-- **PIN source**: `pin_source = "prompt"` is the only safe value in ceremony; `env:` and `file:` variants emit a runtime warning
+- **PIN handling**: the HSM PIN is always generated as a 32-byte random value and split via SSS; no operator-chosen PINs
 - **Clock check**: the TUI's first screen requires the operator to confirm the UTC system clock before any timestamped session is written to disc
 - **Single-ceremony terminal**: `anodize-sentinel` acquires an exclusive flock before exec-ing the ceremony process; a second terminal cannot start a ceremony while one is already running
 
@@ -65,7 +65,7 @@ anodize/
 ├── deny.toml                     # cargo-deny supply-chain policy
 ├── Makefile                      # dev shortcuts
 ├── crates/
-│   ├── anodize-hsm/              # PKCS#11 abstraction — Hsm trait + cryptoki backend
+│   ├── anodize-hsm/              # HSM abstraction — Hsm + HsmBackend traits, SoftHSM + YubiHSM backends
 │   ├── anodize-ca/               # X.509 cert/CRL generation, CSR validation
 │   ├── anodize-audit/            # hash-chained JSONL audit log
 │   ├── anodize-config/           # TOML profile loader (profile.toml)

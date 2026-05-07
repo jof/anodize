@@ -16,13 +16,15 @@ against a YubiHSM 2 in production.
 
 ### Added
 
-- **`anodize-hsm`** — PKCS#11 abstraction layer. `Pkcs11Hsm` opens any
-  PKCS#11 module at runtime via `dlopen` and finds tokens by label (not slot
-  index, which is unstable across USB reconnects). `HsmActor` wraps it in a
-  dedicated thread + rendezvous channel so the `!Sync` session handle is safe
-  to use from async or multi-threaded callers. Works against SoftHSM2 in dev
-  and YubiHSM 2 in production with no code changes — only the module path in
-  the config differs.
+- **`anodize-hsm`** — Pluggable HSM abstraction layer. `HsmBackend` trait
+  handles device lifecycle (probe, bootstrap, open session); `Hsm` trait
+  handles session operations (login, sign, key generation). Two backends:
+  `SoftHsmBackend` (PKCS#11 via `cryptoki` for SoftHSM2, dev/CI) and
+  `YubiHsmBackend` (native USB via `yubihsm` crate for YubiHSM 2, production).
+  `HsmActor` wraps any `Box<dyn Hsm>` in a dedicated thread + rendezvous
+  channel so `!Sync` session handles are safe to use from multi-threaded
+  callers. The `create_backend()` factory instantiates the appropriate backend
+  from the `backend` field in `profile.toml`.
 
 - **`anodize-ca`** — X.509 operations. Issues root certificates, signs
   intermediate CSRs, and produces CRLs via P-384/ECDSA. Private key material
@@ -36,8 +38,8 @@ against a YubiHSM 2 in production.
   that produced it. Arithmetic and chain-verification helpers included.
 
 - **`anodize-config`** — TOML profile loader (`profile.toml` on the USB
-  stick). Emits a runtime warning when `pin_source` is `env:` or `file:`;
-  `prompt` is the only safe value for a real ceremony.
+  stick). Defines `HsmBackendKind` enum (`Softhsm`, `Yubihsm`) for backend
+  selection via the `backend` field in `[hsm]`.
 
 - **`anodize-tui`** — ratatui ceremony binary. Full flow: HSM login (with
   randomised display length to prevent PIN-length disclosure), key

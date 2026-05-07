@@ -45,11 +45,10 @@ country      = "US"
 cdp_url      = "http://crl.example.com/root.crl"  # must be reachable after ceremony
 
 [hsm]
-module_name  = "yubihsm_pkcs11.so"
+backend      = "yubihsm"
 token_label  = "anodize-root-2026"   # must match the token you initialised
 key_label    = "root-key"
 key_spec     = "ecdsa-p384"
-pin_source   = "prompt"              # always prompt for ceremony
 ```
 
 Print a copy of this file. Two operators should independently verify the values
@@ -88,7 +87,7 @@ Seal the HSM in a tamper-evident bag labelled with today's date and the token la
 
 1. Insert the USB stick containing `profile.toml`.
 2. The launcher detects `profile.toml` and loads the TUI with your profile values.
-3. Insert the YubiHSM 2. The TUI detects the HSM via PKCS#11 (no login yet).
+3. Insert the YubiHSM 2. The TUI detects the HSM via the native USB backend (no login yet).
    The status bar shows "HSM detected" once the token is found.
 
 ### Step 4 — Select InitRoot and configure custodians

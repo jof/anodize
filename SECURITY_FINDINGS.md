@@ -11,21 +11,10 @@ Findings are ordered by severity. Each is a confirmed true positive, cross-refer
 
 ### FIND-01 — SHA-384 hash is computed in the calling process, not inside the HSM
 
-**File:** [crates/anodize-hsm/src/lib.rs:222–235](crates/anodize-hsm/src/lib.rs#L222)  
+**File:** `crates/anodize-hsm/src/softhsm.rs` (SoftHSM backend), `crates/anodize-hsm/src/yubihsm_backend.rs` (YubiHSM backend)  
 **Also:** [crates/anodize-ca/src/lib.rs:76–82](crates/anodize-ca/src/lib.rs#L76) (misleading doc comment)
 
-The `Pkcs11Hsm::sign` implementation pre-hashes the message with `sha2::Sha384::digest(data)` in the calling process, then forwards only the digest to the HSM via raw `CKM_ECDSA`. The hash operation therefore runs in the same address space as the ceremony binary, not inside the hardware trust boundary.
-
-```rust
-// anodize-hsm/src/lib.rs
-fn sign(&self, key: KeyHandle, mech: SignMech, data: &[u8]) -> Result<Vec<u8>> {
-    let digest: Vec<u8> = match mech {
-        SignMech::EcdsaSha384 => sha2::Sha384::digest(data).to_vec(), // ← in software
-        ...
-    };
-    Ok(self.session().sign(&Mechanism::Ecdsa, key.priv_handle, &digest)?) // raw ECDSA
-}
-```
+Both HSM backend `sign` implementations pre-hash the message with `sha2::Sha384::digest(data)` in the calling process, then forward only the digest to the HSM. For SoftHSM (PKCS#11), raw `CKM_ECDSA` is used; for YubiHSM, `sign_ecdsa_prehash_raw` is used. The hash operation therefore runs in the same address space as the ceremony binary, not inside the hardware trust boundary.
 
 The `P384HsmSigner` struct carries a contradictory doc comment:
 
@@ -38,7 +27,7 @@ This statement is false. The `Hsm` trait also documents: *"All signing operation
 
 **Impact:** Any code-execution primitive in the ceremony process — even a logic bug that allows controlled data to reach `sign()` — can substitute a chosen digest for the one that would be produced by the legitimately-presented data, without the HSM detecting the substitution. The primary stated security property of "hash-then-sign inside HSM" is not realized. In the current airgapped, read-only-root environment the exploitability is low, but the architecture does not match the documented security model.
 
-**Fix:** Use `CKM_ECDSA_SHA384` directly (the PKCS#11 v3.0 standard mandates it; SoftHSM2 >= 2.6 and YubiHSM 2 both support it). Remove the software pre-hash. Update the `P384HsmSigner` doc comment.
+**Fix:** For the SoftHSM backend, use `CKM_ECDSA_SHA384` directly (the PKCS#11 v3.0 standard mandates it; SoftHSM2 >= 2.6 supports it). For YubiHSM, the native SDK does not expose a combined hash-sign API, so pre-hashing is unavoidable — document this limitation. Update the `P384HsmSigner` doc comment.
 
 ---
 
@@ -77,27 +66,9 @@ After processing session 1, `prev_hash` = `H(intent_record)`. Session 2's first 
 
 ---
 
-### FIND-03 — `pin_source` safety warning is silently overwritten before the TUI renders
+### FIND-03 — ~~`pin_source` safety warning is silently overwritten before the TUI renders~~ (RESOLVED)
 
-**File:** [crates/anodize-tui/src/main.rs:471–484](crates/anodize-tui/src/main.rs#L471)
-
-When a profile with `pin_source = "env:VAR"` or `pin_source = "file:/path"` is loaded, the background tick sets a warning, then immediately overwrites it with "Profile loaded from USB." in the same function call, before the TUI frame is rendered:
-
-```rust
-if profile.hsm.pin_source != PinSource::Prompt {
-    self.status = "WARNING: pin_source is not 'prompt' — unsuitable for ceremony".into();
-}
-// ... check_module_allowed ...
-self.profile = Some(profile);
-self.state = AppState::ProfileLoaded;
-self.status = "Profile loaded from USB.".into();  // ← silently overwrites the warning
-```
-
-The operator never sees the PIN-source warning. The ceremony transitions to `ProfileLoaded`, proceeds to HSM login, and runs to completion using a PIN drawn from an environment variable or file on an unprotected path — without any visible indication.
-
-**Impact:** A misconfigured profile that violates the ceremony security policy passes silently. The `PinSource::warn_if_unsafe` method exists but is not called anywhere in the TUI path.
-
-**Fix:** Do not overwrite the warning. Either (a) block the state transition to `ProfileLoaded` when `pin_source != Prompt` and display an explicit error that requires operator acknowledgement, or (b) set the warning as a persistent banner rather than the transient status line.
+**Status:** Resolved. The `pin_source` configuration field has been removed entirely. The HSM PIN is always generated as a 32-byte random value by the TUI and split via Shamir Secret Sharing — there is no mechanism for operators to supply a PIN from an environment variable or file. The `PinSource` enum no longer exists.
 
 ---
 
@@ -126,7 +97,7 @@ The first `append` will write a record with `prev_hash = ""`, silently severing 
 
 ### FIND-05 — EC point parsing heuristic can misidentify an unwrapped P-384 point as wrapped
 
-**File:** [crates/anodize-hsm/src/lib.rs:308–322](crates/anodize-hsm/src/lib.rs#L308)
+**File:** `crates/anodize-hsm/src/softhsm.rs` (SoftHSM backend — PKCS#11 `public_key_der` fallback path)
 
 The fallback SPKI builder strips the DER OCTET STRING wrapper from `CKA_EC_POINT` using a structural heuristic:
 

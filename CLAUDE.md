@@ -61,7 +61,7 @@ Five library crates plus one binary crate.
 
 | Crate | Role | Status |
 |---|---|---|
-| `anodize-hsm` | PKCS#11 abstraction | Implemented |
+| `anodize-hsm` | HSM abstraction (pluggable backends) | Implemented |
 | `anodize-ca` | X.509 cert/CRL/CSR | Implemented |
 | `anodize-audit` | Hash-chained JSONL log | Implemented |
 | `anodize-config` | TOML profile loader | Implemented |
@@ -69,13 +69,20 @@ Five library crates plus one binary crate.
 
 ### HSM abstraction layer (`anodize-hsm`)
 
-The `Hsm` trait (`crates/anodize-hsm/src/lib.rs`) is the central seam. All signing happens inside the HSM; private key material never crosses into the process.
+Two traits form the central seam (`crates/anodize-hsm/src/lib.rs`). All signing happens inside the HSM; private key material never crosses into the process.
 
-Two implementations:
+- **`HsmBackend`** trait: device lifecycle — `probe_token`, `list_tokens`, `bootstrap`, `open_session`. Returns `Box<dyn Hsm>`.
+- **`Hsm`** trait: session operations — `login`, `logout`, `find_key`, `generate_keypair`, `sign`, `public_key_der`, `list_slot_details`.
 
-- **`Pkcs11Hsm`**: opens a PKCS#11 module via `dlopen` at runtime (handled by `cryptoki::Pkcs11::new(path)`). Finds the token by label (not slot index — YubiHSM slot indices are unstable across USB reconnects). The same struct works against SoftHSM2 in dev and YubiHSM 2 in prod — only the module path in the config changes.
+Three implementations:
 
-- **`HsmActor`**: `Pkcs11Hsm` is `!Sync` because `cryptoki::Session` holds a raw pointer. `HsmActor` resolves this by owning `Pkcs11Hsm` on a dedicated thread and forwarding all calls via `SyncSender<HsmRequest>` rendezvous channels. `HsmActor` is `Send + Sync` and is the type to use everywhere outside the HSM crate itself.
+- **`SoftHsmBackend` / `Pkcs11Hsm`** (`softhsm.rs`): opens SoftHSM2 via PKCS#11 `dlopen`. Locates the module from `SOFTHSM2_MODULE` env var or well-known paths. Finds tokens by label (not slot index). Used in dev/CI.
+
+- **`YubiHsmBackend` / `YubiHsmSession`** (`yubihsm_backend.rs`): talks to YubiHSM 2 over native USB HID via the `yubihsm` crate + `libusb`. No PKCS#11 wrapper or connector daemon needed. Used in production.
+
+- **`HsmActor`**: wraps any `Box<dyn Hsm>` on a dedicated thread with `SyncSender<HsmRequest>` rendezvous channels. `HsmActor` is `Send + Sync + Clone` and is the type to use everywhere outside the HSM crate.
+
+The factory function `create_backend(kind: HsmBackendKind)` instantiates the appropriate backend from the `backend` field in `profile.toml`.
 
 ### X.509 signing bridge (`anodize-ca`)
 
@@ -108,7 +115,7 @@ Two binaries ship on the ISO:
 - **Write-ahead log**: intent committed to disc before HSM key operation. A half-burned session is detectable on resume; the TUI must refuse to burn again at the same disc position.
 - **Audit log genesis**: `prev_hash[0]` must be SHA-256(profile.toml bytes) — established as a WAL prerequisite before any key operation. Do not allow a configurable or zero genesis hash.
 - **CSR policy**: verify the CSR signature before parsing any fields. Only copy a fixed extension allowlist (BasicConstraints, KeyUsage, SKID, AKID, CDP). Reject all others.
-- **PIN source warning**: `pin_source = env:` or `file:` must emit a runtime warning; `prompt` is the only safe ceremony value.
+- **PIN handling**: the HSM PIN is always generated as a 32-byte random value and split via SSS. No operator-chosen PINs or external PIN sources.
 
 ## Development workflow
 

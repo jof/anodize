@@ -1,13 +1,13 @@
 # Anodize — Overview
 
-Anodize is a small, auditable root-CA ceremony tool written in Rust. It runs from a verified live ISO on an air-gapped machine and talks to its signing key exclusively through a PKCS#11 module.
+Anodize is a small, auditable root-CA ceremony tool written in Rust. It runs from a verified live ISO on an air-gapped machine and talks to its signing key through a pluggable HSM backend (SoftHSM2 via PKCS#11 for dev, YubiHSM 2 via native USB for production).
 
 ## Goals
 
 1. A small, auditable root-CA tool written in Rust.
 2. Runs from a verified live ISO on an air-gapped machine.
-3. Talks to its signing key only through a **PKCS#11** module.
-4. Tests against **SoftHSM2** in dev/CI; runs against a **YubiHSM 2** in production with no code changes — only a config swap.
+3. Talks to its signing key through a **pluggable HSM backend** — PKCS#11 for SoftHSM2, native USB for YubiHSM 2.
+4. Tests against **SoftHSM2** in dev/CI; runs against a **YubiHSM 2** in production with no code changes — only a `backend` field swap in `profile.toml`.
 5. Reproducible build of both the binary and the ISO.
 
 ## Non-goals
@@ -22,7 +22,7 @@ Anodize is a small, auditable root-CA ceremony tool written in Rust. It runs fro
 
 ### One binary, two profiles
 
-The binary has no compile-time knowledge of the HSM backend. A `profile.toml` on the shuttle USB selects the PKCS#11 module (`libsofthsm2.so` in dev, `yubihsm_pkcs11.so` in prod) and configures CA identity. The same binary is used in every environment.
+The binary has no compile-time knowledge of the HSM backend. A `profile.toml` on the shuttle USB selects the backend (`backend = "softhsm"` in dev, `backend = "yubihsm"` in prod) and configures CA identity. The same binary is used in every environment.
 
 ### Shuttle and disc
 
@@ -37,7 +37,7 @@ The **disc-before-shuttle invariant** ensures that every signed artifact is comm
 
 The HSM PIN is a 32-byte random value split via Shamir over GF(256). Share parameters (threshold *k*, total *n*, custodian names) are chosen at root-init and stored as metadata on the audit disc. Shares are never stored digitally — custodians hold paper transcripts using a 256-word wordlist encoding with CRC-8 checksums.
 
-Share commitments and a PIN verification hash are stored on the disc, allowing pre-login validation of reconstructed PINs without wasting PKCS#11 retry attempts.
+Share commitments and a PIN verification hash are stored on the disc, allowing pre-login validation of reconstructed PINs without wasting HSM retry attempts.
 
 ### Audit log
 
