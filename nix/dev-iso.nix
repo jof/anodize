@@ -110,6 +110,16 @@ in
         set -euo pipefail
         share=/run/anodize/share
 
+        # Wait for the 9p mount (system mount unit, can't depend from user service).
+        for i in $(seq 1 30); do
+          if mountpoint -q "$share" 2>/dev/null; then break; fi
+          if [ "$i" -eq 30 ]; then
+            echo "ERROR: 9p share not mounted at $share after 30s" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+
         # Wait for cdemu-daemon to register on the session D-Bus (up to 30 s).
         for i in $(seq 1 30); do
           if ${pkgs.glib}/bin/gdbus introspect --session \
