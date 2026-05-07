@@ -322,7 +322,9 @@ pub fn write_session(
 }
 
 fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) -> Result<()> {
+    tracing::info!("write_session_inner: opening {}", dev.display());
     let sg = SgDev::open(dev).with_context(|| format!("open optical device {}", dev.display()))?;
+    tracing::info!("write_session_inner: device opened");
 
     // Defense in depth: refuse to write to rewritable media even if caller already checked
     if let Ok(profile) = get_current_profile(&sg) {
@@ -332,10 +334,16 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
     }
 
     // Verify disc is appendable
+    tracing::info!("write_session_inner: reading disc info");
     let info = read_disc_info(&sg).context("READ DISC INFORMATION")?;
     if !info.status.is_appendable() {
         anyhow::bail!("disc is not appendable (status={:?})", info.status);
     }
+    tracing::info!(
+        status = ?info.status,
+        sessions = info.sessions,
+        "write_session_inner: disc info OK"
+    );
 
     // Get the NWA (Next Writable Address) for the new session
     // For a blank disc the last track is the invisible track (0xFF)
@@ -346,10 +354,12 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
             .map(|t| t.nwa)
             .unwrap_or(info.nwa)
     };
+    tracing::info!(nwa, "write_session_inner: NWA resolved");
 
     // OPC calibration — optional; virtual drives (cdemu) return ILLEGAL_REQUEST for this
     // physical laser calibration command. Real M-Disc drives either support it or handle
     // power calibration internally. Silently ignore failures.
+    tracing::debug!("write_session_inner: SEND OPC");
     let _ = send_opc(&sg);
 
     // Configure TAO write parameters — optional; cdemu virtual drives may return
@@ -360,6 +370,7 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
     } else {
         MultiSession::Open
     };
+    tracing::debug!("write_session_inner: SET WRITE PARAMETERS");
     let _ = set_write_parameters(
         &sg,
         &WriteParams {
@@ -370,17 +381,24 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
     );
 
     // Reserve track — optional; cdemu virtual drives may not require this.
+    tracing::debug!("write_session_inner: RESERVE TRACK");
     let _ = reserve_track(&sg);
 
     // Build ISO image in memory (all sessions including new one)
     let image = iso9660::build_iso(sessions);
+    let total_sectors = image.len().div_ceil(iso9660::SECTOR);
+    tracing::info!(
+        image_bytes = image.len(),
+        total_sectors,
+        "write_session_inner: ISO built, starting write at LBA {nwa}"
+    );
 
     // Write in 32-sector (64 KiB) chunks
     const CHUNK_SECTORS: usize = 32;
     let chunk_bytes = CHUNK_SECTORS * iso9660::SECTOR;
     let mut written_sectors = 0u32;
 
-    for chunk in image.chunks(chunk_bytes) {
+    for (i, chunk) in image.chunks(chunk_bytes).enumerate() {
         // Pad last chunk to sector boundary if needed
         let padded: Vec<u8> = if chunk.len() % iso9660::SECTOR == 0 {
             chunk.to_vec()
@@ -390,22 +408,33 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
             p
         };
         let lba = nwa + written_sectors;
+        tracing::debug!(chunk = i, lba, sectors = padded.len() / iso9660::SECTOR, "WRITE(10)");
         write_sectors(&sg, lba, &padded).context("WRITE(10)")?;
         written_sectors += (padded.len() / iso9660::SECTOR) as u32;
     }
+    tracing::info!(written_sectors, "write_session_inner: write complete");
 
+    tracing::info!("write_session_inner: SYNCHRONIZE CACHE");
     synchronize_cache(&sg).context("SYNCHRONIZE CACHE")?;
+    tracing::info!("write_session_inner: SYNCHRONIZE CACHE done");
 
     // Close track + session after every write so the drive (and cdemu) commits
     // a proper session boundary.  The multisession write parameter (set above)
     // keeps the disc appendable.  For the final session, Disc close finalizes.
+    tracing::info!("write_session_inner: CLOSE TRACK");
     close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
+    tracing::info!("write_session_inner: CLOSE TRACK done");
     if is_final {
+        tracing::info!("write_session_inner: CLOSE DISC");
         close_track_session(&sg, CloseTarget::Disc).context("CLOSE DISC")?;
+        tracing::info!("write_session_inner: CLOSE DISC done");
     } else {
+        tracing::info!("write_session_inner: CLOSE SESSION");
         close_track_session(&sg, CloseTarget::Session).context("CLOSE SESSION")?;
+        tracing::info!("write_session_inner: CLOSE SESSION done");
     }
 
+    tracing::info!("write_session_inner: session write complete");
     Ok(())
 }
 
