@@ -424,21 +424,30 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
     synchronize_cache(&sg).context("SYNCHRONIZE CACHE")?;
     tracing::info!("write_session_inner: SYNCHRONIZE CACHE done");
 
-    // Close track + session after every write so the drive (and cdemu) commits
-    // a proper session boundary.  On CD/DVD the MODE SELECT multi-session flag
-    // (set above for non-BD media) keeps the disc appendable.  BD-R SRM is
-    // appendable by default.  For the final session, Disc close finalizes.
-    tracing::info!("write_session_inner: CLOSE TRACK");
-    close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
-    tracing::info!("write_session_inner: CLOSE TRACK done");
+    // Close track + session so the drive commits a proper session boundary.
+    //
+    // BD-R SRM note: cdemu (and some real drives) finalize the disc when
+    // CLOSE SESSION is issued on BD-R, making subsequent sessions impossible.
+    // BD-R SRM commits data on SYNCHRONIZE CACHE so the session close is only
+    // needed for CD/DVD (where MODE SELECT configured multi-session above) or
+    // when finalizing the disc.  Skip CLOSE TRACK + CLOSE SESSION on BD-R for
+    // non-final writes to preserve appendability.
     if is_final {
+        tracing::info!("write_session_inner: CLOSE TRACK");
+        close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
+        tracing::info!("write_session_inner: CLOSE TRACK done");
         tracing::info!("write_session_inner: CLOSE DISC");
         close_track_session(&sg, CloseTarget::Disc).context("CLOSE DISC")?;
         tracing::info!("write_session_inner: CLOSE DISC done");
-    } else {
+    } else if !is_bdr {
+        tracing::info!("write_session_inner: CLOSE TRACK");
+        close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
+        tracing::info!("write_session_inner: CLOSE TRACK done");
         tracing::info!("write_session_inner: CLOSE SESSION");
         close_track_session(&sg, CloseTarget::Session).context("CLOSE SESSION")?;
         tracing::info!("write_session_inner: CLOSE SESSION done");
+    } else {
+        tracing::info!("write_session_inner: skipping CLOSE TRACK/SESSION (BD-R SRM, non-final)");
     }
 
     tracing::info!("write_session_inner: session write complete");

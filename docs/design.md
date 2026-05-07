@@ -299,6 +299,18 @@ The operator interaction surface is entirely the numbered ratatui TUI menu.
 
 ---
 
+## Physical ceremony recommendations
+
+The ceremony environment should minimize visual exposure of sensitive material (HSM PINs, SSS shares, screen contents) to observers, cameras, and shoulder-surfing. Recommended accessories:
+
+- **No-Peek Keyboard Cover** — opaque keyboard tent that prevents visual observation of keystrokes during PIN entry or share input.
+- **Philbert Lux privacy hood** — attaches to the laptop screen, blocking side-angle and over-shoulder viewing of the TUI display.
+- **Dungeon Master Screen or Trifold Poster Board** — positioned around the paper workspace to shield SSS share transcription sheets and writing instruments from observers and cameras.
+
+These are low-cost, commercially available items that meaningfully reduce the attack surface of the physical ceremony environment.
+
+---
+
 ## Implementation milestones
 
 | Milestone | Status | Key deliverables |
