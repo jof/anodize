@@ -44,9 +44,9 @@ SSH_OPTS := -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
 # Pin the Docker image so local builds use the same Nix binary across machines.
 NIX_IMAGE ?= nixos/nix:2.28.3
 
-# On macOS the Docker VM kernel does not support the seccomp BPF filters that
-# the Nix sandbox tries to load.  Disabling filter-syscalls skips only the
-# seccomp layer; the namespace sandbox stays intact.
+# Sandbox is disabled in Docker (--option sandbox false) because builds run as
+# root without build-users-group.  On macOS, also disable filter-syscalls since
+# the Docker VM kernel does not support the seccomp BPF filters.
 ifeq ($(shell uname -s),Darwin)
 NIX_SANDBOX_FLAG := --option filter-syscalls false
 else
@@ -84,6 +84,7 @@ define nix-iso-build
 		       git config --global --add safe.directory /src && \
 		       nix --extra-experimental-features "nix-command flakes" \
 		           --option build-users-group "" \
+		           --option sandbox false \
 		           $(NIX_SANDBOX_FLAG) build .#$(1) && \
 		       rm -f /src/$(2) && cp -L result/iso/*.iso /src/$(2)'
 	@echo "ISO ready: $(2)"
