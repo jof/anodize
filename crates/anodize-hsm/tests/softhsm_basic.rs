@@ -162,7 +162,7 @@ fn p384_via_actor() {
     init_test_token("anodize-actor");
 
     let hsm = Pkcs11Hsm::new(&module, "anodize-actor").expect("open session");
-    let mut actor = HsmActor::spawn(hsm);
+    let mut actor = HsmActor::spawn(Box::new(hsm));
 
     let pin = secrecy::SecretString::new("1234".to_string());
     actor.login(&pin).expect("actor login");
