@@ -16,6 +16,7 @@ pub enum SetupPhase {
     WaitShuttle,
     ProfileLoaded,
     HsmDetect,
+    HsmWarnTokenMissing,
     WaitDisc,
 }
 
@@ -26,6 +27,7 @@ impl SetupPhase {
             Self::WaitShuttle => 1,
             Self::ProfileLoaded => 2,
             Self::HsmDetect => 3,
+            Self::HsmWarnTokenMissing => 3,
             Self::WaitDisc => 4,
         }
     }
@@ -51,6 +53,7 @@ impl SetupMode {
             SetupPhase::WaitShuttle => "Waiting for Shuttle",
             SetupPhase::ProfileLoaded => "Profile Loaded",
             SetupPhase::HsmDetect => "HSM Detection",
+            SetupPhase::HsmWarnTokenMissing => "HSM Detection",
             SetupPhase::WaitDisc => "Insert Disc",
         };
 
@@ -127,6 +130,26 @@ impl SetupMode {
                     "  No PIN entry is required at this stage.".into(),
                 ]
             }
+            SetupPhase::HsmWarnTokenMissing => {
+                let label = app
+                    .profile
+                    .as_ref()
+                    .map(|p| p.hsm.token_label.as_str())
+                    .unwrap_or("(unknown)");
+                vec![
+                    String::new(),
+                    format!("  WARNING: HSM token '{label}' does not exist yet."),
+                    String::new(),
+                    "  The PKCS#11 module was loaded successfully, but the expected".into(),
+                    "  token slot was not found. This is normal for a first-time".into(),
+                    "  InitRoot ceremony — the token will be created during that step.".into(),
+                    String::new(),
+                    "  Only the InitRoot operation will be available.".into(),
+                    String::new(),
+                    "  [1]  Acknowledge and continue".into(),
+                    "  [q]  Quit".into(),
+                ]
+            }
             SetupPhase::WaitDisc => {
                 let disc_info = match &app.disc.optical_dev {
                     Some(dev) => {
@@ -177,6 +200,14 @@ impl Component for SetupMode {
                 }
             }
             SetupPhase::HsmDetect => {} // auto-advance after detection completes
+            SetupPhase::HsmWarnTokenMissing => {
+                if key.code == KeyCode::Char('1') {
+                    self.phase = SetupPhase::WaitDisc;
+                    return Action::SetStatus(
+                        "Token missing acknowledged. Insert write-once disc and press [1].".into(),
+                    );
+                }
+            }
             SetupPhase::WaitDisc => {
                 if key.code == KeyCode::Char('1') {
                     return Action::ConfirmDisc;

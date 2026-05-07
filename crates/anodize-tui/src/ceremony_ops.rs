@@ -290,6 +290,18 @@ impl App {
                     "HSM detected. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc) and press [1].",
                 );
             }
+            Err(anodize_hsm::HsmError::TokenNotFound(ref label)) => {
+                // Fresh HSM — the token slot is created during InitRoot.
+                // Warn the operator but allow proceeding.
+                self.hw.hsm_state =
+                    HwState::Present(format!("PKCS#11 module OK, token '{label}' not yet initialized"));
+                self.setup.phase = SetupPhase::HsmWarnTokenMissing;
+                self.set_status(format!(
+                    "WARNING: HSM token '{label}' does not exist yet. \
+                     This is expected for a first-time InitRoot ceremony. \
+                     Press [1] to continue or [q] to quit.",
+                ));
+            }
             Err(e) => {
                 self.hw.hsm_state = HwState::Error(format!("{e}"));
                 self.set_status(format!("HSM detection failed: {e}"));
