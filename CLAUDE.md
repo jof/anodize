@@ -257,23 +257,39 @@ make ssh-dev
 
 ### Multi-session test (InitRoot → reboot → SignCsr)
 
-Tests disc persistence across VM reboots and quorum PIN reconstruction:
+Tests disc persistence across VM reboots and quorum PIN reconstruction.
+This test is driven interactively by the AI assistant using **term-cli**
+(interactive terminal sessions), not expect scripts.  Ratatui renders with
+cursor positioning between words, making byte-level pattern matching in
+expect unreliable.  Term-cli reads the rendered screen, interprets it
+visually, and sends keystrokes — adapting to whatever the TUI shows.
 
+**Prerequisites:**
 ```sh
 rm -f fake-shuttle.img && make fake-shuttle.img   # must include cert_profiles
 rm -rf dev-disc && mkdir dev-disc                 # clean slate
-expect scripts/e2e-multisession.expect            # ARCH=amd64 for x86_64
+make dev-arm64                                    # ISO with cdemu persistence fix
 ```
 
-This runs two full ceremonies with a VM reboot in between:
-1. **Phase 1**: InitRoot — generates root CA, captures SSS shares, writes to disc
-2. **Inter-boot**: Host generates ephemeral P-384 CSR, injects `csr.der` into shuttle via `mcopy`
-3. **Phase 2**: SignCsr — loads existing disc, enters shares for quorum, signs CSR
-4. **Validation**: checks disc has ≥ 4 session ISOs, shuttle has both certs + audit log
+**Phase 1 — InitRoot:** Launch QEMU via term-cli, SSH in as ceremony user,
+drive sentinel → setup → InitRoot → SSS custodian setup → share distribution
+(capture shares from screen) → share verification → keygen → cert preview →
+disc burn → shuttle copy.  Quit and shutdown VM.
 
-Key prerequisite: `nix/dev-iso.nix` `cdemu-load-bdr` service must detect and load existing BD-R images (not always create blank). ISO rebuild required after this change.
+**Inter-boot:** Generate ephemeral P-384 CSR on host (`openssl`), inject
+`csr.der` into shuttle (`mcopy -oi fake-shuttle.img csr.der ::csr.der`).
 
-See `docs/ceremony-multisession-test.md` for full details and troubleshooting.
+**Phase 2 — SignCsr:** Relaunch QEMU (cdemu loads existing BD-R), SSH in,
+drive setup → SignCsr → profile selection → CSR preview → quorum (re-enter
+captured shares) → signing → disc burn → shuttle copy.
+
+**Validation:** Check `dev-disc/` for ≥ 4 session ISOs, shuttle for
+`root.crt`, `intermediate.crt`, `audit.log`.
+
+Key prerequisite: `nix/dev-iso.nix` `cdemu-load-bdr` service must detect and
+load existing BD-R images (not always create blank).
+
+See `docs/ceremony-multisession-test.md` for full methodology.
 
 ### Tests as you go
 
