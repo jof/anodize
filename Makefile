@@ -241,7 +241,7 @@ QEMU_DEV_BASE = qemu-system-x86_64 -enable-kvm -machine pc -cpu host -m 2G -smp 
 	  -drive file=fake-shuttle.img,format=raw,if=none,id=usb0 \
 	  -device usb-ehci,id=ehci \
 	  -device usb-storage,drive=usb0,bus=ehci.0 \
-	  -fsdev local,security_model=none,id=devdisc,path=$(DEV_DISC_DIR) \
+	  -fsdev local,security_model=mapped-xattr,id=devdisc,path=$(DEV_DISC_DIR) \
 	  -device virtio-9p-pci,id=fs0,fsdev=devdisc,mount_tag=dev-disc \
 	  -netdev user,id=net0,hostfwd=tcp::$(DEV_SSH_PORT)-:22 \
 	  -device virtio-net-pci,netdev=net0 \
@@ -259,7 +259,7 @@ QEMU_AARCH64_BASE = qemu-system-aarch64 \
 	  -device usb-storage,bus=xhci.0,drive=usbiso \
 	  -drive file=fake-shuttle.img,format=raw,if=none,id=usb0 \
 	  -device usb-storage,bus=xhci.0,drive=usb0 \
-	  -fsdev local,security_model=none,id=devdisc,path=$(DEV_DISC_DIR) \
+	  -fsdev local,security_model=mapped-xattr,id=devdisc,path=$(DEV_DISC_DIR) \
 	  -device virtio-9p-pci,id=fs0,fsdev=devdisc,mount_tag=dev-disc \
 	  -netdev user,id=net0,hostfwd=tcp::$(DEV_SSH_PORT)-:22 \
 	  -device virtio-net-pci,netdev=net0 \

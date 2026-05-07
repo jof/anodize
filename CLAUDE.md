@@ -176,6 +176,15 @@ The ceremony binary writes structured tracing logs to `/run/anodize/ceremony.log
 
 **Boot detection**: the VM does not emit a standard `login:` prompt — the ceremony user is auto-logged-in and the sentinel TUI starts immediately. Wait for `"ANODIZE ROOT CA CEREMONY"` or `"Press Enter to begin the ceremony"` to detect that the VM is ready.
 
+**term-cli sessions**: when driving the ceremony via `term-cli`, start the session at **120×60** (or larger) so that share word panels and log views render without clipping. The default 80×24 terminal truncates SSS share words (34 words across ~9 lines don't fit in a 12-row panel). Use `j`/`k` keys to scroll content within TUI panels if the panel is still too short.
+
+```sh
+term-cli start --session qemu --cwd /path/to/anodize
+term-cli resize --session qemu --cols 120 --rows 60
+term-cli run --session qemu "make qemu-aarch64-nographic"
+term-cli wait-for --session qemu "Press Enter to begin" --timeout 120
+```
+
 **After a session**, inspect the BD-R image on your laptop:
 
 ```sh
