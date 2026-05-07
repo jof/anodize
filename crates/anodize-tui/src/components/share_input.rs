@@ -255,7 +255,6 @@ impl ShareInput {
         let green = Style::default().fg(Color::Green);
 
         let mut lines: Vec<Line> = Vec::new();
-        lines.push(Line::from(""));
 
         // Collected shares summary
         for cs in &self.collected {
@@ -272,10 +271,6 @@ impl ShareInput {
 
         let remaining = self.threshold as usize - self.collected.len().min(self.threshold as usize);
         if remaining > 0 {
-            if !self.collected.is_empty() {
-                lines.push(Line::from(""));
-            }
-
             // Word progress
             let total_entered = self.words.len();
             lines.push(Line::from(vec![
@@ -288,30 +283,16 @@ impl ShareInput {
                 ),
                 Span::styled(format!("  ({remaining} share(s) still needed)"), dim),
             ]));
-            lines.push(Line::from(""));
 
-            // Show accepted words as a grid (4 per line, matching groups)
+            // Show accepted words as kebab groups (4 per line)
             if !self.words.is_empty() {
-                for (g, chunk) in self.words.chunks(4).enumerate() {
-                    let formatted: Vec<Span> = chunk
-                        .iter()
-                        .enumerate()
-                        .flat_map(|(w, word)| {
-                            let num = g * 4 + w + 1;
-                            vec![
-                                Span::styled(format!("{num:>2}."), dim),
-                                Span::styled(
-                                    format!("{word:<6} "),
-                                    Style::default().fg(Color::Green),
-                                ),
-                            ]
-                        })
-                        .collect();
-                    let mut row = vec![Span::raw("  ")];
-                    row.extend(formatted);
-                    lines.push(Line::from(row));
+                for chunk in self.words.chunks(4) {
+                    let group = chunk.join("-");
+                    lines.push(Line::from(Span::styled(
+                        format!("  {group}"),
+                        Style::default().fg(Color::Green),
+                    )));
                 }
-                lines.push(Line::from(""));
             }
 
             // Current word input
@@ -366,7 +347,6 @@ impl ShareInput {
 
         // Last result feedback
         if let Some(ref result) = self.last_result {
-            lines.push(Line::from(""));
             match result {
                 ShareVerifyResult::Accepted {
                     custodian_name,
@@ -407,13 +387,19 @@ impl ShareInput {
             }
         }
 
-        lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "  [Tab] Complete   [Space/-] Next word   [BS] Undo   [Esc] Cancel",
             dim,
         )));
 
-        let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+        // Anchor view to bottom: scroll so the last lines are always visible.
+        let content_height = lines.len() as u16;
+        let visible_height = inner.height;
+        let scroll_offset = content_height.saturating_sub(visible_height);
+
+        let para = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll_offset, 0));
         frame.render_widget(para, inner);
     }
 }

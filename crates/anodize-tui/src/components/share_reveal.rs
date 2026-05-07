@@ -31,6 +31,8 @@ pub struct ShareReveal {
     pub current: usize,
     /// Whether the current share's words are visible (toggled by operator).
     pub visible: bool,
+    /// Vertical scroll offset for the content area.
+    pub scroll_offset: u16,
 }
 
 impl ShareReveal {
@@ -52,6 +54,7 @@ impl ShareReveal {
             shares: named,
             current: 0,
             visible: false,
+            scroll_offset: 0,
         }
     }
 
@@ -68,13 +71,23 @@ impl ShareReveal {
         match key.code {
             KeyCode::Char('s') | KeyCode::Char('S') => {
                 self.visible = !self.visible;
+                self.scroll_offset = 0;
                 false
             }
             KeyCode::Enter if self.visible => {
                 // Confirm transcription, hide and advance
                 self.visible = false;
+                self.scroll_offset = 0;
                 self.current += 1;
                 self.all_revealed()
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.scroll_offset = self.scroll_offset.saturating_add(1);
+                false
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                false
             }
             _ => false,
         }
@@ -154,29 +167,13 @@ impl ShareReveal {
                 )));
                 lines.push(Line::from(""));
 
-                for (g, group) in ns.word_groups.iter().enumerate() {
-                    let group_num = g + 1;
-                    // Split "able-acid-aged-also" into individual words
-                    let words: Vec<&str> = group.split('-').collect();
-                    let formatted: String = words
-                        .iter()
-                        .enumerate()
-                        .map(|(w, word)| {
-                            let word_num = g * 4 + w + 1;
-                            format!("{word_num:>2}.{word}")
-                        })
-                        .collect::<Vec<_>>()
-                        .join("  ");
-
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("  G{group_num:<2} "), dim),
-                        Span::styled(
-                            formatted,
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]));
+                for group in ns.word_groups.iter() {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {group}"),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
+                    )));
                 }
 
                 lines.push(Line::from(""));
@@ -193,7 +190,7 @@ impl ShareReveal {
                 ]));
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "  Transcribe all words carefully. Verify group numbers match.",
+                    "  Transcribe all words carefully.",
                     Style::default().fg(Color::Cyan),
                 )));
                 lines.push(Line::from(""));
@@ -225,7 +222,9 @@ impl ShareReveal {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled("  [Esc] Abort ceremony", dim)));
 
-        let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let para = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((self.scroll_offset, 0));
         frame.render_widget(para, inner);
     }
 }
