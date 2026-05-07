@@ -107,24 +107,11 @@ impl ShareInput {
             KeyCode::Tab => {
                 // Autocomplete: if exactly one match, accept it
                 if self.completions.len() == 1 {
-                    self.accept_word(self.completions[0].to_string());
+                    return self.try_accept_complete(self.completions[0].to_string());
                 }
                 false
             }
-            KeyCode::Char(' ') | KeyCode::Char('-') => {
-                // Space/dash: accept current word if valid
-                self.try_accept_current();
-                false
-            }
-            KeyCode::Enter => {
-                // Accept current word if valid, then try submit
-                self.try_accept_current();
-                if self.words.len() == self.expected_words {
-                    self.submit();
-                    return true;
-                }
-                false
-            }
+            KeyCode::Char(' ') | KeyCode::Char('-') | KeyCode::Enter => self.try_accept_current(),
             _ => false,
         }
     }
@@ -137,26 +124,36 @@ impl ShareInput {
         }
     }
 
-    fn try_accept_current(&mut self) {
+    fn try_accept_current(&mut self) -> bool {
         if self.word_buf.is_empty() {
-            return;
+            return false;
         }
         // Auto-complete if exactly one match
         if self.completions.len() == 1 {
-            self.accept_word(self.completions[0].to_string());
-            return;
+            let word = self.completions[0].to_string();
+            return self.try_accept_complete(word);
         }
         // Accept if exact match
         if anodize_sss::is_valid_word(&self.word_buf) {
             let word = self.word_buf.clone();
-            self.accept_word(word);
+            return self.try_accept_complete(word);
         }
+        false
     }
 
-    fn accept_word(&mut self, word: String) {
+    /// Accept a word and auto-submit when all words are collected.
+    fn try_accept_complete(&mut self, word: String) -> bool {
+        if self.words.len() >= self.expected_words {
+            return false;
+        }
         self.words.push(word);
         self.word_buf.clear();
         self.completions.clear();
+        if self.words.len() == self.expected_words {
+            self.submit();
+            return true;
+        }
+        false
     }
 
     /// Submit completed word list: decode, identify custodian, verify commitment.
