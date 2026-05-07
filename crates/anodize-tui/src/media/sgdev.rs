@@ -158,13 +158,27 @@ impl SgDev {
             let key = sense[2] & 0x0F;
             let asc = if hdr.sb_len_wr >= 13 { sense[12] } else { 0 };
             let ascq = if hdr.sb_len_wr >= 14 { sense[13] } else { 0 };
-            bail!(
-                "SCSI CHECK CONDITION: sense_key={:#04x} ASC={:#04x} ASCQ={:#04x} \
-                 (cdb[0]={:#04x})",
-                key,
+
+            // sense_key 0x00 (NO SENSE) and 0x01 (RECOVERED ERROR) are not
+            // fatal — the command completed.  cdemu in particular returns
+            // CHECK CONDITION + NO SENSE with a stale audio‐status ASCQ
+            // after WRITE(10) on BD‐R, which is harmless.
+            if key >= 0x02 {
+                bail!(
+                    "SCSI CHECK CONDITION: sense_key={:#04x} ASC={:#04x} ASCQ={:#04x} \
+                     (cdb[0]={:#04x})",
+                    key,
+                    asc,
+                    ascq,
+                    cdb[0]
+                );
+            }
+            tracing::debug!(
+                sense_key = key,
                 asc,
                 ascq,
-                cdb[0]
+                cdb0 = cdb[0],
+                "SG_IO: CHECK CONDITION with non-fatal sense key, continuing"
             );
         }
         if hdr.host_status != 0 || hdr.driver_status != 0 {
