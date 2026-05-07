@@ -140,6 +140,10 @@ in
         # cdemu's DeviceCreateBlank saves the file as .iso regardless of
         # what path you pass, so always use .iso extension.
         if [ -s "$share/test-bdr.iso" ]; then
+          # Fix permissions: mapped-xattr stores restrictive guest perms in
+          # xattrs.  The ceremony creates files as 0600/uid=1000 but cdemu
+          # re-opens them in a context where those perms block access.
+          chmod 666 "$share"/test-bdr*.iso "$share"/session-*.iso 2>/dev/null || true
           # Load existing BD-R image — preserves prior session data so
           # multi-session ceremonies work across VM reboots.
           echo "Loading existing BD-R image from $share/test-bdr.iso"
@@ -167,6 +171,6 @@ in
   fileSystems."/run/anodize/share" = {
     device  = "dev-disc";
     fsType  = "9p";
-    options = [ "trans=virtio" "version=9p2000.L" "msize=104857600" "nofail" "access=any" "cache=none" ];
+    options = [ "trans=virtio" "version=9p2000.L" "msize=104857600" "nofail" "access=any" ];
   };
 }
