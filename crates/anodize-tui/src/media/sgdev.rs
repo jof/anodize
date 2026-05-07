@@ -181,7 +181,11 @@ impl SgDev {
                 "SG_IO: CHECK CONDITION with non-fatal sense key, continuing"
             );
         }
-        if hdr.host_status != 0 || hdr.driver_status != 0 {
+        // DRIVER_SENSE (0x08) just means the sense buffer was populated — it
+        // always accompanies CHECK CONDITION which we already handled above.
+        // Mask it off before checking for real transport errors.
+        let driver_err = hdr.driver_status & !0x08u16;
+        if hdr.host_status != 0 || driver_err != 0 {
             bail!(
                 "SG_IO transport error: host={:#06x} driver={:#06x}",
                 hdr.host_status,
