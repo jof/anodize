@@ -56,6 +56,7 @@ pub enum Action {
     // InitRoot / RekeyShares ceremony
     InitRootAbort,
     RekeyAbort,
+    RetryPostCommit,
     // Utilities sub-screens (1=SystemInfo, 2=AuditLog, 3=HsmBrowser)
     UtilScreen(u8),
 }

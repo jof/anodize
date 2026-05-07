@@ -697,6 +697,13 @@ impl App {
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.set_status("RekeyShares aborted.");
             }
+            Action::RetryPostCommit => {
+                if let Err(e) = self.post_intent_init_root() {
+                    tracing::error!("RetryPostCommit: {e}");
+                    self.set_status(e);
+                    self.ceremony.state = CeremonyPhase::PostCommitError;
+                }
+            }
 
             // Migration
             Action::ConfirmMigrate => {

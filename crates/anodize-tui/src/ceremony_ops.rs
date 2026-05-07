@@ -161,6 +161,26 @@ impl App {
         }
     }
 
+    // ── Post-intent InitRoot: HSM bootstrap + keygen + cert build ─────────────
+
+    pub(crate) fn post_intent_init_root(&mut self) -> Result<(), String> {
+        // For key generation (action 1) the token may not exist yet — open
+        // the first available slot.  For find-existing (action 2) the token
+        // must already exist so use the normal path.
+        if self.disc.pending_key_action == Some(1) {
+            self.do_bootstrap_hsm()?;
+        } else {
+            let pin = self.pin_buf.clone();
+            self.do_login_with_pin(&pin)?;
+        }
+
+        match self.disc.pending_key_action {
+            Some(1) => self.do_generate_and_build(),
+            Some(2) => self.do_find_and_build(),
+            _ => Err("Unknown key action".into()),
+        }
+    }
+
     // ── Intent burn tick ──────────────────────────────────────────────────────
 
     pub(crate) fn tick_intent_burn(&mut self) {
@@ -201,27 +221,10 @@ impl App {
                 }
                 match self.current_op.clone() {
                     Some(Operation::InitRoot) => {
-                        // For key generation (action 1) the token may not
-                        // exist yet — open the first available slot instead
-                        // of searching by label.  For find-existing (action 2)
-                        // the token must already exist so use the normal path.
-                        if self.disc.pending_key_action == Some(1) {
-                            self.do_bootstrap_hsm();
-                        } else {
-                            self.do_login_with_pin(&self.pin_buf.clone());
-                        }
-                        if self.hw.actor.is_none() {
-                            tracing::error!("tick_intent_burn: HSM login failed after intent write");
-                            self.ceremony.state = CeremonyPhase::Execute;
-                            return;
-                        }
-                        match self.disc.pending_key_action {
-                            Some(1) => self.do_generate_and_build(),
-                            Some(2) => self.do_find_and_build(),
-                            _ => {
-                                self.set_status("Unknown key action");
-                                self.ceremony.state = CeremonyPhase::OperationSelect;
-                            }
+                        if let Err(e) = self.post_intent_init_root() {
+                            tracing::error!("tick_intent_burn: post-commit InitRoot failed: {e}");
+                            self.set_status(e);
+                            self.ceremony.state = CeremonyPhase::PostCommitError;
                         }
                     }
                     Some(Operation::SignCsr)
@@ -233,11 +236,6 @@ impl App {
                         self.set_status("Unknown operation after intent");
                         self.ceremony.state = CeremonyPhase::OperationSelect;
                     }
-                }
-                // Safety net: if nothing above moved us out of Commit, do it now.
-                if self.ceremony.state == CeremonyPhase::Commit {
-                    tracing::error!("tick_intent_burn: state still Commit after post-write handlers — recovering");
-                    self.ceremony.state = CeremonyPhase::Execute;
                 }
             }
             None => unreachable!(),
@@ -334,38 +332,26 @@ impl App {
 
     // ── HSM bootstrap (InitRoot key generation — token may not exist yet) ────
 
-    pub(crate) fn do_bootstrap_hsm(&mut self) {
+    pub(crate) fn do_bootstrap_hsm(&mut self) -> Result<(), String> {
         let pin_bytes = match hex::decode(&self.pin_buf) {
             Ok(b) => b,
-            Err(e) => {
-                self.set_status(format!("Internal PIN decode error: {e}"));
-                return;
-            }
+            Err(e) => return Err(format!("Internal PIN decode error: {e}")),
         };
         let user_pin = SecretString::new(hex::encode(&pin_bytes));
 
         let cfg = match &self.profile {
             Some(p) => &p.hsm,
-            None => {
-                self.set_status("No profile loaded");
-                return;
-            }
+            None => return Err("No profile loaded".into()),
         };
 
         let backend = match create_backend(cfg.backend) {
             Ok(b) => b,
-            Err(e) => {
-                self.set_status(format!("HSM backend error: {e}"));
-                return;
-            }
+            Err(e) => return Err(format!("HSM backend error: {e}")),
         };
 
         let mut tokens = match backend.list_tokens() {
             Ok(t) => t,
-            Err(e) => {
-                self.set_status(format!("HSM enumerate failed: {e}"));
-                return;
-            }
+            Err(e) => return Err(format!("HSM enumerate failed: {e}")),
         };
 
         // No initialized tokens — check for empty/uninitialized slots that
@@ -373,16 +359,12 @@ impl App {
         if tokens.is_empty() {
             tokens = match backend.list_all_slots() {
                 Ok(s) => s,
-                Err(e) => {
-                    self.set_status(format!("HSM slot enumerate failed: {e}"));
-                    return;
-                }
+                Err(e) => return Err(format!("HSM slot enumerate failed: {e}")),
             };
         }
 
         if tokens.is_empty() {
-            self.set_status("No HSM slots found. Insert a YubiHSM or HSM device.");
-            return;
+            return Err("No HSM slots found. Insert a YubiHSM or HSM device.".into());
         }
 
         // Pick the first uninitialised slot, or fall back to the first slot.
@@ -391,10 +373,7 @@ impl App {
             .or_else(|| tokens.first());
         let target = match target {
             Some(t) => t.clone(),
-            None => {
-                self.set_status("No suitable HSM token found.");
-                return;
-            }
+            None => return Err("No suitable HSM token found.".into()),
         };
 
         tracing::info!(
@@ -417,10 +396,7 @@ impl App {
             &cfg.token_label,
         ) {
             Ok(h) => h,
-            Err(e) => {
-                self.set_status(format!("HSM bootstrap failed: {e}"));
-                return;
-            }
+            Err(e) => return Err(format!("HSM bootstrap failed: {e}")),
         };
 
         let serial = target.serial_number.clone();
@@ -430,46 +406,36 @@ impl App {
             format!("bootstrapped (serial={serial}, label={})", cfg.token_label),
         );
         tracing::info!(serial, label = %cfg.token_label, "do_bootstrap_hsm: token ready");
+        Ok(())
     }
 
     // ── HSM login via reconstructed PIN (called from Quorum phase) ───────────
 
-    pub(crate) fn do_login_with_pin(&mut self, pin_hex: &str) {
+    pub(crate) fn do_login_with_pin(&mut self, pin_hex: &str) -> Result<(), String> {
         let pin_bytes = match hex::decode(pin_hex) {
             Ok(b) => b,
-            Err(e) => {
-                self.set_status(format!("Internal PIN decode error: {e}"));
-                return;
-            }
+            Err(e) => return Err(format!("Internal PIN decode error: {e}")),
         };
         let pin = SecretString::new(hex::encode(&pin_bytes));
 
         let cfg = match &self.profile {
             Some(p) => &p.hsm,
-            None => {
-                self.set_status("No profile loaded");
-                return;
-            }
+            None => return Err("No profile loaded".into()),
         };
 
         let backend = match create_backend(cfg.backend) {
             Ok(b) => b,
-            Err(e) => {
-                self.set_status(format!("HSM backend error: {e}"));
-                return;
-            }
+            Err(e) => return Err(format!("HSM backend error: {e}")),
         };
 
         let hsm = match backend.open_session(&cfg.token_label, &pin) {
             Ok(h) => h,
-            Err(e) => {
-                self.set_status(format!("HSM open/login failed: {e}"));
-                return;
-            }
+            Err(e) => return Err(format!("HSM open/login failed: {e}")),
         };
         let actor = HsmActor::spawn(hsm);
         self.hw.actor = Some(actor);
         self.hw.hsm_state = HwState::Ready("authenticated via SSS quorum".into());
+        Ok(())
     }
 
     // ── Quorum phase: collect shares → reconstruct PIN → HSM login ─────────
@@ -553,7 +519,12 @@ impl App {
 
         // Login to HSM with reconstructed PIN
         let pin_hex = hex::encode(&pin_bytes);
-        self.do_login_with_pin(&pin_hex);
+        if let Err(e) = self.do_login_with_pin(&pin_hex) {
+            self.set_status(format!("HSM login failed: {e}"));
+            self.ceremony.state = CeremonyPhase::OperationSelect;
+            self.current_op = None;
+            return;
+        }
 
         // Dispatch to the pending operation
         match self.current_op.clone() {
@@ -1023,100 +994,70 @@ impl App {
 
     // ── Key operations (Mode 1) ───────────────────────────────────────────────
 
-    fn do_generate_and_build(&mut self) {
+    fn do_generate_and_build(&mut self) -> Result<(), String> {
         let label = match &self.profile {
             Some(p) => p.hsm.key_label.clone(),
-            None => {
-                self.set_status("No profile");
-                return;
-            }
+            None => return Err("No profile".into()),
         };
         let key = {
             let actor = match self.hw.actor.as_mut() {
                 Some(a) => a,
-                None => {
-                    self.set_status("No HSM session");
-                    return;
-                }
+                None => return Err("No HSM session".into()),
             };
             match actor.generate_keypair(&label, KeySpec::EcdsaP384) {
                 Ok(k) => k,
-                Err(e) => {
-                    self.set_status(format!("Key generation failed: {e}"));
-                    return;
-                }
+                Err(e) => return Err(format!("Key generation failed: {e}")),
             }
         };
         self.hw.root_key = Some(key);
         self.set_status(format!("Generated P-384 keypair (label={label:?})"));
-        self.do_build_cert();
+        self.do_build_cert()
     }
 
-    fn do_find_and_build(&mut self) {
+    fn do_find_and_build(&mut self) -> Result<(), String> {
         let label = match &self.profile {
             Some(p) => p.hsm.key_label.clone(),
-            None => {
-                self.set_status("No profile");
-                return;
-            }
+            None => return Err("No profile".into()),
         };
         let key = {
             let actor = match self.hw.actor.as_ref() {
                 Some(a) => a,
-                None => {
-                    self.set_status("No HSM session");
-                    return;
-                }
+                None => return Err("No HSM session".into()),
             };
             match actor.find_key(&label) {
                 Ok(k) => k,
-                Err(e) => {
-                    self.set_status(format!("Key not found: {e}"));
-                    return;
-                }
+                Err(e) => return Err(format!("Key not found: {e}")),
             }
         };
         self.hw.root_key = Some(key);
         self.set_status(format!("Found existing key (label={label:?})"));
-        self.do_build_cert();
+        self.do_build_cert()
     }
 
-    fn do_build_cert(&mut self) {
+    fn do_build_cert(&mut self) -> Result<(), String> {
         if let Some(ct) = self.confirmed_time {
             if !clock_drift_ok(ct) {
-                self.set_status(
-                    "Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock.",
+                return Err(
+                    "Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock."
+                        .into(),
                 );
-                return;
             }
         }
         let actor = match self.hw.actor.clone() {
             Some(a) => a,
-            None => {
-                self.set_status("No HSM session");
-                return;
-            }
+            None => return Err("No HSM session".into()),
         };
         let key = match self.hw.root_key {
             Some(k) => k,
-            None => {
-                self.set_status("No key handle");
-                return;
-            }
+            None => return Err("No key handle".into()),
         };
         let signer = match P384HsmSigner::new(actor, key) {
             Ok(s) => s,
-            Err(e) => {
-                self.set_status(format!("Signer error: {e}"));
-                return;
-            }
+            Err(e) => return Err(format!("Signer error: {e}")),
         };
         let ca = match &self.profile {
             Some(p) => &p.ca,
-            None => {
-                self.set_status("No profile");
-                return;
-            }
+            None => return Err("No profile".into()),
         };
         let cert = match build_root_cert(
             &signer,
@@ -1126,17 +1067,11 @@ impl App {
             7305,
         ) {
             Ok(c) => c,
-            Err(e) => {
-                self.set_status(mechanism_error_msg("Cert build failed", &e));
-                return;
-            }
+            Err(e) => return Err(mechanism_error_msg("Cert build failed", &e)),
         };
         let cert_der = match cert.to_der() {
             Ok(d) => d,
-            Err(e) => {
-                self.set_status(format!("DER encode failed: {e}"));
-                return;
-            }
+            Err(e) => return Err(format!("DER encode failed: {e}")),
         };
 
         // Issue initial CRL (#1, empty) alongside root cert
@@ -1144,10 +1079,7 @@ impl App {
         let next_update = base_time + std::time::Duration::from_secs(365 * 24 * 3600);
         let crl_der = match issue_crl(&signer, &cert, &[], next_update, 1) {
             Ok(d) => d,
-            Err(e) => {
-                self.set_status(mechanism_error_msg("Initial CRL build failed", &e));
-                return;
-            }
+            Err(e) => return Err(mechanism_error_msg("Initial CRL build failed", &e)),
         };
 
         let fp = sha256_fingerprint(&cert_der);
@@ -1168,6 +1100,7 @@ impl App {
         self.data.crl_der = Some(crl_der);
         self.ceremony.state = CeremonyPhase::Execute;
         self.set_status("Certificate built. Verify fingerprint before writing.");
+        Ok(())
     }
 
     // ── Mode 2: Sign CSR ─────────────────────────────────────────────────────
@@ -2153,5 +2086,77 @@ impl App {
             _ => {}
         }
         self.ceremony.render_with_app(frame, area, self);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::{Action, Operation};
+    use crate::modes::ceremony::CeremonyPhase;
+    use std::path::PathBuf;
+
+    fn test_app() -> crate::app::App {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.current_op = Some(Operation::InitRoot);
+        app.disc.pending_key_action = Some(1);
+        app.pin_buf = hex::encode(vec![0u8; 32]);
+        app
+    }
+
+    #[test]
+    fn post_intent_init_root_fails_without_hsm() {
+        let mut app = test_app();
+        // No HSM backend configured → do_bootstrap_hsm should fail
+        let result = app.post_intent_init_root();
+        assert!(result.is_err(), "Expected error without profile/HSM");
+    }
+
+    #[test]
+    fn tick_intent_burn_transitions_to_post_commit_error() {
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::Commit;
+
+        // Set up a burn_rx channel that immediately yields Ok(())
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(Ok(())).unwrap();
+        app.disc.burn_rx = Some(rx);
+
+        app.tick_intent_burn();
+
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::PostCommitError,
+            "Should transition to PostCommitError when HSM bootstrap fails"
+        );
+    }
+
+    #[test]
+    fn retry_post_commit_stays_in_error_without_hsm() {
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::PostCommitError;
+
+        app.update(Action::RetryPostCommit);
+
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::PostCommitError,
+            "Retry without HSM should stay in PostCommitError"
+        );
+    }
+
+    #[test]
+    fn abort_from_post_commit_error_resets_to_operation_select() {
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::PostCommitError;
+
+        app.update(Action::InitRootAbort);
+
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::OperationSelect,
+            "InitRootAbort should reset to OperationSelect"
+        );
+        assert!(app.current_op.is_none());
     }
 }

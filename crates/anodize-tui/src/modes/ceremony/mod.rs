@@ -50,6 +50,9 @@ pub enum CeremonyPhase {
     Quorum,
     /// Phase 5: HSM crypto operation complete, verify result.
     Execute,
+    /// Post-commit error: HSM/keygen/cert-build failed after intent write.
+    /// Operator can [1] retry or [Esc] abort.
+    PostCommitError,
     /// Phase 6a: writing record session to disc.
     BurningDisc,
     /// Phase 6b: disc written, shuttle copy pending.
@@ -126,7 +129,7 @@ impl CeremonyMode {
             | CeremonyPhase::Planning(PlanningState::MigrateConfirm)
             | CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => 1,
             // 2 — Commit (write intent WAL to disc)
-            CeremonyPhase::Commit => 2,
+            CeremonyPhase::Commit | CeremonyPhase::PostCommitError => 2,
             // 3 — Quorum (SSS share collection + PIN reconstruction)
             CeremonyPhase::Quorum | CeremonyPhase::Planning(PlanningState::RekeyQuorum) => 3,
             // 4 — Execute (HSM crypto operation, cert preview/verify)
@@ -142,6 +145,7 @@ impl CeremonyMode {
             CeremonyPhase::OperationSelect => "Select Operation",
             CeremonyPhase::Planning(PlanningState::KeyAction) => "Key Management",
             CeremonyPhase::Commit => "Committing Intent to Disc\u{2026}",
+            CeremonyPhase::PostCommitError => "Post-Commit Error",
             CeremonyPhase::Execute => "Certificate Preview \u{2014} VERIFY FINGERPRINT",
             CeremonyPhase::BurningDisc => "Writing Session\u{2026}",
             CeremonyPhase::DiscDone => "Disc Session Written",
@@ -257,6 +261,22 @@ impl CeremonyMode {
                 "  HSM signing will begin after disc commit completes.".into(),
                 "  Do not remove the disc or power off.".into(),
             ],
+
+            CeremonyPhase::PostCommitError => {
+                vec![
+                    String::new(),
+                    "  The intent session was written to disc, but the post-commit".into(),
+                    "  operation (HSM bootstrap / key generation / cert build) failed.".into(),
+                    String::new(),
+                    format!("  Error: {}", app.status),
+                    String::new(),
+                    "  The disc is safe — only the intent WAL was written.".into(),
+                    "  You may retry without re-burning the intent session.".into(),
+                    String::new(),
+                    "  [1]   Retry HSM + key operation".into(),
+                    "  [Esc] Abort to operation select".into(),
+                ]
+            }
 
             CeremonyPhase::Planning(PlanningState::LoadCsr) => {
                 let profiles = app
@@ -629,6 +649,12 @@ impl Component for CeremonyMode {
             },
 
             CeremonyPhase::Commit => Action::Noop, // auto-advance on burn
+
+            CeremonyPhase::PostCommitError => match key.code {
+                KeyCode::Char('1') => Action::RetryPostCommit,
+                KeyCode::Esc => Action::InitRootAbort,
+                _ => Action::Noop,
+            },
 
             CeremonyPhase::Planning(PlanningState::LoadCsr) => {
                 if let KeyCode::Char(c) = key.code {
