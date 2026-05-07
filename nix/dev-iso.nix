@@ -152,7 +152,7 @@ in
             --object-path /Daemon \
             --method net.sf.cdemu.CDEmuDaemon.DeviceLoad \
             0 "['$share/test-bdr.iso']" \
-            "{'writer-id': <'WRITER-ISO'>}"
+            "{'writer-id': <'WRITER-ISO'>, 'medium-type': <'bdr'>}"
         else
           echo "Creating new blank BD-R image at $share/test-bdr.iso"
           ${pkgs.glib}/bin/gdbus call --session \
