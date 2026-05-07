@@ -214,6 +214,13 @@ impl App {
                 match self.current_op.clone() {
                     Some(Operation::InitRoot) => {
                         self.do_login_with_pin(&self.pin_buf.clone());
+                        if self.hw.actor.is_none() {
+                            // HSM login failed — cannot proceed.  Move to
+                            // Execute so the user sees the error and can retry.
+                            tracing::error!("tick_intent_burn: HSM login failed after intent write");
+                            self.ceremony.state = CeremonyPhase::Execute;
+                            return;
+                        }
                         match self.disc.pending_key_action {
                             Some(1) => self.do_generate_and_build(),
                             Some(2) => self.do_find_and_build(),
@@ -232,6 +239,11 @@ impl App {
                         self.set_status("Unknown operation after intent");
                         self.ceremony.state = CeremonyPhase::OperationSelect;
                     }
+                }
+                // Safety net: if nothing above moved us out of Commit, do it now.
+                if self.ceremony.state == CeremonyPhase::Commit {
+                    tracing::error!("tick_intent_burn: state still Commit after post-write handlers — recovering");
+                    self.ceremony.state = CeremonyPhase::Execute;
                 }
             }
             None => unreachable!(),
