@@ -389,6 +389,7 @@ verify-iso: anodize-prod-amd64.iso.sha256
 # Each dev session:
 #   make qemu-dev         # start VM in SDL window
 #   make ssh-dev          # (separate terminal) SSH into the running VM
+#   make save-disc        # flush cdemu BD-R image to dev-disc/ for inspection
 
 qemu-dev: qemu-dev-sdl
 
@@ -420,6 +421,17 @@ ssh-dev:
 	@until nc -z localhost $(DEV_SSH_PORT) 2>/dev/null; do sleep 1; done
 	@echo "Connected."
 	ssh $(SSH_OPTS) -p $(DEV_SSH_PORT) ceremony@localhost
+
+# Copy the cdemu BD-R disc content to dev-disc/ on the host (via 9p share).
+# cdemu's DeviceCreateBlank is purely in-memory — the filename is just metadata.
+# To inspect the disc after a ceremony, dd from /dev/sr0 to the 9p mount.
+save-disc:
+	@echo "Copying BD-R disc image to $(DEV_DISC_DIR)/test-bdr.img …"
+	@ssh $(SSH_OPTS) -p $(DEV_SSH_PORT) debug@localhost \
+	    'sudo dd if=/dev/sr0 of=/run/anodize/share/test-bdr.img bs=64k status=progress 2>&1' \
+	  && echo "Saved." \
+	  || echo "Failed — is the VM running?"
+	@ls -lh $(DEV_DISC_DIR)/ 2>/dev/null || true
 
 # Local QEMU — debug user (bash shell).
 ssh-dev-debug:
