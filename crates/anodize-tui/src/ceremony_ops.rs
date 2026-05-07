@@ -1369,21 +1369,31 @@ impl App {
         self.disc.burn_rx = Some(rx);
         self.disc.pending_intent_session = Some(intent_session);
 
+        tracing::info!(
+            skip_disc = self.skip_disc,
+            optical_dev = ?self.disc.optical_dev,
+            "do_write_intent: about to dispatch write"
+        );
+
         {
             if self.skip_disc {
                 let iso = media::iso9660::build_iso(&all_sessions);
                 let iso_path = staging.join("ceremony.iso");
                 match std::fs::write(&iso_path, &iso) {
                     Ok(()) => {
+                        tracing::info!("do_write_intent: skip_disc ISO written, sending Ok");
                         tx.send(Ok(())).ok();
                     }
                     Err(e) => {
+                        tracing::error!("do_write_intent: skip_disc ISO write failed: {e}");
                         tx.send(Err(anyhow::anyhow!("write intent ISO: {e}"))).ok();
                     }
                 }
             } else if let Some(dev) = self.disc.optical_dev.clone() {
+                tracing::info!("do_write_intent: spawning write_session to {}", dev.display());
                 media::write_session(&dev, all_sessions, false, tx);
             } else {
+                tracing::error!("do_write_intent: no optical device!");
                 self.set_status("No optical device — cannot write intent");
                 self.disc.burn_rx = None;
                 self.disc.pending_intent_session = None;
@@ -1391,6 +1401,7 @@ impl App {
             }
         }
 
+        tracing::info!(burn_rx_is_some = self.disc.burn_rx.is_some(), "do_write_intent: setting Commit state");
         self.ceremony.state = CeremonyPhase::Commit;
         self.set_status("Writing intent to disc. Operation will follow…");
     }
