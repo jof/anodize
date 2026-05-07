@@ -109,7 +109,7 @@ impl UtilitiesMode {
                 "  Profile: {} / {}",
                 p.ca.common_name, p.ca.organization
             ));
-            lines.push(format!("  HSM module: {}", p.hsm.module_name));
+            lines.push(format!("  HSM backend: {:?}", p.hsm.backend));
             lines.push(format!("  Token label: {}", p.hsm.token_label));
         } else {
             lines.push("  Profile: (not loaded)".into());
@@ -256,7 +256,7 @@ impl UtilitiesMode {
         let cfg_spec = format!("{:?}", profile.hsm.key_spec);
         let logged_in = app.hw.actor.is_some();
 
-        lines.push(format!("  Module: {}", profile.hsm.module_name));
+        lines.push(format!("  Backend: {:?}", profile.hsm.backend));
         lines.push(String::new());
 
         let Some(ref actor) = app.hw.actor else {

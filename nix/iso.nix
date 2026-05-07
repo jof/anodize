@@ -30,8 +30,8 @@ let
   # /run/wrappers/bin/anodize-ceremony, preventing two terminals from running
   # the ceremony simultaneously.
   ceremonyShell = (pkgs.writeShellScriptBin "ceremony-shell" ''
-    # Source NixOS environment.variables (YUBIHSM_PKCS11_CONF,
-    # ANODIZE_PKCS11_MODULES, etc.).  ceremony-shell is not a real shell so
+    # Source NixOS environment.variables (SOFTHSM2_MODULE, etc.).
+    # ceremony-shell is not a real shell so
     # /etc/profile is never sourced by the login process.
     [ -f /etc/set-environment ] && . /etc/set-environment
 
@@ -123,24 +123,20 @@ in
 
   environment.systemPackages = [
     anodize-ceremony          # ceremony TUI (unwrapped — use /run/wrappers/bin/ at runtime)
-    pkgs.yubihsm-shell        # YubiHSM 2 PKCS#11 module + shell utilities
+    pkgs.libusb1              # USB HID access for YubiHSM 2 native backend
   ];
 
-  # Direct USB connection to YubiHSM 2 — no connector daemon required.
-  # The PKCS#11 module reads this file path from YUBIHSM_PKCS11_CONF.
-  environment.etc."yubihsm_pkcs11.conf".text = ''
-    connector = yhusb://
-  '';
-
-  # ── PKCS#11 backend selection ─────────────────────────────────────────────
+  # ── HSM backend configuration ──────────────────────────────────────────────
   #
-  # ANODIZE_PKCS11_MODULES is an allowlist — the binary refuses any
-  # module_path whose realpath is not in this colon-separated list.
-  # The dev ISO (dev-iso.nix) adds SoftHSM2 to the allowlist and packages.
+  # The pluggable backend is selected by profile.toml `backend = "yubihsm"`
+  # or `backend = "softhsm"`.  The SoftHSM backend reads SOFTHSM2_MODULE to
+  # locate the PKCS#11 library.  The YubiHSM backend talks native USB HID
+  # via libusb — no PKCS#11 wrapper needed.
+  #
+  # The dev ISO (dev-iso.nix) adds SoftHSM2 packages and sets SOFTHSM2_MODULE.
 
   environment.variables = {
-    YUBIHSM_PKCS11_CONF = "/etc/yubihsm_pkcs11.conf";
-    ANODIZE_PKCS11_MODULES = "${pkgs.yubihsm-shell}/lib/pkcs11/yubihsm_pkcs11.so";
+    # Prod ISO: no SoftHSM — only YubiHSM over native USB.
   };
 
   # Include a sample profile so operators know what to put on their USB stick.
@@ -155,12 +151,11 @@ in
     cdp_url      = "http://crl.example.com/root.crl"   # optional
 
     [hsm]
-    # YubiHSM 2 (production hardware — PIN format: <key-id-hex>:<passphrase>):
-    module_name  = "yubihsm_pkcs11.so"
+    # YubiHSM 2 (production hardware):
+    backend      = "yubihsm"
     token_label  = "anodize-root-2026"
     key_label    = "root-key"
     key_spec     = "ecdsa-p384"
-    pin_source   = "prompt"
   '';
 
 

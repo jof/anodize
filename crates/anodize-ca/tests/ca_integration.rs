@@ -104,7 +104,7 @@ fn sign_csr_happy_path() {
     // call rm-rf's and recreates the token directory while the first session is still open.
     init_test_token("ca-sign-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-sign-test").expect("open session");
-    let mut actor = HsmActor::spawn(hsm);
+    let mut actor = HsmActor::spawn(Box::new(hsm));
     let pin = secrecy::SecretString::new("1234".to_string());
     actor.login(&pin).expect("login");
 
@@ -171,7 +171,7 @@ fn csr_with_extra_extension_rejected() {
 
     init_test_token("ca-reject-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-reject-test").expect("open session");
-    let mut actor = HsmActor::spawn(hsm);
+    let mut actor = HsmActor::spawn(Box::new(hsm));
     let pin = secrecy::SecretString::new("1234".to_string());
     actor.login(&pin).expect("login");
 

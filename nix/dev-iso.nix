@@ -78,14 +78,10 @@ in
     '')
   ];
 
-  # Add SoftHSM2 to the PKCS#11 allowlist alongside the prod YubiHSM entry.
-  # Base iso.nix already sets YUBIHSM_PKCS11_CONF — only override the keys
-  # that differ so we don't accidentally drop upstream variables.
+  # SoftHSM2 module path — the SoftHsmBackend reads this env var to locate
+  # the PKCS#11 library.  The YubiHSM backend uses native USB HID and does
+  # not need any PKCS#11 module.
   environment.variables.SOFTHSM2_MODULE = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
-  environment.variables.ANODIZE_PKCS11_MODULES = lib.mkForce (lib.concatStringsSep ":" [
-    "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so"
-    "${pkgs.yubihsm-shell}/lib/pkcs11/yubihsm_pkcs11.so"
-  ]);
 
   # cdemu-daemon: userspace optical drive emulator, run as a user service.
   # NOT wantedBy default.target — started on demand by the ceremony TUI

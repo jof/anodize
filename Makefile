@@ -162,11 +162,10 @@ fake-shuttle.img:
 	    'country      = "US"' \
 	    '' \
 	    '[hsm]' \
-	    'module_path = "/run/current-system/sw/lib/softhsm/libsofthsm2.so"' \
+	    'backend     = "softhsm"' \
 	    'token_label = "anodize-root-2026"' \
 	    'key_label   = "root-key"' \
 	    'key_spec    = "ecdsa-p384"' \
-	    'pin_source  = "prompt"' \
 	    | mcopy -i $@ - ::profile.toml
 	bash scripts/init-softhsm-shuttle.sh $@
 	@echo "$@ ready (dev PIN: 123456)"

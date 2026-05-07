@@ -9,8 +9,8 @@ use std::time::SystemTime;
 
 use anodize_audit::{genesis_hash, AuditLog};
 use anodize_ca::{build_root_cert, issue_crl, sign_intermediate_csr, P384HsmSigner};
-use anodize_config::{load as load_profile, serialize_revocation_list, PinSource, RevocationEntry};
-use anodize_hsm::{Hsm, HsmActor, KeySpec, Pkcs11Hsm, Pkcs11Module};
+use anodize_config::{load as load_profile, serialize_revocation_list, RevocationEntry};
+use anodize_hsm::{create_backend, Hsm, HsmActor, KeySpec};
 use der::{Decode, Encode};
 use ratatui::{layout::Rect, Frame};
 use secrecy::SecretString;
@@ -46,20 +46,6 @@ impl App {
                 let raw_bytes = std::fs::read(&profile_path).unwrap_or_default();
                 match load_profile(&profile_path) {
                     Ok(profile) => {
-                        if profile.hsm.pin_source != PinSource::Prompt {
-                            profile.hsm.pin_source.warn_if_unsafe();
-                            self.set_status(
-                                "ERROR: pin_source is not 'prompt' — unsuitable for \
-                                 ceremony. Fix profile.toml and re-insert USB.",
-                            );
-                            let _ = media::unmount(&self.shuttle_mount);
-                            return;
-                        }
-                        if let Err(e) = profile.hsm.resolve_module_path() {
-                            self.set_status(format!("PKCS#11 module not found: {e}"));
-                            let _ = media::unmount(&self.shuttle_mount);
-                            return;
-                        }
                         self.profile = Some(profile);
                         self.profile_toml_bytes = Some(raw_bytes);
                         self.setup.phase = SetupPhase::ProfileLoaded;
@@ -304,8 +290,8 @@ impl App {
             }
         };
 
-        let module_path = match cfg.resolve_module_path() {
-            Ok(p) => p,
+        let backend = match create_backend(cfg.backend) {
+            Ok(b) => b,
             Err(e) => {
                 self.hw.hsm_state = HwState::Error(format!("{e}"));
                 self.set_status(format!("HSM detection failed: {e}"));
@@ -314,8 +300,8 @@ impl App {
             }
         };
 
-        match Pkcs11Hsm::new(&module_path, &cfg.token_label) {
-            Ok(_hsm) => {
+        match backend.probe_token(&cfg.token_label) {
+            Ok(true) => {
                 let label = &cfg.token_label;
                 self.hw.hsm_state = HwState::Present(format!("token={label}"));
                 self.setup.phase = SetupPhase::WaitDisc;
@@ -323,11 +309,12 @@ impl App {
                     "HSM detected. Insert write-once disc (BD-R, DVD-R, CD-R, or M-Disc) and press [1].",
                 );
             }
-            Err(anodize_hsm::HsmError::TokenNotFound(ref label)) => {
+            Ok(false) => {
+                let label = &cfg.token_label;
                 // Fresh HSM — the token slot is created during InitRoot.
                 // Warn the operator but allow proceeding.
                 self.hw.hsm_state =
-                    HwState::Present(format!("PKCS#11 module OK, token '{label}' not yet initialized"));
+                    HwState::Present(format!("backend OK, token '{label}' not yet initialized"));
                 self.setup.phase = SetupPhase::HsmWarnTokenMissing;
                 self.set_status(format!(
                     "WARNING: HSM token '{label}' does not exist yet. \
@@ -363,23 +350,15 @@ impl App {
             }
         };
 
-        let module_path = match cfg.resolve_module_path() {
-            Ok(p) => p,
+        let backend = match create_backend(cfg.backend) {
+            Ok(b) => b,
             Err(e) => {
-                self.set_status(format!("PKCS#11 module error: {e}"));
+                self.set_status(format!("HSM backend error: {e}"));
                 return;
             }
         };
 
-        let module = match Pkcs11Module::open(&module_path) {
-            Ok(m) => m,
-            Err(e) => {
-                self.set_status(format!("PKCS#11 module open failed: {e}"));
-                return;
-            }
-        };
-
-        let tokens = match module.list_tokens() {
+        let tokens = match backend.list_tokens() {
             Ok(t) => t,
             Err(e) => {
                 self.set_status(format!("HSM enumerate failed: {e}"));
@@ -417,13 +396,10 @@ impl App {
         // separate SO PIN split.
         let so_pin = user_pin.clone();
 
-        let factory_pin = cfg.factory_pin.as_ref().map(|p| SecretString::new(p.clone()));
-
-        let hsm = match module.bootstrap_token(
+        let hsm = match backend.bootstrap(
             target.slot_id,
             &so_pin,
             &user_pin,
-            factory_pin.as_ref(),
             &cfg.token_label,
         ) {
             Ok(h) => h,
@@ -462,26 +438,22 @@ impl App {
             }
         };
 
-        let module_path = match cfg.resolve_module_path() {
-            Ok(p) => p,
+        let backend = match create_backend(cfg.backend) {
+            Ok(b) => b,
             Err(e) => {
-                self.set_status(format!("PKCS#11 module error: {e}"));
+                self.set_status(format!("HSM backend error: {e}"));
                 return;
             }
         };
 
-        let hsm = match Pkcs11Hsm::new(&module_path, &cfg.token_label) {
+        let hsm = match backend.open_session(&cfg.token_label, &pin) {
             Ok(h) => h,
             Err(e) => {
-                self.set_status(format!("HSM open failed: {e}"));
+                self.set_status(format!("HSM open/login failed: {e}"));
                 return;
             }
         };
-        let mut actor = HsmActor::spawn(hsm);
-        if let Err(e) = actor.login(&pin) {
-            self.set_status(format!("HSM login failed: {e}"));
-            return;
-        }
+        let actor = HsmActor::spawn(hsm);
         self.hw.actor = Some(actor);
         self.hw.hsm_state = HwState::Ready("authenticated via SSS quorum".into());
     }

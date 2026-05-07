@@ -104,11 +104,8 @@
             softhsm
             opensc
           ];
-          # Mirror the ISO allowlist so developers exercise the module check
-          # locally. Only SoftHSM2 is listed; add yubihsm-shell entries if
-          # you plug a YubiHSM into your dev machine.
-          SOFTHSM2_MODULE        = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
-          ANODIZE_PKCS11_MODULES = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
+          # SoftHSM backend reads this env var to locate the PKCS#11 library.
+          SOFTHSM2_MODULE = "${pkgs.softhsm}/lib/softhsm/libsofthsm2.so";
         };
       }
     )

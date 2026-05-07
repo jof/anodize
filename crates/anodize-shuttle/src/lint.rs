@@ -107,11 +107,7 @@ pub fn run(args: LintArgs) -> Result<()> {
                     profile.ca.country,
                     profile.hsm.token_label,
                 ));
-                if profile.hsm.pin_source != anodize_config::PinSource::Prompt {
-                    warnings.push(
-                        "profile.toml: pin_source is not 'prompt' — unsuitable for ceremony".into(),
-                    );
-                }
+                // pin_source removed — all backends use SSS-derived PIN now.
                 if profile.ca.cdp_url.is_none() {
                     warnings.push(
                         "profile.toml: cdp_url is not set — certificates will have no CRL distribution point".into(),
