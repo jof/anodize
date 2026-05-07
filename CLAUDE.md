@@ -194,6 +194,67 @@ ls -lh dev-disc/test-bdr.img
 
 The dev ISO runs `anodize-sentinel` on tty1 and ttyS0. Sentinel execs `anodize-ceremony` built with `dev-softhsm-usb`. The ceremony binary shows a red "DEV BUILD" banner. Inside the guest, vhba + cdemu-daemon start automatically and expose a blank BD-R as `/dev/sr0`.
 
+### End-to-end InitRoot ceremony test
+
+The full InitRoot ceremony can be driven interactively (via SSH or term-cli) or automatically via the expect script:
+
+```sh
+# Automated (arm64 on Apple Silicon — default):
+rm -f fake-shuttle.img && make fake-shuttle.img
+rm -f anodize-dev-arm64.iso && make dev-arm64
+rm -f dev-disc/*
+expect scripts/e2e-test.expect
+
+# Automated (x86_64 with KVM):
+ARCH=amd64 expect scripts/e2e-test.expect
+```
+
+The expect script (`scripts/e2e-test.expect`) launches QEMU, SSHes in, and drives the full ceremony flow unattended.  It captures shares during distribution and replays them during verification.  Output goes to `/tmp/anodize-e2e.log`.
+
+**Manual walkthrough** (arm64 via term-cli or SSH):
+
+```sh
+# Prerequisites — clean slate
+rm -f fake-shuttle.img && make fake-shuttle.img
+rm -f anodize-dev-arm64.iso && make dev-arm64
+rm -f dev-disc/*
+
+# Start QEMU (Ctrl-A X to quit)
+make qemu-aarch64-nographic
+
+# In a second terminal, SSH in
+make ssh-dev
+```
+
+**Ceremony interaction sequence** (key presses at each screen):
+
+| # | Screen | Key | Notes |
+|---|--------|-----|-------|
+| 1 | Sentinel | `Enter` | Launches ceremony TUI |
+| 2 | Clock Verification | `1` | Confirm time is correct |
+| 3 | Profile Loaded | `1` | Detect HSM and continue |
+| 4 | HSM Detection | `1` | Acknowledge (token not yet init'd — expected) |
+| 5 | Insert Disc | `1` | Confirm disc (cdemu BD-R at /dev/sr0) |
+| 6 | Operation Select | `1` | Init root CA |
+| 7 | Custodian Setup | type names + `Enter` | Add ≥2 custodians (e.g. "Alice", "Bob") |
+| 8 | Threshold Picker | `Tab`, then `Enter` | Default 2-of-2; ↑/↓ to adjust |
+| 9 | Share Distribution ×N | `S` to reveal, `Enter` to confirm | **Record every word** — needed in step 10 |
+| 10 | Share Verification ×N | type each word + `Space` | Re-enter all words; auto-submits on last word |
+| 11 | Key Management | `1` | Generate new P-384 keypair |
+| 12 | *Intent burn + HSM bootstrap + keygen* | *(automatic)* | Writes intent to disc, then HSM operations |
+| 13 | Certificate Preview | `1` | Proceed to disc write (verify fingerprint first) |
+| 14 | Write Confirmation | `1`, then `Enter` | Two-step confirmation |
+| 15 | *Disc burn* | *(automatic)* | TAO session write via cdemu SCSI |
+| 16 | Disc Done | `1` | Copy artifacts to shuttle |
+| 17 | Ceremony Complete | `q` | Done |
+
+**Critical detail — share capture**: during step 9, each share is displayed as kebab-case word groups (e.g. `acid-cope-deer-bell`).  You must record every word — typically 34 words per share in 9 groups.  Use a terminal ≥120×50 so the full share fits on screen without scrolling.  If driving via term-cli, capture the screen after pressing `S` to reveal each share.
+
+**What to verify**:
+- Step 12 should transition from Commit → Execute (not get stuck in Commit or hit PostCommitError). If it hits PostCommitError, the HSM operation failed — check the log via `ssh debug@localhost -p 2222` then `tail /run/anodize/ceremony.log`.
+- `dev-disc/` should contain `session-01.iso` and `session-02.iso` (intent + cert sessions).
+- Status bar should show "Certificate built. Verify fingerprint before writing." at step 13.
+
 ### Tests as you go
 
 Each new function or module gets a test in the same commit that introduces it — not deferred to later. Follow the pattern already established in `anodize-hsm`:

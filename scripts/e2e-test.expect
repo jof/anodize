@@ -1,49 +1,119 @@
 #!/usr/bin/expect -f
-# End-to-end ceremony test via SSH.
-# Drives the anodize-ceremony TUI through a full GenerateRootCa ceremony.
+# End-to-end InitRoot ceremony test via SSH.
+# Drives the anodize-ceremony TUI through a full InitRoot ceremony including:
+#   Setup (clock, shuttle, profile, HSM, disc) → InitRoot → SSS custodian
+#   setup → share distribution → share verification → keygen → cert preview
+#   → disc write → shuttle copy → done.
+#
 # Connects over SSH (not serial console) so terminal size is handled correctly.
 #
-# Usage: expect scripts/e2e-test.expect
-# (Run from the anodize repo root after building anodize-cdemu.iso and fake-shuttle.img)
+# Usage:
+#   expect scripts/e2e-test.expect              # arm64 (default on macOS)
+#   ARCH=amd64 expect scripts/e2e-test.expect   # x86_64 with KVM
+#
+# Prerequisites:
+#   make fake-shuttle.img
+#   make dev-arm64   (or make dev-amd64)
+#   mkdir -p dev-disc
 #
 # Pattern matching note: ratatui renders with cursor positioning between words,
 # so multi-word phrases do not appear as contiguous bytes in the terminal stream.
 # All patterns match single distinctive tokens.
 
 set repo [file dirname [file dirname [info script]]]
-set iso     "$repo/anodize-cdemu.iso"
+set arch [expr {[info exists ::env(ARCH)] ? $::env(ARCH) : "arm64"}]
 set usb     "$repo/fake-shuttle.img"
 set devdisc "$repo/dev-disc"
 set ssh_port 2222
 
+if {$arch eq "arm64"} {
+    set iso "$repo/anodize-dev-arm64.iso"
+} else {
+    set iso "$repo/anodize-dev-amd64.iso"
+}
+
 # Prepare host environment
 file mkdir $devdisc
-file copy -force /usr/share/OVMF/OVMF_VARS_4M.fd /tmp/anodize-ovmf-vars.fd
 
 log_user 1
 
 # Capture all terminal output for post-mortem analysis
 log_file -noappend /tmp/anodize-e2e.log
 
-puts "=== Launching QEMU ==="
-spawn qemu-system-x86_64 \
-    -enable-kvm -machine pc -cpu host -m 2G -smp 2 \
-    -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
-    -drive if=pflash,format=raw,file=/tmp/anodize-ovmf-vars.fd \
-    -cdrom $iso -no-reboot \
-    -drive file=$usb,format=raw,if=none,id=usb0 \
-    -device usb-ehci,id=ehci \
-    -device usb-storage,drive=usb0,bus=ehci.0 \
-    -fsdev local,security_model=none,id=devdisc,path=$devdisc \
-    -device virtio-9p-pci,id=fs0,fsdev=devdisc,mount_tag=dev-disc \
-    -netdev user,id=net0,hostfwd=tcp::$ssh_port-:22 \
-    -device virtio-net-pci,netdev=net0 \
-    -nographic
+puts "=== Launching QEMU ($arch) ==="
+
+if {$arch eq "arm64"} {
+    # Detect AAVMF firmware
+    set aavmf ""
+    foreach p {
+        /opt/homebrew/share/qemu/edk2-aarch64-code.fd
+        /usr/local/share/qemu/edk2-aarch64-code.fd
+        /usr/share/AAVMF/AAVMF_CODE.fd
+        /usr/share/edk2/aarch64/QEMU_EFI.fd
+    } {
+        if {[file exists $p]} { set aavmf $p; break }
+    }
+    if {$aavmf eq ""} {
+        puts "\[FAIL\] No AAVMF firmware found"; exit 1
+    }
+    spawn qemu-system-aarch64 \
+        -machine virt,accel=hvf \
+        -cpu host \
+        -m 2G -smp 2 \
+        -bios $aavmf \
+        -device nec-usb-xhci,id=xhci \
+        -drive if=none,id=usbiso,format=raw,readonly=on,file=$iso \
+        -device usb-storage,bus=xhci.0,drive=usbiso \
+        -drive file=$usb,format=raw,if=none,id=usb0 \
+        -device usb-storage,bus=xhci.0,drive=usb0 \
+        -fsdev local,security_model=mapped-xattr,id=devdisc,path=$devdisc \
+        -device virtio-9p-pci,id=fs0,fsdev=devdisc,mount_tag=dev-disc \
+        -netdev user,id=net0,hostfwd=tcp::$ssh_port-:22 \
+        -device virtio-net-pci,netdev=net0 \
+        -no-reboot \
+        -nographic
+} else {
+    # Detect OVMF firmware
+    set ovmf_code ""
+    set ovmf_vars ""
+    foreach p {
+        /opt/homebrew/share/qemu/edk2-x86_64-code.fd
+        /usr/local/share/qemu/edk2-x86_64-code.fd
+        /usr/share/OVMF/OVMF_CODE_4M.fd
+        /usr/share/OVMF/OVMF_CODE.fd
+    } {
+        if {[file exists $p]} { set ovmf_code $p; break }
+    }
+    foreach p {
+        /opt/homebrew/share/qemu/edk2-i386-vars.fd
+        /usr/local/share/qemu/edk2-i386-vars.fd
+        /usr/share/OVMF/OVMF_VARS_4M.fd
+        /usr/share/OVMF/OVMF_VARS.fd
+    } {
+        if {[file exists $p]} { set ovmf_vars $p; break }
+    }
+    if {$ovmf_code eq "" || $ovmf_vars eq ""} {
+        puts "\[FAIL\] No OVMF firmware found"; exit 1
+    }
+    file copy -force $ovmf_vars /tmp/anodize-ovmf-vars.fd
+    spawn qemu-system-x86_64 \
+        -enable-kvm -machine pc -cpu host -m 2G -smp 2 \
+        -drive if=pflash,format=raw,readonly=on,file=$ovmf_code \
+        -drive if=pflash,format=raw,file=/tmp/anodize-ovmf-vars.fd \
+        -cdrom $iso -no-reboot \
+        -drive file=$usb,format=raw,if=none,id=usb0 \
+        -device usb-ehci,id=ehci \
+        -device usb-storage,drive=usb0,bus=ehci.0 \
+        -fsdev local,security_model=mapped-xattr,id=devdisc,path=$devdisc \
+        -device virtio-9p-pci,id=fs0,fsdev=devdisc,mount_tag=dev-disc \
+        -netdev user,id=net0,hostfwd=tcp::$ssh_port-:22 \
+        -device virtio-net-pci,netdev=net0 \
+        -nographic
+}
 
 set qemu_spawn_id $spawn_id
 
-# Poll for SSH readiness (boot takes 60-120 s).
-# Uses Tcl's built-in socket — no nc dependency.
+# Poll for SSH readiness (boot takes 10-120 s depending on arch).
 puts "=== Polling for SSH on localhost:$ssh_port ==="
 set timeout 180
 set ssh_ready 0
@@ -62,7 +132,6 @@ if {!$ssh_ready} {
 }
 
 # SSH into the ceremony user using the committed dev key.
-# ceremony-shell → sentinel → TUI launches automatically as the login shell.
 spawn ssh \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
@@ -78,71 +147,155 @@ expect {
         puts "\n\[PASS\] Sentinel banner appeared"
     }
 }
-
-# --- Sentinel screen ---
-# Sentinel uses raw mode — Enter is \r
 send "\r"
 
-# --- ClockCheck TUI ---
-# Match "correct" from "[1]  Time is correct — continue"
+# --- ClockCheck ---
 set timeout 60
 expect {
-    timeout { puts "\n\[FAIL\] ClockCheck: timed out waiting for TUI"; exit 1 }
+    timeout { puts "\n\[FAIL\] ClockCheck: timed out"; exit 1 }
     "correct" {
         puts "\n\[PASS\] ClockCheck screen appeared"
     }
 }
 send "1"
 
-# --- WaitUsb -> ProfileLoaded (auto-advance with USB attached) ---
-# Match "Begin" from "[1]  Begin ceremony (HSM PIN entry)"
+# --- ProfileLoaded ---
+# Match "Detect HSM" from "[1]  Detect HSM and continue"
 set timeout 60
 expect {
     timeout { puts "\n\[FAIL\] ProfileLoaded: timed out"; exit 1 }
-    "Begin" {
+    "Detect HSM" {
         puts "\n\[PASS\] Profile loaded"
     }
 }
 send "1"
 
-# --- EnterPin ---
-# Match "cancel" from "Press Enter to log in, Esc to cancel."
+# --- HSM Detection ---
+# Match "Acknowledge" from "[1]  Acknowledge and continue"
 set timeout 30
 expect {
-    timeout { puts "\n\[FAIL\] EnterPin: timed out"; exit 1 }
-    "cancel" {
-        puts "\n\[PASS\] PIN prompt appeared"
+    timeout { puts "\n\[FAIL\] HSM detection: timed out"; exit 1 }
+    "Acknowledge" {
+        puts "\n\[PASS\] HSM detected (token not yet initialized — expected)"
     }
 }
-# dev PIN from fake-shuttle.img SoftHSM token
-send "123456\r"
+send "1"
 
-# --- WaitDisc ---
-# cdemu-daemon (user service) creates blank BD-R after session D-Bus is ready.
-# Match "/dev/sr" from "  Disc ready in /dev/sr1  (0 prior session(s), ...)"
-# Note: ratatui differential rendering skips unchanged chars — "ready" is NOT
-# contiguous in the byte stream (the 'e' and 'd' in "appendable" survive from
-# the prior "No appendable disc detected." render).  "/dev/sr" is safe because
-# all 7 bytes differ from the old content at those positions.
+# --- Insert Disc ---
+# Match "Confirm disc" from "[1]  Confirm disc and select operation"
 set timeout 120
 expect {
-    timeout { puts "\n\[FAIL\] WaitDisc: timed out — cdemu/vhba may not have initialized"; exit 1 }
-    "/dev/sr" {
+    timeout { puts "\n\[FAIL\] InsertDisc: timed out — cdemu/vhba may not have initialized"; exit 1 }
+    "Confirm disc" {
         puts "\n\[PASS\] Disc detected (cdemu BD-R ready)"
     }
 }
 send "1"
 
-# --- OperationSelect: GenerateRootCa ---
-# Match "Generate" from "[1]  Generate new root CA (fresh or resume key)"
+# --- OperationSelect: InitRoot ---
+# Match "Init root" from "[1]  Init root CA"
 set timeout 30
 expect {
     timeout { puts "\n\[FAIL\] OperationSelect: timed out"; exit 1 }
-    "Generate" {
+    "Init root" {
         puts "\n\[PASS\] OperationSelect appeared"
     }
 }
 send "1"
+
+# === SSS Custodian Setup ===
+# Add 2 custodians (Alice, Bob), set 2-of-2 threshold.
+set timeout 30
+expect {
+    timeout { puts "\n\[FAIL\] CustodianSetup: timed out"; exit 1 }
+    "Custodian Setup" {
+        puts "\n\[PASS\] Custodian setup screen"
+    }
+}
+# Enter custodian names
+send "Alice\r"
+after 500
+send "Bob\r"
+after 500
+# Tab to threshold picker, default is 2-of-2, confirm
+send "\t"
+after 500
+send "\r"
+
+# === Share Distribution ===
+# Capture both shares during distribution for later re-entry.
+# Each share is a set of BIP39-like words in kebab-case groups.
+
+proc capture_share {share_num custodian} {
+    set timeout 30
+    expect {
+        timeout { puts "\n\[FAIL\] ShareReveal $share_num: timed out waiting for HAND DEVICE"; exit 1 }
+        "HAND DEVICE" {
+            puts "\n\[PASS\] Share #$share_num for $custodian — ready to reveal"
+        }
+    }
+    # Press S to reveal share
+    send "S"
+    # Wait for share content to render ("Total:" marks the end)
+    set timeout 30
+    set share_text ""
+    expect {
+        timeout { puts "\n\[FAIL\] ShareReveal $share_num: timed out waiting for share content"; exit 1 }
+        -re {Total:\s+\d+\s+groups,\s+(\d+)\s+words} {
+            set word_count $expect_out(1,string)
+            puts "\n\[PASS\] Share #$share_num revealed ($word_count words)"
+        }
+    }
+    # Extract individual words from the share panel.
+    # The share text appears between the custodian header and the "Total:" line.
+    # Words are in kebab-case groups: "acid-cope-deer-bell"
+    # We need to parse them from the expect buffer.
+    set buf $expect_out(buffer)
+    set words {}
+    foreach line [split $buf "\n"] {
+        set line [string trim $line " │"]
+        # Match lines that look like kebab-case word groups
+        if {[regexp {^[a-z]+-[a-z]+} $line]} {
+            foreach w [split $line "-"] {
+                set w [string trim $w]
+                if {$w ne ""} {
+                    lappend words $w
+                }
+            }
+        }
+    }
+    puts "\[INFO\] Captured [llength $words] words for $custodian"
+    # Confirm transcription
+    send "\r"
+    return $words
+}
+
+set alice_words [capture_share 1 "Alice"]
+set bob_words   [capture_share 2 "Bob"]
+
+# === Share Verification ===
+# Both custodians must re-enter their shares word by word.
+# The input accepts words one at a time; Space advances to the next word.
+
+proc enter_share {words custodian} {
+    set timeout 30
+    expect {
+        timeout { puts "\n\[FAIL\] ShareInput: timed out waiting for word prompt for $custodian"; exit 1 }
+        "Word 1" {
+            puts "\n\[PASS\] Share input ready for $custodian"
+        }
+    }
+    foreach w $words {
+        send "$w "
+        after 150
+    }
+    # Wait for acceptance
+    after 1000
+    puts "\[INFO\] Entered [llength $words] words for $custodian"
+}
+
+enter_share $alice_words "Alice"
+enter_share $bob_words   "Bob"
 
 # --- KeyAction: generate new P-384 keypair ---
 # Match "P-384" from "[1]  Generate new P-384 keypair (fresh ceremony)"
@@ -155,8 +308,13 @@ expect {
 }
 send "1"
 
-# --- WritingIntent (auto) -> HSM keygen -> CertPreview ---
-# Intent burn + SoftHSM P-384 keygen; allow up to 2 minutes.
+# --- Intent burn → HSM bootstrap → keygen → cert build → CertPreview ---
+# This is the path fixed by the PostCommitError change: intent is written to
+# disc first, then HSM bootstrap + keygen + cert build run.  If any of those
+# fail, the TUI transitions to PostCommitError (retry/abort) instead of
+# silently advancing to Execute with no certificate.
+#
+# Allow up to 2 minutes for intent burn + SoftHSM P-384 keygen.
 # Match "Proceed" from "[1]  Proceed to disc write"
 set timeout 120
 expect {
@@ -167,9 +325,19 @@ expect {
 }
 send "1"
 
-# --- BurningDisc (auto) -> DiscDone ---
+# --- Write confirmation dialog (two-step) ---
+# Step 1: press 1 to begin confirmation
+set timeout 30
+expect {
+    timeout { puts "\n\[FAIL\] WriteConfirm: timed out waiting for step 1"; exit 1 }
+    "press" {
+        puts "\n\[PASS\] Write confirmation step 1"
+    }
+}
+send "\r"
+
+# --- BurningDisc → DiscDone ---
 # TAO session write via cdemu SCSI generic; allow 3 minutes.
-# Match "successfully" from "  {op_label} written to disc successfully."
 set timeout 180
 expect {
     timeout { puts "\n\[FAIL\] DiscDone: timed out after disc burn"; exit 1 }
@@ -179,15 +347,14 @@ expect {
 }
 
 # Snapshot disc image size before continuing
-puts "\n\[CHECK\] dev-disc/test-bdr.img on host:"
-catch { exec ls -lh $devdisc/test-bdr.img } img_info
+puts "\n\[CHECK\] dev-disc contents on host:"
+catch { exec ls -lh $devdisc } img_info
 puts "  $img_info"
 
-# Copy artifacts to USB
+# Copy artifacts to shuttle
 send "1"
 
 # --- Done ---
-# Match "complete" from "  Ceremony complete."
 set timeout 60
 expect {
     timeout { puts "\n\[WARN\] Done: timed out waiting for ceremony complete screen" }
