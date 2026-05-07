@@ -146,12 +146,18 @@ in
         # The host must strip xattrs between boots:
         #   for f in dev-disc/*.iso; do xattr -c "$f"; chmod 666 "$f"; done
         if [ -s "$share/test-bdr.iso" ]; then
-          echo "Loading existing BD-R image from $share/test-bdr.iso"
+          # Build file list: base image + any additional session files
+          # cdemu's ISO writer creates test-bdr-SS-TT.iso for session SS track TT
+          files="'$share/test-bdr.iso'"
+          for f in "$share"/test-bdr-*.iso; do
+            [ -f "$f" ] && files="$files, '$f'"
+          done
+          echo "Loading existing BD-R image: [$files]"
           ${pkgs.glib}/bin/gdbus call --session \
             --dest net.sf.cdemu.CDEmuDaemon \
             --object-path /Daemon \
             --method net.sf.cdemu.CDEmuDaemon.DeviceLoad \
-            0 "['$share/test-bdr.iso']" \
+            0 "[$files]" \
             "{'writer-id': <'WRITER-ISO'>, 'medium-type': <'bdr'>}"
         else
           echo "Creating new blank BD-R image at $share/test-bdr.iso"

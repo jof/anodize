@@ -3,11 +3,11 @@
     "cdemu-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1778196694,
-        "narHash": "sha256-EVBELgFYvd5l8TcdqCbdVAGsPNvFoIVOOj6Y+RwwYyU=",
+        "lastModified": 1778197646,
+        "narHash": "sha256-7ibiq+JBwerklEzeZlqLNEvcmAh2tKRfj/1sPMy9kjU=",
         "owner": "jof",
         "repo": "cdemu",
-        "rev": "4d88ef9ce65d89ec86edf3fcb0c39f2d4fa044de",
+        "rev": "14fc92bc1c09ccaae8938d23214eb683dbf10dfc",
         "type": "github"
       },
       "original": {
