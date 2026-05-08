@@ -32,12 +32,11 @@ write modal's confirm step doesn't advance. Either:
 - Relax the drift threshold for dev builds, or
 - Let the operator re-confirm the clock without restarting the entire ceremony.
 
-## TUI: add j/k scroll hint to share display panel
+## ~~TUI: add j/k scroll hint to share display panel~~ ✅
 
-The share distribution panel clips at ~5 lines of words (20 of 34). Scrolling with
-`j`/`k` works but isn't documented on-screen. Add a hint line like
-`[j/k] Scroll  [Enter] Continue` to the share reveal panel so custodians know to
-scroll.
+Done. Key hints (`[j/k] Scroll`, `[Enter]`, `[S]`, `[Esc]`) now render in a
+fixed 2-line footer pinned to the bottom of the share reveal panel, always
+visible regardless of scroll position. Scroll offset is also clamped.
 
 ## TUI: share panel height
 

@@ -8,7 +8,7 @@
 use anodize_sss::Share;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -107,6 +107,18 @@ impl ShareReveal {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
+        // Reserve 2 lines at the bottom for fixed key-hint footer.
+        let footer_height = 2u16;
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(footer_height),
+            ])
+            .split(inner);
+        let content_area = chunks[0];
+        let footer_area = chunks[1];
+
         let bold = Style::default().add_modifier(Modifier::BOLD);
         let dim = Style::default().fg(Color::DarkGray);
         let green = Style::default().fg(Color::Green);
@@ -193,11 +205,6 @@ impl ShareReveal {
                     "  Transcribe all words carefully.",
                     Style::default().fg(Color::Cyan),
                 )));
-                lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "  [Enter] Confirm transcription   [S] Hide share   [j/k] Scroll",
-                    dim,
-                )));
             } else {
                 // ── Screen-clear state ──
                 lines.push(Line::from(Span::styled(
@@ -219,12 +226,29 @@ impl ShareReveal {
             }
         }
 
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled("  [Esc] Abort ceremony", dim)));
+        // Clamp scroll offset so we can't scroll past content.
+        let content_lines = lines.len() as u16;
+        let max_scroll = content_lines.saturating_sub(content_area.height);
+        let clamped_scroll = self.scroll_offset.min(max_scroll);
 
         let para = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
-            .scroll((self.scroll_offset, 0));
-        frame.render_widget(para, inner);
+            .scroll((clamped_scroll, 0));
+        frame.render_widget(para, content_area);
+
+        // Fixed footer: context-dependent hints + abort.
+        let hint = if self.all_revealed() {
+            "  [Enter] Continue"
+        } else if self.visible {
+            "  [Enter] Confirm transcription   [S] Hide share   [j/k] Scroll"
+        } else {
+            "  [S] Reveal share"
+        };
+        let footer_lines = vec![
+            Line::from(Span::styled(hint, dim)),
+            Line::from(Span::styled("  [Esc] Abort ceremony", dim)),
+        ];
+        let footer = Paragraph::new(footer_lines);
+        frame.render_widget(footer, footer_area);
     }
 }
