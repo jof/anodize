@@ -380,15 +380,16 @@ impl App {
                         // All shares revealed → advance to verification round
                         self.sss.share_reveal = None;
                         if let Some(ref state) = self.disc.session_state {
-                            self.sss.share_input =
-                                Some(crate::components::share_input::ShareInput::new(
+                            let mut si = crate::components::share_input::ShareInput::new(
                                     state.sss.clone(),
                                     32, // PIN is 32 bytes
-                                ));
+                                );
+                            si.verify_all = true;
+                            self.sss.share_input = Some(si);
                         }
                         self.ceremony.state = CeremonyPhase::Planning(PlanningState::ShareVerify);
                         self.set_status(
-                            "Verification round: each custodian re-enters their share.",
+                            "Verification round: every custodian must re-enter their share.",
                         );
                     }
                 }
@@ -400,13 +401,13 @@ impl App {
                 }
                 if let Some(ref mut input) = self.sss.share_input {
                     input.handle_key(key);
-                    if input.quorum_reached() {
+                    if input.is_complete() {
                         self.sss.share_input = None;
                         self.sss.shares = None;
-                        // Verification passed → proceed to HSM key generation
+                        // All shares verified → proceed to HSM key generation
                         self.ceremony.state = CeremonyPhase::Planning(PlanningState::KeyAction);
                         self.set_status(
-                            "Shares verified. [1] Generate root keypair  [2] Use existing key",
+                            "All shares verified. [1] Generate root keypair  [2] Use existing key",
                         );
                     }
                 }
@@ -453,15 +454,16 @@ impl App {
                     if reveal.handle_key(key) {
                         self.sss.share_reveal = None;
                         if let Some(ref state) = self.disc.session_state {
-                            self.sss.share_input =
-                                Some(crate::components::share_input::ShareInput::new(
+                            let mut si = crate::components::share_input::ShareInput::new(
                                     state.sss.clone(),
                                     32,
-                                ));
+                                );
+                            si.verify_all = true;
+                            self.sss.share_input = Some(si);
                         }
                         self.ceremony.state =
                             CeremonyPhase::Planning(PlanningState::RekeyShareVerify);
-                        self.set_status("Verify new shares: each custodian re-enters their share.");
+                        self.set_status("Verify new shares: every custodian must re-enter their share.");
                     }
                 }
                 return Action::Noop;
@@ -472,10 +474,10 @@ impl App {
                 }
                 if let Some(ref mut input) = self.sss.share_input {
                     input.handle_key(key);
-                    if input.quorum_reached() {
+                    if input.is_complete() {
                         self.sss.share_input = None;
                         self.sss.shares = None;
-                        // Verified → burn updated STATE.JSON directly
+                        // All shares verified → burn updated STATE.JSON directly
                         self.do_start_burn();
                     }
                 }

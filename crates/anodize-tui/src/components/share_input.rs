@@ -47,6 +47,8 @@ pub struct ShareInput {
     completions: Vec<&'static str>,
     /// Number of shares required (threshold k).
     pub threshold: u8,
+    /// When true, require all `n` shares (verification mode), not just threshold.
+    pub verify_all: bool,
     /// Expected total word count per share (secret_len + 2 bytes = that many words).
     expected_words: usize,
     /// Shares collected so far.
@@ -69,6 +71,7 @@ impl ShareInput {
             word_buf: String::new(),
             completions: Vec::new(),
             threshold,
+            verify_all: false,
             expected_words,
             collected: Vec::new(),
             secret_len,
@@ -80,6 +83,20 @@ impl ShareInput {
     /// True when enough shares have been collected.
     pub fn quorum_reached(&self) -> bool {
         self.collected.len() >= self.threshold as usize
+    }
+
+    /// True when all shares have been collected (for verification mode).
+    pub fn all_collected(&self) -> bool {
+        self.collected.len() >= self.sss_meta.total as usize
+    }
+
+    /// True when the required number of shares (all or threshold) have been collected.
+    pub fn is_complete(&self) -> bool {
+        if self.verify_all {
+            self.all_collected()
+        } else {
+            self.quorum_reached()
+        }
     }
 
     /// Handle a key event. Returns true if a share was just submitted.
@@ -241,7 +258,7 @@ impl ShareInput {
             .title(format!(
                 "Share Input — {}/{} shares",
                 self.collected.len(),
-                self.threshold
+                if self.verify_all { self.sss_meta.total } else { self.threshold }
             ))
             .border_style(Style::default().fg(Color::Cyan));
 
@@ -266,7 +283,8 @@ impl ShareInput {
             ]));
         }
 
-        let remaining = self.threshold as usize - self.collected.len().min(self.threshold as usize);
+        let required = if self.verify_all { self.sss_meta.total as usize } else { self.threshold as usize };
+        let remaining = required - self.collected.len().min(required);
         if remaining > 0 {
             // Word progress
             let total_entered = self.words.len();
@@ -334,8 +352,13 @@ impl ShareInput {
             }
         } else {
             lines.push(Line::from(""));
+            let done_msg = if self.verify_all {
+                "  All shares verified! Proceeding..."
+            } else {
+                "  Quorum reached! Press [Enter] to reconstruct PIN."
+            };
             lines.push(Line::from(Span::styled(
-                "  Quorum reached! Press [Enter] to reconstruct PIN.",
+                done_msg,
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),

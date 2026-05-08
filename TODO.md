@@ -55,12 +55,12 @@ cleanly. Need to either:
 - Prevent escape/quit during the share validation phase, or
 - Detect and recover from the half-initialized state on next launch.
 
-## InitRoot: share validation should verify all shares, not just a quorum
+## ~~InitRoot: share validation should verify all shares, not just a quorum~~ (FIXED)
 
-During InitRoot the share validation step only checks that a quorum of shares
-recombine correctly. It should verify that *every* custodian copied their share
-correctly—otherwise a custodian with a bad copy won't find out until a future
-recovery attempt, when the mistake may be unrecoverable.
+Fixed: `ShareInput` now has a `verify_all` flag. When set (during `ShareVerify`
+and `RekeyShareVerify` phases), every custodian must re-enter their share—not
+just a threshold quorum. The UI title, remaining-count, completion message, and
+instruction panels all reflect the all-shares requirement.
 
 ## TUI: revoke cert input should accept Escape in serial field
 

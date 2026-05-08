@@ -508,7 +508,8 @@ impl CeremonyMode {
             CeremonyPhase::Planning(PlanningState::ShareVerify) => {
                 vec![
                     String::new(),
-                    "  Verification round: each custodian re-enters their share.".into(),
+                    "  Verification round: EVERY custodian re-enters their share.".into(),
+                    "  All shares must verify — not just a quorum.".into(),
                     "  This confirms transcription accuracy before HSM initialization.".into(),
                     String::new(),
                     "  The share input component is active.".into(),
@@ -556,7 +557,8 @@ impl CeremonyMode {
             CeremonyPhase::Planning(PlanningState::RekeyShareVerify) => {
                 vec![
                     String::new(),
-                    "  Verification round: each new custodian re-enters their share.".into(),
+                    "  Verification round: EVERY new custodian re-enters their share.".into(),
+                    "  All shares must verify — not just a quorum.".into(),
                     String::new(),
                     "  The share input component is active.".into(),
                 ]
