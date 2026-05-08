@@ -132,12 +132,19 @@ impl<H: Hsm> DynSignatureAlgorithmIdentifier for P384HsmSigner<H> {
 
 impl<H: Hsm> Signer<DerSignature> for P384HsmSigner<H> {
     fn try_sign(&self, msg: &[u8]) -> Result<DerSignature, signature::Error> {
+        tracing::debug!(msg_len = msg.len(), "P384HsmSigner: try_sign called");
         let p1363 = self
             .hsm
             .sign(self.key_handle, SignMech::EcdsaSha384, msg)
-            .map_err(signature::Error::from_source)?;
-        let sig = p384::ecdsa::Signature::try_from(p1363.as_slice())
-            .map_err(signature::Error::from_source)?;
+            .map_err(|e| {
+                tracing::error!(%e, "P384HsmSigner: HSM sign failed");
+                signature::Error::from_source(e)
+            })?;
+        tracing::debug!(sig_len = p1363.len(), "P384HsmSigner: raw signature");
+        let sig = p384::ecdsa::Signature::try_from(p1363.as_slice()).map_err(|e| {
+            tracing::error!(%e, sig_len = p1363.len(), "P384HsmSigner: P1363 decode failed");
+            signature::Error::from_source(e)
+        })?;
         Ok(sig.to_der())
     }
 }
