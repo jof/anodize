@@ -45,6 +45,17 @@ Consider making the share panel expand to fill available terminal height, or
 auto-paginate shares into groups that fit the panel. Currently the panel is a fixed
 12-row box regardless of terminal size.
 
+## InitRoot: escape during share validation can leave half-initialized state
+
+During InitRoot, after shares have been generated and the operator is validating
+them (re-entering words), it is possible to press Escape or quit. This leaves
+the ceremony in a half-initialized state: the HSM key material may already exist
+and shares may have been partially distributed, but no cert or disc write has
+occurred. On the next boot the appliance may not recognize the incomplete state
+cleanly. Need to either:
+- Prevent escape/quit during the share validation phase, or
+- Detect and recover from the half-initialized state on next launch.
+
 ## cdemu: verify multi-session append after CLOSE SESSION
 
 The intent session write confirmed `sessions=0 → write → CLOSE TRACK → CLOSE
