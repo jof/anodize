@@ -97,46 +97,71 @@ impl HsmBackend for YubiHsmBackend {
     }
 
     fn probe_token(&self, _label: &str) -> Result<bool> {
-        // YubiHSM2 doesn't have per-token labels.  We probe by connecting.
-        let connector = yubihsm::Connector::usb(&yubihsm::UsbConfig::default());
-        let creds = yubihsm::Credentials::from_password(
-            DEFAULT_AUTH_KEY_ID,
-            DEFAULT_AUTH_PASSWORD.as_bytes(),
-        );
-        Ok(yubihsm::Client::open(connector, creds, true).is_ok())
+        // YubiHSM2 doesn't have per-token labels.  Probe by enumerating USB serials.
+        let serials = yubihsm::connector::usb::Devices::serial_numbers()
+            .map_err(|e| HsmError::BackendError(format!("USB enumerate: {e}")))?;
+        Ok(!serials.is_empty())
     }
 
     fn open_session(&self, _label: &str, pin: &SecretString) -> Result<Box<dyn Hsm>> {
         // Derive credentials from the SSS-reconstructed PIN.
         // Auth key ID 2 is the anodize-managed key created during bootstrap.
-        let connector = yubihsm::Connector::usb(&yubihsm::UsbConfig::default());
-        let creds = yubihsm::Credentials::from_password(
-            ANODIZE_AUTH_KEY_ID,
-            pin.expose_secret().as_bytes(),
-        );
+        // With multiple devices, try each until one accepts the anodize auth key.
+        let serials = yubihsm::connector::usb::Devices::serial_numbers()
+            .map_err(|e| HsmError::BackendError(format!("USB enumerate: {e}")))?;
 
-        let client = yubihsm::Client::open(connector, creds, true)
-            .map_err(|e| HsmError::BackendError(format!("YubiHSM open_session: {e}")))?;
+        let mut last_err = String::new();
+        for serial in &serials {
+            let connector = yubihsm::Connector::usb(&yubihsm::UsbConfig {
+                serial: Some(*serial),
+                ..Default::default()
+            });
+            let creds = yubihsm::Credentials::from_password(
+                ANODIZE_AUTH_KEY_ID,
+                pin.expose_secret().as_bytes(),
+            );
+            match yubihsm::Client::open(connector, creds, true) {
+                Ok(client) => return Ok(Box::new(YubiHsmSession { client })),
+                Err(e) => last_err = format!("serial {serial}: {e}"),
+            }
+        }
 
-        Ok(Box::new(YubiHsmSession { client }))
+        Err(HsmError::BackendError(format!(
+            "YubiHSM open_session: no device accepted auth key ({last_err})"
+        )))
     }
 
     fn bootstrap(
         &self,
-        _slot_id: u64,
+        slot_id: u64,
         _so_pin: &SecretString,
         user_pin: &SecretString,
         _label: &str,
     ) -> Result<Box<dyn Hsm>> {
-        // 1. Connect with factory-default credentials.
-        let connector = yubihsm::Connector::usb(&yubihsm::UsbConfig::default());
+        // Resolve slot_id (index from list_tokens) to a specific USB serial.
+        let serials = yubihsm::connector::usb::Devices::serial_numbers()
+            .map_err(|e| HsmError::BackendError(format!("USB enumerate: {e}")))?;
+        let serial = serials.get(slot_id as usize).ok_or_else(|| {
+            HsmError::BackendError(format!(
+                "slot_id {slot_id} out of range ({} devices)",
+                serials.len()
+            ))
+        })?;
+
+        // 1. Connect with factory-default credentials to the specific device.
+        let usb_cfg = yubihsm::UsbConfig {
+            serial: Some(*serial),
+            ..Default::default()
+        };
+        let connector = yubihsm::Connector::usb(&usb_cfg);
         let creds = yubihsm::Credentials::from_password(
             DEFAULT_AUTH_KEY_ID,
             DEFAULT_AUTH_PASSWORD.as_bytes(),
         );
 
-        let client = yubihsm::Client::open(connector, creds, true)
-            .map_err(|e| HsmError::BackendError(format!("YubiHSM bootstrap connect: {e}")))?;
+        let client = yubihsm::Client::open(connector, creds, true).map_err(|e| {
+            HsmError::BackendError(format!("YubiHSM bootstrap connect ({serial}): {e}"))
+        })?;
 
         // 2. Create a new auth key (ID 2) derived from the SSS user_pin.
         //    This replaces the factory default for future sessions.
@@ -167,14 +192,14 @@ impl HsmBackend for YubiHsmBackend {
 
         tracing::info!("YubiHSM bootstrap: deleted factory auth key {DEFAULT_AUTH_KEY_ID}");
 
-        // 4. Reconnect with the new credentials.
-        let connector2 = yubihsm::Connector::usb(&yubihsm::UsbConfig::default());
+        // 4. Reconnect with the new credentials to the same device.
+        let connector2 = yubihsm::Connector::usb(&usb_cfg);
         let new_creds = yubihsm::Credentials::from_password(
             ANODIZE_AUTH_KEY_ID,
             user_pin.expose_secret().as_bytes(),
         );
         let client2 = yubihsm::Client::open(connector2, new_creds, true)
-            .map_err(|e| HsmError::BackendError(format!("YubiHSM reconnect: {e}")))?;
+            .map_err(|e| HsmError::BackendError(format!("YubiHSM reconnect ({serial}): {e}")))?;
 
         Ok(Box::new(YubiHsmSession { client: client2 }))
     }
