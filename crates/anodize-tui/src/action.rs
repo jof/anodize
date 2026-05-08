@@ -7,6 +7,7 @@ pub enum Operation {
     IssueCrl,
     RekeyShares,
     MigrateDisc,
+    KeyBackup,
 }
 
 /// All possible actions in the app. Events produce Actions; update() consumes them.

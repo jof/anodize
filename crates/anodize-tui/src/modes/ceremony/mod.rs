@@ -33,6 +33,9 @@ pub enum PlanningState {
     // MigrateDisc
     MigrateConfirm,
     WaitMigrateTarget,
+    // KeyBackup
+    BackupQuorum,
+    BackupDevices,
 }
 
 /// Pipeline phase for the ceremony state machine.
@@ -84,6 +87,7 @@ impl CeremonyMode {
                 | CeremonyPhase::Planning(PlanningState::ShareVerify)
                 | CeremonyPhase::Planning(PlanningState::RekeyShareVerify)
                 | CeremonyPhase::Planning(PlanningState::RekeyQuorum)
+                | CeremonyPhase::Planning(PlanningState::BackupQuorum)
                 | CeremonyPhase::Quorum
         )
     }
@@ -129,11 +133,14 @@ impl CeremonyMode {
             | CeremonyPhase::Planning(PlanningState::RekeyShareReveal)
             | CeremonyPhase::Planning(PlanningState::RekeyShareVerify)
             | CeremonyPhase::Planning(PlanningState::MigrateConfirm)
-            | CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => 1,
+            | CeremonyPhase::Planning(PlanningState::WaitMigrateTarget)
+            | CeremonyPhase::Planning(PlanningState::BackupDevices) => 1,
             // 2 — Commit (write intent WAL to disc)
             CeremonyPhase::Commit | CeremonyPhase::PostCommitError => 2,
             // 3 — Quorum (SSS share collection + PIN reconstruction)
-            CeremonyPhase::Quorum | CeremonyPhase::Planning(PlanningState::RekeyQuorum) => 3,
+            CeremonyPhase::Quorum
+            | CeremonyPhase::Planning(PlanningState::RekeyQuorum)
+            | CeremonyPhase::Planning(PlanningState::BackupQuorum) => 3,
             // 3→4 — Clock re-confirm before signing (shown as part of Quorum phase)
             CeremonyPhase::ClockReconfirm => 3,
             // 4 — Execute (HSM crypto operation, cert preview/verify)
@@ -185,6 +192,8 @@ impl CeremonyMode {
                 "Disc Migration \u{2014} Verify Chain"
             }
             CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => "Insert Blank Target Disc",
+            CeremonyPhase::Planning(PlanningState::BackupQuorum) => "Key Backup \u{2014} Reconstruct PIN",
+            CeremonyPhase::Planning(PlanningState::BackupDevices) => "Key Backup \u{2014} Device Selection",
             CeremonyPhase::Quorum => "Quorum \u{2014} Reconstruct PIN",
             CeremonyPhase::ClockReconfirm => "Clock Re-confirm \u{2014} Verify Before Signing",
             CeremonyPhase::Done => "Ceremony Complete",
@@ -239,6 +248,7 @@ impl CeremonyMode {
                     "  [4]  Issue CRL refresh      (re-signs current revocation list)".into(),
                     "  [5]  Re-key shares          (change custodians, keep same PIN)".into(),
                     "  [6]  Migrate disc           (copy all sessions to new disc)".into(),
+                    "  [7]  Key backup             (pair HSMs + backup signing key)".into(),
                 ]
             }
 
@@ -459,6 +469,7 @@ impl CeremonyMode {
                     Some(Operation::IssueCrl) => "CRL refresh",
                     Some(Operation::RekeyShares) => "Re-key shares",
                     Some(Operation::MigrateDisc) => "Disc migration",
+                    Some(Operation::KeyBackup) => "Key backup",
                     None => "Session",
                 };
                 let fp = app.data.fingerprint.as_deref().unwrap_or("(none)");
@@ -633,6 +644,31 @@ impl CeremonyMode {
                 ]
             }
 
+            CeremonyPhase::Planning(PlanningState::BackupQuorum) => {
+                let info = if let Some(ref state) = app.disc.session_state {
+                    format!(
+                        "  Current scheme: {}-of-{}.  Need {} shares to proceed.",
+                        state.sss.threshold, state.sss.total, state.sss.threshold
+                    )
+                } else {
+                    "  ERROR: no STATE.JSON loaded.".into()
+                };
+                vec![
+                    String::new(),
+                    "  Custodians: enter your shares to reconstruct the HSM PIN.".into(),
+                    "  The PIN is needed to authenticate to the HSMs for backup.".into(),
+                    info,
+                    String::new(),
+                    "  The share input component is active.".into(),
+                    "  [Esc]  Abort".into(),
+                ]
+            }
+
+            CeremonyPhase::Planning(PlanningState::BackupDevices) => {
+                // Delegate to the backup FSM's rendered lines.
+                app.utilities.backup.lines.clone()
+            }
+
             CeremonyPhase::Done => {
                 vec![
                     String::new(),
@@ -665,6 +701,7 @@ impl Component for CeremonyMode {
                 KeyCode::Char('4') => Action::SelectOperation(Operation::IssueCrl),
                 KeyCode::Char('5') => Action::SelectOperation(Operation::RekeyShares),
                 KeyCode::Char('6') => Action::SelectOperation(Operation::MigrateDisc),
+                KeyCode::Char('7') => Action::SelectOperation(Operation::KeyBackup),
                 _ => Action::Noop,
             },
 
@@ -769,6 +806,13 @@ impl Component for CeremonyMode {
             CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup) => Action::Noop, // handled by CustodianSetup component
             CeremonyPhase::Planning(PlanningState::RekeyShareReveal) => Action::Noop, // handled by ShareReveal component
             CeremonyPhase::Planning(PlanningState::RekeyShareVerify) => Action::Noop, // handled by ShareInput component
+
+            CeremonyPhase::Planning(PlanningState::BackupQuorum) => Action::Noop, // handled by ShareInput component
+            CeremonyPhase::Planning(PlanningState::BackupDevices) => {
+                // Forward keys to the backup FSM via BackupExecute or Noop.
+                // The backup FSM handles its own key dispatch in app.rs.
+                Action::Noop
+            }
 
             CeremonyPhase::Quorum => Action::Noop, // handled by ShareInput component
 

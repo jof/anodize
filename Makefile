@@ -25,6 +25,15 @@ nix-check:
 #     The remote host needs: Nix with flakes enabled, current user as a
 #     trusted-user, rsync, and git.
 #
+#     Bootstrap a fresh Debian/Ubuntu builder:
+#       sudo apt update && sudo apt install -y build-essential rsync git
+#       sh <(curl -L https://nixos.org/nix/install) --daemon
+#       sudo mkdir -p /etc/nix
+#       echo 'experimental-features = nix-command flakes' | sudo tee -a /etc/nix/nix.conf
+#       echo "trusted-users = root $(whoami)" | sudo tee -a /etc/nix/nix.conf
+#       sudo systemctl restart nix-daemon
+#       # Log out/in or: . /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+#
 # Environment variables:
 #   NIX_BUILDER       SSH destination (user@host or host).  When set,
 #                     the remote path is used.  Unset = local Docker.

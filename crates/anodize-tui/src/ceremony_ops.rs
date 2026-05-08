@@ -264,6 +264,7 @@ impl App {
                             Some(Operation::IssueCrl) => "CRL refresh",
                             Some(Operation::RekeyShares) => "Re-key shares",
                             Some(Operation::MigrateDisc) => "Disc migration",
+                            Some(Operation::KeyBackup) => "Key backup",
                             None => "session",
                         };
                         self.set_status(format!("{op_label} written to disc: {disc_label}"));
@@ -600,7 +601,99 @@ impl App {
             Operation::MigrateDisc => {
                 self.do_migrate_confirm();
             }
+            Operation::KeyBackup => {
+                if self.disc.session_state.is_none() {
+                    self.set_status("No STATE.JSON \u{2014} run InitRoot first.");
+                    self.current_op = None;
+                    self.ceremony.state = CeremonyPhase::OperationSelect;
+                    return;
+                }
+                // Enter backup quorum phase: custodians re-enter shares.
+                let sss = self.disc.session_state.as_ref().unwrap().sss.clone();
+                self.sss.share_input =
+                    Some(crate::components::share_input::ShareInput::new(sss, 32));
+                self.ceremony.state = CeremonyPhase::Planning(PlanningState::BackupQuorum);
+                self.set_status("Enter threshold shares to reconstruct the HSM PIN for backup.");
+            }
         }
+    }
+
+    // ── KeyBackup: quorum → reconstruct PIN → discover devices ─────────────
+
+    pub(crate) fn do_backup_quorum_complete(&mut self) {
+        // Collect shares from the input component.
+        let shares: Vec<anodize_sss::Share> = self
+            .sss
+            .share_input
+            .as_ref()
+            .map(|si| si.collected.iter().map(|c| c.share.clone()).collect())
+            .unwrap_or_default();
+        self.sss.share_input = None;
+
+        let threshold = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.threshold)
+            .unwrap_or(2);
+
+        // Reconstruct PIN.
+        let pin_bytes = match anodize_sss::reconstruct(&shares, threshold) {
+            Ok(b) => b,
+            Err(e) => {
+                self.set_status(format!("PIN reconstruction failed: {e}"));
+                self.ceremony.state = CeremonyPhase::OperationSelect;
+                self.current_op = None;
+                return;
+            }
+        };
+
+        // Verify against pin_verify_hash.
+        let pin_hash = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(&pin_bytes))
+        };
+        let expected = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.pin_verify_hash.as_str())
+            .unwrap_or("");
+
+        if pin_hash != expected {
+            self.set_status("PIN verify hash mismatch — shares may be corrupted.");
+            self.ceremony.state = CeremonyPhase::OperationSelect;
+            self.current_op = None;
+            return;
+        }
+
+        // Store the reconstructed PIN for backup operations.
+        self.pin_buf = hex::encode(&pin_bytes);
+
+        // Discover backup-capable devices using the reconstructed PIN.
+        self.utilities.backup.reset();
+        if let Some(ref profile) = self.profile {
+            match anodize_hsm::create_backup(profile.hsm.backend) {
+                Ok(backup_impl) => {
+                    let pin = secrecy::SecretString::new(self.pin_buf.clone());
+                    self.utilities
+                        .backup
+                        .discover(backup_impl.as_ref(), Some(&pin));
+                }
+                Err(e) => {
+                    self.utilities.backup.phase =
+                        crate::modes::utilities::backup::BackupPhase::Error(format!(
+                            "Backend init: {e}"
+                        ));
+                    self.utilities.backup.render_lines();
+                }
+            }
+        }
+
+        self.ceremony.state = CeremonyPhase::Planning(PlanningState::BackupDevices);
+        self.set_status("PIN verified. Select source and destination devices.");
+
+        tracing::info!("KeyBackup: quorum reached, PIN verified, entering device selection");
     }
 
     // ── InitRoot: confirm custodians → generate PIN → split → reveal ────────
@@ -1959,6 +2052,11 @@ impl App {
                 files: vec![],
             }),
 
+            Some(Operation::KeyBackup) => {
+                // Key backup is HSM-to-HSM; no disc session needed.
+                None
+            }
+
             None => {
                 self.set_status("No operation set");
                 None
@@ -2022,6 +2120,12 @@ impl App {
                 self.set_status("Operation complete.");
                 return;
             }
+            Some(Operation::KeyBackup) => {
+                // Key backup has no shuttle artifacts.
+                self.ceremony.state = CeremonyPhase::Done;
+                self.set_status("Key backup complete.");
+                return;
+            }
             Some(Operation::MigrateDisc) | None => {
                 self.ceremony.state = CeremonyPhase::Done;
                 self.set_status("Migration complete.");
@@ -2070,7 +2174,8 @@ impl App {
             CeremonyPhase::Quorum
             | CeremonyPhase::Planning(PlanningState::ShareVerify)
             | CeremonyPhase::Planning(PlanningState::RekeyShareVerify)
-            | CeremonyPhase::Planning(PlanningState::RekeyQuorum) => {
+            | CeremonyPhase::Planning(PlanningState::RekeyQuorum)
+            | CeremonyPhase::Planning(PlanningState::BackupQuorum) => {
                 if let Some(ref input) = self.sss.share_input {
                     input.render(frame, area);
                     return;

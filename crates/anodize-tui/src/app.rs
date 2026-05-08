@@ -446,6 +446,82 @@ impl App {
                 }
                 return Action::Noop;
             }
+
+            // KeyBackup: quorum input → reconstruct PIN → discover devices
+            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::BackupQuorum) {
+                if key.code == KeyCode::Esc {
+                    self.sss.share_input = None;
+                    self.current_op = None;
+                    self.ceremony.state = CeremonyPhase::OperationSelect;
+                    self.set_status("Backup aborted.");
+                    return Action::Noop;
+                }
+                if let Some(ref mut input) = self.sss.share_input {
+                    input.handle_key(key);
+                    if input.quorum_reached() {
+                        self.do_backup_quorum_complete();
+                    }
+                }
+                return Action::Noop;
+            }
+
+            // KeyBackup: device selection phase — forward keys to backup FSM
+            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::BackupDevices) {
+                if key.code == KeyCode::Esc {
+                    // Check if backup FSM can go back, or abort to op select
+                    use crate::modes::utilities::backup::BackupPhase;
+                    match self.utilities.backup.phase {
+                        BackupPhase::SelectSource => {
+                            self.current_op = None;
+                            self.ceremony.state = CeremonyPhase::OperationSelect;
+                            self.set_status("Backup aborted.");
+                        }
+                        _ => {
+                            self.utilities.backup.go_back();
+                        }
+                    }
+                    return Action::Noop;
+                }
+                // Number keys: forward to backup FSM
+                if let KeyCode::Char(c) = key.code {
+                    if let Some(d) = c.to_digit(10) {
+                        let action = self.utilities.backup.handle_key_digit(d as u8);
+                        if action == crate::modes::utilities::backup::BackupAction::Execute {
+                            let pin = secrecy::SecretString::new(self.pin_buf.clone());
+                            if let Some(ref profile) = self.profile {
+                                if let Ok(backup_impl) =
+                                    anodize_hsm::create_backup(profile.hsm.backend)
+                                {
+                                    self.utilities.backup.execute(
+                                        backup_impl.as_ref(),
+                                        &pin,
+                                    );
+                                }
+                            }
+                        }
+                        return Action::Noop;
+                    }
+                }
+                if key.code == KeyCode::Enter {
+                    let action = self.utilities.backup.handle_enter();
+                    if action == crate::modes::utilities::backup::BackupAction::Execute {
+                        let pin = secrecy::SecretString::new(self.pin_buf.clone());
+                        if let Some(ref profile) = self.profile {
+                            if let Ok(backup_impl) =
+                                anodize_hsm::create_backup(profile.hsm.backend)
+                            {
+                                self.utilities.backup.execute(
+                                    backup_impl.as_ref(),
+                                    &pin,
+                                );
+                            }
+                        }
+                    }
+                    return Action::Noop;
+                }
+                return Action::Noop;
+            }
+
             if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RekeyShareReveal) {
                 if key.code == KeyCode::Esc {
                     return Action::RekeyAbort;
@@ -735,41 +811,16 @@ impl App {
                     _ => UtilScreen::Menu,
                 };
                 if screen == UtilScreen::KeyBackup {
-                    // Initialise backup FSM: discover devices.
+                    // Key backup is now a ceremony operation ([7] in ceremony mode).
+                    // Show a redirect message.
                     self.utilities.backup.reset();
-                    if self.pin_buf.is_empty() {
-                        self.utilities.backup.phase =
-                            crate::modes::utilities::backup::BackupPhase::Error(
-                                "HSM PIN not available. Run a ceremony operation first \
-                                 (e.g. Sign CSR) to reconstruct the PIN from custodian shares."
-                                    .into(),
-                            );
-                        self.utilities.backup.render_lines();
-                    } else if let Some(ref profile) = self.profile {
-                        match anodize_hsm::create_backup(profile.hsm.backend) {
-                            Ok(backup_impl) => {
-                                let pin =
-                                    secrecy::SecretString::new(self.pin_buf.clone());
-                                self.utilities.backup.discover(
-                                    backup_impl.as_ref(),
-                                    Some(&pin),
-                                );
-                            }
-                            Err(e) => {
-                                self.utilities.backup.phase =
-                                    crate::modes::utilities::backup::BackupPhase::Error(format!(
-                                        "Backend init: {e}"
-                                    ));
-                                self.utilities.backup.render_lines();
-                            }
-                        }
-                    } else {
-                        self.utilities.backup.phase =
-                            crate::modes::utilities::backup::BackupPhase::Error(
-                                "Profile not loaded.".into(),
-                            );
-                        self.utilities.backup.render_lines();
-                    }
+                    self.utilities.backup.phase =
+                        crate::modes::utilities::backup::BackupPhase::Error(
+                            "Key backup is now a ceremony operation.\n\
+                             Use [F2] Ceremony → [7] Key Backup to pair or back up HSMs."
+                                .into(),
+                        );
+                    self.utilities.backup.render_lines();
                     self.utilities.screen = screen;
                 } else {
                     // Gather data while borrowing self immutably, then assign

@@ -1,6 +1,15 @@
 use anodize_hsm::{BackupResult, BackupTarget, HsmBackup};
 use secrecy::SecretString;
 
+/// Return value from key-dispatch helpers so callers know when to execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackupAction {
+    /// No special action needed.
+    Noop,
+    /// The FSM is in Confirm and Enter was pressed — caller should run execute().
+    Execute,
+}
+
 /// FSM states for the backup sub-screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackupPhase {
@@ -298,6 +307,28 @@ impl BackupState {
                 self.lines.push(String::new());
                 self.lines.push("  Press [Esc] to return".into());
             }
+        }
+    }
+
+    /// Handle a digit key press (1-based). Returns Execute if the confirm step should run.
+    pub fn handle_key_digit(&mut self, digit: u8) -> BackupAction {
+        if digit == 0 {
+            return BackupAction::Noop;
+        }
+        let idx = (digit - 1) as usize;
+        self.select(idx);
+        BackupAction::Noop
+    }
+
+    /// Handle an Enter key press. Returns Execute if the confirm step should run.
+    pub fn handle_enter(&mut self) -> BackupAction {
+        match self.phase {
+            BackupPhase::Overview => {
+                self.confirm_overview();
+                BackupAction::Noop
+            }
+            BackupPhase::Confirm => BackupAction::Execute,
+            _ => BackupAction::Noop,
         }
     }
 
