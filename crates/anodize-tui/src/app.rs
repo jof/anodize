@@ -737,17 +737,22 @@ impl App {
                 if screen == UtilScreen::KeyBackup {
                     // Initialise backup FSM: discover devices.
                     self.utilities.backup.reset();
-                    if let Some(ref profile) = self.profile {
+                    if self.pin_buf.is_empty() {
+                        self.utilities.backup.phase =
+                            crate::modes::utilities::backup::BackupPhase::Error(
+                                "HSM PIN not available. Run a ceremony operation first \
+                                 (e.g. Sign CSR) to reconstruct the PIN from custodian shares."
+                                    .into(),
+                            );
+                        self.utilities.backup.render_lines();
+                    } else if let Some(ref profile) = self.profile {
                         match anodize_hsm::create_backup(profile.hsm.backend) {
                             Ok(backup_impl) => {
-                                let pin = if self.pin_buf.is_empty() {
-                                    None
-                                } else {
-                                    Some(secrecy::SecretString::new(self.pin_buf.clone()))
-                                };
+                                let pin =
+                                    secrecy::SecretString::new(self.pin_buf.clone());
                                 self.utilities.backup.discover(
                                     backup_impl.as_ref(),
-                                    pin.as_ref(),
+                                    Some(&pin),
                                 );
                             }
                             Err(e) => {
