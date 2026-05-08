@@ -1,4 +1,4 @@
-.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev ssh-dev-vm ceremony-dev-vm list-usb write-usb write-usb-dev hash-iso verify-iso clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
+.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev ssh-dev-vm ceremony-dev-vm list-usb write-usb write-usb-dev hash-iso verify-iso deploy-dev clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -467,6 +467,93 @@ endif
 # Build anodize-ceremony with dev-softhsm-usb (never use in a real ceremony).
 build-dev:
 	cargo build -p anodize-tui --features dev-softhsm-usb
+
+# ── Hot-deploy binary to running dev VM ─────────────────────────────────
+#
+# Builds the dev ceremony binary via Nix (x86_64-linux), scps it to the
+# remote host, and replaces the Nix store binary in-place.  The sentinel
+# detects the ceremony process exit and restarts it automatically.
+#
+# This is MUCH faster than a full ISO rebuild for Rust-only changes.
+# The Nix store on a live ISO boots into a tmpfs overlay, so it's writable.
+#
+# Usage:  DEV_VM_IP=192.168.178.76 make deploy-dev
+
+# $(call nix-build-bin, <flake-output>, <dest-file>)
+# Build a single Nix package and extract its binary.  Uses the same
+# Docker / remote-builder strategy as the ISO builds.
+ifdef NIX_BUILDER
+define nix-build-bin
+	rsync -az --delete \
+		-e 'ssh $(SSH_OPTS)' \
+		--filter=':- .gitignore' \
+		--exclude='.git' \
+		$(CURDIR)/ $(NIX_BUILDER):$(NIX_BUILDER_DIR)/
+	ssh $(SSH_OPTS) $(NIX_BUILDER) \
+		'. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
+		 cd $(NIX_BUILDER_DIR) && \
+		 nix build .#$(1) -L && \
+		 cat result/bin/anodize-ceremony' > $(2)
+	chmod +x $(2)
+endef
+else
+define nix-build-bin
+	docker volume create nix-store-amd64 2>/dev/null || true
+	docker run --rm --privileged \
+		--platform linux/amd64 \
+		-v nix-store-amd64:/nix \
+		-v "$(CURDIR):/src" \
+		-w /src \
+		$(NIX_IMAGE) \
+		sh -c 'rm -rf /homeless-shelter && \
+		       git config --global --add safe.directory /src && \
+		       nix --extra-experimental-features "nix-command flakes" \
+		           --option build-users-group "" \
+		           --option sandbox false \
+		           $(NIX_SANDBOX_FLAG) build .#$(1) && \
+		       rm -f /src/$(2) && cp -L result/bin/anodize-ceremony /src/$(2)'
+endef
+endif
+
+deploy-dev: .FORCE
+ifndef DEV_VM_IP
+	$(error DEV_VM_IP is required)
+endif
+	@echo "Building anodize-ceremony-dev binary..."
+	$(call nix-build-bin,anodize-ceremony-dev,anodize-ceremony-dev.bin)
+	@echo "Copying binary to $(DEV_VM_IP)..."
+	ssh $(SSH_OPTS) debug@$(DEV_VM_IP) 'rm -f /tmp/anodize-ceremony-new'
+	scp $(SSH_OPTS) \
+		anodize-ceremony-dev.bin debug@$(DEV_VM_IP):/tmp/anodize-ceremony-new
+	@echo "Replacing binary on remote..."
+	ssh $(SSH_OPTS) debug@$(DEV_VM_IP) ' \
+		set -e; \
+		STORE_PKG=$$(for d in /nix/store/*-anodize-ceremony-*/bin; do \
+			[ -f "$$d/anodize-ceremony" ] && [ -f "$$d/anodize-sentinel" ] && dirname "$$d" && break; \
+		done); \
+		if [ -z "$$STORE_PKG" ]; then echo "Cannot find anodize-ceremony package in nix store"; exit 1; fi; \
+		STORE_BIN=$$STORE_PKG/bin/anodize-ceremony; \
+		echo "Nix store binary: $$STORE_BIN"; \
+		sudo cp /tmp/anodize-ceremony-new /run/anodize-ceremony-hot; \
+		sudo chmod 555 /run/anodize-ceremony-hot; \
+		sudo mount --bind /run/anodize-ceremony-hot $$STORE_BIN; \
+		echo "Bind-mounted over $$STORE_BIN"; \
+		WRAP=/run/wrappers/bin/anodize-ceremony; \
+		if [ -f "$$WRAP" ]; then \
+			sudo cp /tmp/anodize-ceremony-new $$WRAP; \
+			sudo chmod 755 $$WRAP; \
+			sudo chown root:wheel $$WRAP; \
+			sudo setcap cap_sys_admin=ep $$WRAP; \
+			echo "Updated wrapper: $$WRAP"; \
+		fi; \
+		rm /tmp/anodize-ceremony-new; \
+		echo "Killing ceremony TUI (sentinel will restart)..."; \
+		sudo pkill -9 -x anodize-ceremony 2>/dev/null || true; \
+		sleep 1; \
+		echo "Done."'
+	@rm -f anodize-ceremony-dev.bin
+
+.FORCE:
 
 clean:
 	rm -rf anodize-prod-amd64.iso anodize-prod-arm64.iso anodize-dev-amd64.iso anodize-dev-arm64.iso anodize-prod-amd64.iso.sha256 fake-shuttle.img dev-disc /tmp/anodize-ovmf-vars.fd
