@@ -55,6 +55,11 @@ cleanly. Need to either:
 - Prevent escape/quit during the share validation phase, or
 - Detect and recover from the half-initialized state on next launch.
 
+## TUI: revoke cert input should accept Escape in serial field
+
+The revoke-certificate input dialog should allow the operator to press Escape to
+cancel even while the cursor is in the serial number field.
+
 ## cdemu: verify multi-session append after CLOSE SESSION
 
 The intent session write confirmed `sessions=0 → write → CLOSE TRACK → CLOSE
