@@ -390,7 +390,7 @@ impl YubiHsmBackupImpl {
 }
 
 impl HsmBackup for YubiHsmBackupImpl {
-    fn enumerate_backup_targets(&self) -> Result<Vec<BackupTarget>> {
+    fn enumerate_backup_targets(&self, pin: Option<&SecretString>) -> Result<Vec<BackupTarget>> {
         let serials = yubihsm::connector::usb::Devices::serial_numbers()
             .map_err(|e| HsmError::BackendError(format!("USB enumeration: {e}")))?;
 
@@ -403,7 +403,7 @@ impl HsmBackup for YubiHsmBackupImpl {
                 ..Default::default()
             };
 
-            // Try factory-default auth to probe the device.
+            // Try factory-default auth first to probe the device.
             let connector = yubihsm::Connector::usb(&cfg);
             let default_creds = yubihsm::Credentials::from_password(
                 DEFAULT_AUTH_KEY_ID,
@@ -430,8 +430,44 @@ impl HsmBackup for YubiHsmBackupImpl {
                         (fw, true, has_wrap, has_signing)
                     }
                     Err(_) => {
-                        // Can't open with default — device is bootstrapped.
-                        ("YubiHSM2 (bootstrapped)".to_string(), false, false, false)
+                        // Factory auth failed — device is bootstrapped.
+                        // Try anodize auth if a PIN was provided.
+                        if let Some(pin) = pin {
+                            let connector2 = yubihsm::Connector::usb(&cfg);
+                            let creds = yubihsm::Credentials::from_password(
+                                ANODIZE_AUTH_KEY_ID,
+                                pin.expose_secret().as_bytes(),
+                            );
+                            match yubihsm::Client::open(connector2, creds, false) {
+                                Ok(client) => {
+                                    let fw = match client.device_info() {
+                                        Ok(info) => format!(
+                                            "YubiHSM2 fw {}.{}.{}",
+                                            info.major_version,
+                                            info.minor_version,
+                                            info.build_version
+                                        ),
+                                        Err(_) => "YubiHSM2".to_string(),
+                                    };
+                                    let has_wrap = Self::has_object(
+                                        &client,
+                                        WRAP_KEY_ID,
+                                        yubihsm::object::Type::WrapKey,
+                                    );
+                                    let has_signing = Self::has_object(
+                                        &client,
+                                        SIGNING_KEY_ID,
+                                        yubihsm::object::Type::AsymmetricKey,
+                                    );
+                                    (format!("{fw} (bootstrapped)"), false, has_wrap, has_signing)
+                                }
+                                Err(_) => {
+                                    ("YubiHSM2 (bootstrapped, auth failed)".to_string(), false, false, false)
+                                }
+                            }
+                        } else {
+                            ("YubiHSM2 (bootstrapped)".to_string(), false, false, false)
+                        }
                     }
                 };
 

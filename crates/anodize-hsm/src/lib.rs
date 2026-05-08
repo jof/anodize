@@ -173,7 +173,9 @@ pub struct BackupResult {
 /// devices or tokens of the same backend type.
 pub trait HsmBackup: Send {
     /// List all devices/tokens available for backup.
-    fn enumerate_backup_targets(&self) -> Result<Vec<BackupTarget>>;
+    /// When `pin` is provided, bootstrapped devices are probed with the
+    /// anodize auth key so their wrap/signing key status can be reported.
+    fn enumerate_backup_targets(&self, pin: Option<&SecretString>) -> Result<Vec<BackupTarget>>;
 
     /// Ensure both source and dest share a wrap key.  Generates a fresh
     /// AES-256 wrap key and installs it on both.  Returns a description

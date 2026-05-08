@@ -740,7 +740,15 @@ impl App {
                     if let Some(ref profile) = self.profile {
                         match anodize_hsm::create_backup(profile.hsm.backend) {
                             Ok(backup_impl) => {
-                                self.utilities.backup.discover(backup_impl.as_ref());
+                                let pin = if self.pin_buf.is_empty() {
+                                    None
+                                } else {
+                                    Some(secrecy::SecretString::new(self.pin_buf.clone()))
+                                };
+                                self.utilities.backup.discover(
+                                    backup_impl.as_ref(),
+                                    pin.as_ref(),
+                                );
                             }
                             Err(e) => {
                                 self.utilities.backup.phase =

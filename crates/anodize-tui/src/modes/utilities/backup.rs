@@ -58,8 +58,8 @@ impl BackupState {
     }
 
     /// Run device discovery and advance to SelectSource.
-    pub fn discover(&mut self, backup: &dyn HsmBackup) {
-        match backup.enumerate_backup_targets() {
+    pub fn discover(&mut self, backup: &dyn HsmBackup, pin: Option<&SecretString>) {
+        match backup.enumerate_backup_targets(pin) {
             Ok(targets) => {
                 self.targets = targets;
                 if self.targets.is_empty() {

@@ -651,7 +651,7 @@ impl Pkcs11BackupImpl {
 }
 
 impl HsmBackup for Pkcs11BackupImpl {
-    fn enumerate_backup_targets(&self) -> Result<Vec<BackupTarget>> {
+    fn enumerate_backup_targets(&self, _pin: Option<&SecretString>) -> Result<Vec<BackupTarget>> {
         let ctx = init_ctx(&self.module_path)?;
         let slots = ctx.get_slots_with_token()?;
 
