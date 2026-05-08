@@ -348,44 +348,96 @@ impl YubiHsmBackupImpl {
         Ok(Self)
     }
 
-    /// Open a client to a specific device by serial string.
-    /// Tries anodize auth key (2) with `pin` first, falls back to factory default.
-    fn open_client(serial_str: &str, pin: &SecretString) -> Result<yubihsm::Client> {
-        let serial: yubihsm::device::SerialNumber = serial_str
-            .parse()
-            .map_err(|e| HsmError::BackendError(format!("invalid serial '{serial_str}': {e}")))?;
-
-        let cfg = yubihsm::UsbConfig {
-            serial: Some(serial),
-            ..Default::default()
-        };
-
-        // Try anodize auth (key 2) first.
-        let connector = yubihsm::Connector::usb(&cfg);
-        let creds = yubihsm::Credentials::from_password(
-            ANODIZE_AUTH_KEY_ID,
-            pin.expose_secret().as_bytes(),
-        );
-        if let Ok(client) = yubihsm::Client::open(connector, creds, true) {
-            return Ok(client);
-        }
-
-        // Fall back to factory default auth (key 1).
-        let connector2 = yubihsm::Connector::usb(&cfg);
-        let default_creds = yubihsm::Credentials::from_password(
-            DEFAULT_AUTH_KEY_ID,
-            DEFAULT_AUTH_PASSWORD.as_bytes(),
-        );
-        yubihsm::Client::open(connector2, default_creds, true)
-            .map_err(|e| HsmError::BackendError(format!("connect to {serial_str}: {e}")))
-    }
-
     fn has_object(
         client: &yubihsm::Client,
         id: yubihsm::object::Id,
         obj_type: yubihsm::object::Type,
     ) -> bool {
         client.get_object_info(id, obj_type).is_ok()
+    }
+
+    /// Open a client to a device, bootstrapping it first if it still has
+    /// factory-default auth.  Returns a client authenticated with the
+    /// anodize auth key in all cases.
+    fn ensure_bootstrapped_and_open(
+        serial_str: &str,
+        pin: &SecretString,
+    ) -> Result<yubihsm::Client> {
+        let serial: yubihsm::device::SerialNumber = serial_str
+            .parse()
+            .map_err(|e| HsmError::BackendError(format!("invalid serial '{serial_str}': {e}")))?;
+        let cfg = yubihsm::UsbConfig {
+            serial: Some(serial),
+            ..Default::default()
+        };
+
+        // Try anodize auth first — already bootstrapped.
+        let connector = yubihsm::Connector::usb(&cfg);
+        let anodize_creds = yubihsm::Credentials::from_password(
+            ANODIZE_AUTH_KEY_ID,
+            pin.expose_secret().as_bytes(),
+        );
+        if let Ok(client) = yubihsm::Client::open(connector, anodize_creds, true) {
+            return Ok(client);
+        }
+
+        // Fall back to factory default auth — device needs bootstrapping.
+        let connector2 = yubihsm::Connector::usb(&cfg);
+        let default_creds = yubihsm::Credentials::from_password(
+            DEFAULT_AUTH_KEY_ID,
+            DEFAULT_AUTH_PASSWORD.as_bytes(),
+        );
+        let client = yubihsm::Client::open(connector2, default_creds, true).map_err(|e| {
+            HsmError::BackendError(format!("connect to {serial_str}: {e}"))
+        })?;
+
+        // Install anodize auth key derived from PIN.
+        let auth_key =
+            yubihsm::authentication::Key::derive_from_password(pin.expose_secret().as_bytes());
+        client
+            .put_authentication_key(
+                ANODIZE_AUTH_KEY_ID,
+                yubihsm::object::Label::from_bytes(b"anodize-auth")
+                    .map_err(|e| HsmError::BackendError(format!("label: {e}")))?,
+                yubihsm::Domain::all(),
+                yubihsm::Capability::all(),
+                yubihsm::Capability::all(),
+                yubihsm::authentication::Algorithm::default(),
+                auth_key,
+            )
+            .map_err(|e| {
+                HsmError::BackendError(format!(
+                    "ensure_bootstrapped put_authentication_key on {serial_str}: {e}"
+                ))
+            })?;
+
+        tracing::info!(serial_str, "ensure_bootstrapped: created anodize auth key");
+
+        // Delete factory default auth key to lock down the device.
+        client
+            .delete_object(
+                DEFAULT_AUTH_KEY_ID,
+                yubihsm::object::Type::AuthenticationKey,
+            )
+            .map_err(|e| {
+                HsmError::BackendError(format!(
+                    "ensure_bootstrapped delete factory auth on {serial_str}: {e}"
+                ))
+            })?;
+
+        tracing::info!(serial_str, "ensure_bootstrapped: deleted factory auth key");
+
+        // Reconnect with anodize credentials (factory key is gone).
+        let connector3 = yubihsm::Connector::usb(&cfg);
+        let new_creds = yubihsm::Credentials::from_password(
+            ANODIZE_AUTH_KEY_ID,
+            pin.expose_secret().as_bytes(),
+        );
+        yubihsm::Client::open(connector3, new_creds, true).map_err(|e| {
+            HsmError::BackendError(format!(
+                "ensure_bootstrapped reconnect to {serial_str}: {e}"
+            ))
+        })
     }
 }
 
@@ -484,8 +536,11 @@ impl HsmBackup for YubiHsmBackupImpl {
     }
 
     fn pair_devices(&self, src: &str, dst: &str, pin: &SecretString) -> Result<String> {
-        let client_a = Self::open_client(src, pin)?;
-        let client_b = Self::open_client(dst, pin)?;
+        // If either device still has factory-default auth, bootstrap it with
+        // the anodize auth key so both devices use the same PIN.
+        // ensure_bootstrapped_and_open handles reconnecting after key rotation.
+        let client_a = Self::ensure_bootstrapped_and_open(src, pin)?;
+        let client_b = Self::ensure_bootstrapped_and_open(dst, pin)?;
 
         // Generate a fresh AES-256-CCM wrap key.
         let mut key_bytes = [0u8; 32];
@@ -549,8 +604,8 @@ impl HsmBackup for YubiHsmBackupImpl {
         pin: &SecretString,
         _key_id: &str,
     ) -> Result<BackupResult> {
-        let client_src = Self::open_client(src, pin)?;
-        let client_dst = Self::open_client(dst, pin)?;
+        let client_src = Self::ensure_bootstrapped_and_open(src, pin)?;
+        let client_dst = Self::ensure_bootstrapped_and_open(dst, pin)?;
 
         // 1. Get public key from source before export.
         let pubkey_src = client_src
