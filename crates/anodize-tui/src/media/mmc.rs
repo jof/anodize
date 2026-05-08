@@ -91,6 +91,7 @@ pub struct TrackInfo {
     pub nwa: u32, // Next Writable Address for this track
     #[allow(dead_code)]
     pub free_blocks: u32,
+    pub blank: bool,
 }
 
 /// READ TRACK INFORMATION (0x52) for a given track number (1-based).
@@ -107,12 +108,14 @@ pub fn read_track_info(dev: &SgDev, track: u8) -> Result<TrackInfo> {
     let size_sectors = u32::from_be_bytes([buf[24], buf[25], buf[26], buf[27]]);
     let free_blocks = u32::from_be_bytes([buf[16], buf[17], buf[18], buf[19]]);
     let nwa = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
+    let blank = buf[6] & 0x40 != 0;
 
     Ok(TrackInfo {
         start_lba,
         size_sectors,
         nwa,
         free_blocks,
+        blank,
     })
 }
 

@@ -271,8 +271,8 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
                 Ok(t) => t,
                 Err(_) => break, // no more tracks
             };
-            if track.size_sectors == 0 {
-                continue; // blank/empty track
+            if track.blank {
+                break; // reached the blank/invisible track — no more data
             }
             // CD media reports a 150-sector pregap before the data area.
             // When start_lba wraps (>= 0x8000_0000), it's a negative CD-style
