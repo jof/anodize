@@ -232,6 +232,19 @@ impl App {
                     | Some(Operation::IssueCrl) => {
                         self.enter_quorum_phase();
                     }
+                    Some(Operation::KeyBackup) => {
+                        // Quorum already completed during Planning(BackupQuorum).
+                        // Execute the backup operation, then burn the result.
+                        self.do_backup_execute();
+                        if self.utilities.backup.phase
+                            == crate::modes::utilities::backup::BackupPhase::Done
+                        {
+                            self.set_status("Backup succeeded. Writing record to disc…");
+                        } else {
+                            self.set_status("Backup failed — recording result to disc…");
+                        }
+                        self.do_start_burn();
+                    }
                     _ => {
                         self.set_status("Unknown operation after intent");
                         self.ceremony.state = CeremonyPhase::OperationSelect;
@@ -694,6 +707,28 @@ impl App {
         self.set_status("PIN verified. Select source and destination devices.");
 
         tracing::info!("KeyBackup: quorum reached, PIN verified, entering device selection");
+    }
+
+    /// Execute the backup/pair HSM operation (no audit logging — that happens
+    /// in build_burn_session when the record is written to disc).
+    pub(crate) fn do_backup_execute(&mut self) {
+        let pin = secrecy::SecretString::new(self.pin_buf.clone());
+        if let Some(ref profile) = self.profile {
+            match anodize_hsm::create_backup(profile.hsm.backend) {
+                Ok(backup_impl) => {
+                    self.utilities
+                        .backup
+                        .execute(backup_impl.as_ref(), &pin);
+                }
+                Err(e) => {
+                    self.utilities.backup.phase =
+                        crate::modes::utilities::backup::BackupPhase::Error(format!(
+                            "Backend init: {e}"
+                        ));
+                    self.utilities.backup.render_lines();
+                }
+            }
+        }
     }
 
     // ── InitRoot: confirm custodians → generate PIN → split → reveal ────────
@@ -1621,6 +1656,36 @@ impl App {
                     "revocation_count": self.data.revocation_list.len(),
                 }),
             )),
+            Some(Operation::KeyBackup) => {
+                let src_id = self
+                    .utilities
+                    .backup
+                    .source_idx
+                    .and_then(|i| self.utilities.backup.targets.get(i))
+                    .map(|t| t.identifier.clone())
+                    .unwrap_or_default();
+                let dst_id = self
+                    .utilities
+                    .backup
+                    .dest_idx
+                    .and_then(|i| self.utilities.backup.targets.get(i))
+                    .map(|t| t.identifier.clone())
+                    .unwrap_or_default();
+                let action = if self.utilities.backup.action_is_pair {
+                    "pair-devices"
+                } else {
+                    "backup-signing-key"
+                };
+                Some((
+                    "hsm.backup.intent".into(),
+                    serde_json::json!({
+                        "operation": action,
+                        "source": src_id,
+                        "destination": dst_id,
+                        "profile_toml_sha256": genesis_hex,
+                    }),
+                ))
+            }
             _ => None,
         }
     }
@@ -2053,8 +2118,71 @@ impl App {
             }),
 
             Some(Operation::KeyBackup) => {
-                // Key backup is HSM-to-HSM; no disc session needed.
-                None
+                let log_path = staging.join("audit.log");
+                let mut log = match AuditLog::open(&log_path) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.set_status(format!("Audit log reopen failed: {e}"));
+                        return None;
+                    }
+                };
+
+                let src_id = self
+                    .utilities
+                    .backup
+                    .source_idx
+                    .and_then(|i| self.utilities.backup.targets.get(i))
+                    .map(|t| t.identifier.clone())
+                    .unwrap_or_default();
+                let dst_id = self
+                    .utilities
+                    .backup
+                    .dest_idx
+                    .and_then(|i| self.utilities.backup.targets.get(i))
+                    .map(|t| t.identifier.clone())
+                    .unwrap_or_default();
+                let is_pair = self.utilities.backup.action_is_pair;
+                let succeeded = self.utilities.backup.phase
+                    == crate::modes::utilities::backup::BackupPhase::Done;
+
+                let event_name = if is_pair {
+                    "hsm.backup.pair"
+                } else {
+                    "hsm.backup.key"
+                };
+                if let Err(e) = log.append(
+                    event_name,
+                    serde_json::json!({
+                        "operation": if is_pair { "pair-devices" } else { "backup-signing-key" },
+                        "source": src_id,
+                        "destination": dst_id,
+                        "success": succeeded,
+                        "wrap_key": self.utilities.backup.wrap_key_desc.as_deref().unwrap_or(""),
+                        "public_keys_match": self.utilities.backup.result
+                            .as_ref().map(|r| r.public_keys_match),
+                    }),
+                ) {
+                    self.set_status(format!("Audit log append failed: {e}"));
+                    return None;
+                }
+                drop(log);
+
+                let audit_bytes = match std::fs::read(&log_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.set_status(format!("Cannot read audit log: {e}"));
+                        return None;
+                    }
+                };
+
+                Some(SessionEntry {
+                    dir_name,
+                    timestamp: ts,
+                    files: vec![IsoFile {
+                        name: "AUDIT.LOG".into(),
+                        data: audit_bytes,
+                    }],
+                })
             }
 
             None => {

@@ -487,17 +487,9 @@ impl App {
                     if let Some(d) = c.to_digit(10) {
                         let action = self.utilities.backup.handle_key_digit(d as u8);
                         if action == crate::modes::utilities::backup::BackupAction::Execute {
-                            let pin = secrecy::SecretString::new(self.pin_buf.clone());
-                            if let Some(ref profile) = self.profile {
-                                if let Ok(backup_impl) =
-                                    anodize_hsm::create_backup(profile.hsm.backend)
-                                {
-                                    self.utilities.backup.execute(
-                                        backup_impl.as_ref(),
-                                        &pin,
-                                    );
-                                }
-                            }
+                            // All inputs collected → write intent WAL to disc,
+                            // then tick_intent_burn will execute + record burn.
+                            self.do_write_intent();
                         }
                         return Action::Noop;
                     }
@@ -505,17 +497,7 @@ impl App {
                 if key.code == KeyCode::Enter {
                     let action = self.utilities.backup.handle_enter();
                     if action == crate::modes::utilities::backup::BackupAction::Execute {
-                        let pin = secrecy::SecretString::new(self.pin_buf.clone());
-                        if let Some(ref profile) = self.profile {
-                            if let Ok(backup_impl) =
-                                anodize_hsm::create_backup(profile.hsm.backend)
-                            {
-                                self.utilities.backup.execute(
-                                    backup_impl.as_ref(),
-                                    &pin,
-                                );
-                            }
-                        }
+                        self.do_write_intent();
                     }
                     return Action::Noop;
                 }
