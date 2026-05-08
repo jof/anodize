@@ -522,7 +522,9 @@ impl App {
 
         // Intent burn completion
         if self.ceremony.is_writing_intent() {
-            tracing::debug!("background_tick: ceremony is_writing_intent, calling tick_intent_burn");
+            tracing::debug!(
+                "background_tick: ceremony is_writing_intent, calling tick_intent_burn"
+            );
             self.tick_intent_burn();
         }
 
@@ -659,6 +661,12 @@ impl App {
             Action::RevokeInputCancel => {
                 self.data.revoke_phase = 0;
                 self.set_status("Enter certificate serial number (digits). Press Enter.");
+            }
+
+            // Clock re-confirm: operator attests clock is correct at signing time
+            Action::ReconfirmClock => {
+                self.confirmed_time = Some(SystemTime::now());
+                self.do_dispatch_after_clock_reconfirm();
             }
 
             // Disc/Shuttle

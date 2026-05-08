@@ -45,6 +45,8 @@ pub enum Action {
     RevokeInputConfirm,
     RevokeInputNextPhase,
     RevokeInputCancel,
+    // Clock re-confirm before signing
+    ReconfirmClock,
     // CSR review
     ConfirmCsrSign,
     // Cert/CRL review

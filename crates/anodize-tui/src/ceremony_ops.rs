@@ -368,7 +368,8 @@ impl App {
         }
 
         // Pick the first uninitialised slot, or fall back to the first slot.
-        let target = tokens.iter()
+        let target = tokens
+            .iter()
             .find(|t| !t.user_pin_initialized)
             .or_else(|| tokens.first());
         let target = match target {
@@ -389,12 +390,7 @@ impl App {
         // separate SO PIN split.
         let so_pin = user_pin.clone();
 
-        let hsm = match backend.bootstrap(
-            target.slot_id,
-            &so_pin,
-            &user_pin,
-            &cfg.token_label,
-        ) {
+        let hsm = match backend.bootstrap(target.slot_id, &so_pin, &user_pin, &cfg.token_label) {
             Ok(h) => h,
             Err(e) => return Err(format!("HSM bootstrap failed: {e}")),
         };
@@ -402,9 +398,10 @@ impl App {
         let serial = target.serial_number.clone();
         let actor = HsmActor::spawn(hsm);
         self.hw.actor = Some(actor);
-        self.hw.hsm_state = HwState::Ready(
-            format!("bootstrapped (serial={serial}, label={})", cfg.token_label),
-        );
+        self.hw.hsm_state = HwState::Ready(format!(
+            "bootstrapped (serial={serial}, label={})",
+            cfg.token_label
+        ));
         tracing::info!(serial, label = %cfg.token_label, "do_bootstrap_hsm: token ready");
         Ok(())
     }
@@ -526,7 +523,14 @@ impl App {
             return;
         }
 
-        // Dispatch to the pending operation
+        // Transition to clock re-confirm before signing
+        self.ceremony.state = CeremonyPhase::ClockReconfirm;
+        self.set_status("Confirm system clock is correct before signing.");
+    }
+
+    /// Dispatch to the pending crypto operation after the operator re-confirms
+    /// the clock. Called from Action::ReconfirmClock.
+    pub(crate) fn do_dispatch_after_clock_reconfirm(&mut self) {
         match self.current_op.clone() {
             Some(Operation::SignCsr) => self.do_sign_csr(),
             Some(Operation::RevokeCert) => self.do_sign_crl_for_revoke(),
@@ -1035,14 +1039,6 @@ impl App {
     }
 
     fn do_build_cert(&mut self) -> Result<(), String> {
-        if let Some(ct) = self.confirmed_time {
-            if !clock_drift_ok(ct) {
-                return Err(
-                    "Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock."
-                        .into(),
-                );
-            }
-        }
         let actor = match self.hw.actor.clone() {
             Some(a) => a,
             None => return Err("No HSM session".into()),
@@ -1106,14 +1102,6 @@ impl App {
     // ── Mode 2: Sign CSR ─────────────────────────────────────────────────────
 
     fn do_sign_csr(&mut self) {
-        if let Some(ct) = self.confirmed_time {
-            if !clock_drift_ok(ct) {
-                self.set_status(
-                    "Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock.",
-                );
-                return;
-            }
-        }
         let label = match self.profile.as_ref().map(|p| p.hsm.key_label.clone()) {
             Some(l) => l,
             None => {
@@ -1193,6 +1181,13 @@ impl App {
                 self.set_status("CSR signature verification failed — CSR may be corrupt");
                 return;
             }
+            Err(anodize_ca::CaError::CsrAlgorithmUnsupported(alg)) => {
+                self.set_status(format!(
+                    "CSR uses unsupported signature algorithm ({alg}). \
+                     Accepted: ECDSA P-256/SHA-256 or P-384/SHA-384."
+                ));
+                return;
+            }
             Err(anodize_ca::CaError::CsrExtensionRejected(oid)) => {
                 self.set_status(format!("CSR contains rejected extension OID: {oid}"));
                 return;
@@ -1231,14 +1226,6 @@ impl App {
     }
 
     fn do_sign_crl_inner(&mut self) {
-        if let Some(ct) = self.confirmed_time {
-            if !clock_drift_ok(ct) {
-                self.set_status(
-                    "Clock drift > 5 min since ClockCheck — restart ceremony to re-confirm clock.",
-                );
-                return;
-            }
-        }
         let label = match self.profile.as_ref().map(|p| p.hsm.key_label.clone()) {
             Some(l) => l,
             None => {
@@ -1426,7 +1413,10 @@ impl App {
                     }
                 }
             } else if let Some(dev) = self.disc.optical_dev.clone() {
-                tracing::info!("do_write_intent: spawning write_session to {}", dev.display());
+                tracing::info!(
+                    "do_write_intent: spawning write_session to {}",
+                    dev.display()
+                );
                 media::write_session(&dev, all_sessions, false, tx);
             } else {
                 tracing::error!("do_write_intent: no optical device!");
@@ -1437,7 +1427,10 @@ impl App {
             }
         }
 
-        tracing::info!(burn_rx_is_some = self.disc.burn_rx.is_some(), "do_write_intent: setting Commit state");
+        tracing::info!(
+            burn_rx_is_some = self.disc.burn_rx.is_some(),
+            "do_write_intent: setting Commit state"
+        );
         self.ceremony.state = CeremonyPhase::Commit;
         self.set_status("Writing intent to disc. Operation will follow…");
     }

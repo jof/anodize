@@ -164,17 +164,6 @@ pub fn parse_rfc3339_to_system_time(s: &str) -> Option<SystemTime> {
     }
 }
 
-/// Returns true if the wall clock is within 5 minutes of the operator-confirmed time.
-pub fn clock_drift_ok(confirmed: SystemTime) -> bool {
-    let now = SystemTime::now();
-    let drift = if now >= confirmed {
-        now.duration_since(confirmed)
-    } else {
-        confirmed.duration_since(now)
-    };
-    drift.map(|d| d.as_secs() <= 300).unwrap_or(false)
-}
-
 // ── SoftHSM2 shuttle backend (dev-softhsm-usb feature) ───────────────────────
 
 #[cfg(feature = "dev-softhsm-usb")]

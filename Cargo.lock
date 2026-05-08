@@ -49,6 +49,7 @@ dependencies = [
  "anyhow",
  "der",
  "getrandom 0.2.17",
+ "p256",
  "p384",
  "secrecy",
  "spki",

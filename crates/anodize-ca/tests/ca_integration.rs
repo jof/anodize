@@ -338,5 +338,92 @@ fn issue_crl_extensions_present() {
     );
 }
 
+/// A P-256/SHA-256 CSR should be accepted by sign_intermediate_csr.
+#[test]
+fn sign_csr_p256_sha256_accepted() {
+    let module = match softhsm_env() {
+        Some(m) => m,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE not set");
+            return;
+        }
+    };
+
+    init_test_token("ca-p256-test");
+    let hsm = Pkcs11Hsm::new(&module, "ca-p256-test").expect("open session");
+    let mut actor = HsmActor::spawn(Box::new(hsm));
+    let pin = secrecy::SecretString::new("1234".to_string());
+    actor.login(&pin).expect("login");
+
+    let root_key = actor
+        .generate_keypair("root-key", KeySpec::EcdsaP384)
+        .expect("generate root keypair");
+    let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
+    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
+        Ok(c) => c,
+        Err(e) => panic!("root cert: {e}"),
+    };
+
+    // Build a P-256/SHA-256 CSR using a software key.
+    // x509-cert's RequestBuilder requires DynSignatureAlgorithmIdentifier which
+    // p256::ecdsa::SigningKey doesn't implement, so we build the CSR at DER level.
+    let csr_der = build_p256_csr_der("CN=P256 Intermediate,O=Test Org,C=US");
+
+    let int_cert = sign_intermediate_csr(&root_signer, &root_cert, &csr_der, Some(0), 1825, None)
+        .expect("sign P-256 CSR");
+
+    let int_der = int_cert.to_der().expect("encode intermediate cert DER");
+    let decoded =
+        x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
+    assert_eq!(
+        decoded.tbs_certificate.issuer,
+        root_cert.tbs_certificate.subject
+    );
+
+    println!(
+        "sign_csr_p256_sha256_accepted: OK ({} bytes intermediate cert DER)",
+        int_der.len()
+    );
+}
+
+/// Build a self-signed P-256/SHA-256 CSR DER for testing.
+fn build_p256_csr_der(subject_str: &str) -> Vec<u8> {
+    use der::{Decode, Encode};
+    use p256::ecdsa::signature::Signer;
+    use p256::ecdsa::{DerSignature, SigningKey};
+    use p256::pkcs8::EncodePublicKey;
+    use spki::AlgorithmIdentifierOwned;
+    use x509_cert::request::CertReqInfo;
+
+    let sk = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let vk = sk.verifying_key();
+    let spki_der = vk.to_public_key_der().expect("encode SPKI");
+    let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse SPKI");
+
+    let subject = x509_cert::name::Name::from_str(subject_str).unwrap();
+    let info = CertReqInfo {
+        version: x509_cert::request::Version::V1,
+        subject,
+        public_key: spki,
+        attributes: Default::default(),
+    };
+    let info_der = info.to_der().expect("encode CertReqInfo");
+    let sig: DerSignature = sk.sign(&info_der);
+    let sig_bytes = sig.to_bytes();
+
+    let ecdsa_sha256_oid = der::oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
+    let alg = AlgorithmIdentifierOwned {
+        oid: ecdsa_sha256_oid,
+        parameters: None,
+    };
+
+    let csr = x509_cert::request::CertReq {
+        info,
+        algorithm: alg,
+        signature: der::asn1::BitString::from_bytes(&sig_bytes).expect("bitstring from sig"),
+    };
+    csr.to_der().expect("encode CertReq")
+}
+
 // Required for Name::from_str in tests
 use std::str::FromStr;

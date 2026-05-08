@@ -48,6 +48,8 @@ pub enum CeremonyPhase {
     Commit,
     /// Phase 4: collect SSS shares, reconstruct PIN.
     Quorum,
+    /// Phase 4b: re-confirm clock before signing.
+    ClockReconfirm,
     /// Phase 5: HSM crypto operation complete, verify result.
     Execute,
     /// Post-commit error: HSM/keygen/cert-build failed after intent write.
@@ -132,6 +134,8 @@ impl CeremonyMode {
             CeremonyPhase::Commit | CeremonyPhase::PostCommitError => 2,
             // 3 — Quorum (SSS share collection + PIN reconstruction)
             CeremonyPhase::Quorum | CeremonyPhase::Planning(PlanningState::RekeyQuorum) => 3,
+            // 3→4 — Clock re-confirm before signing (shown as part of Quorum phase)
+            CeremonyPhase::ClockReconfirm => 3,
             // 4 — Execute (HSM crypto operation, cert preview/verify)
             CeremonyPhase::Execute => 4,
             // 5 — Export (write record to disc + shuttle copy)
@@ -182,6 +186,7 @@ impl CeremonyMode {
             }
             CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => "Insert Blank Target Disc",
             CeremonyPhase::Quorum => "Quorum \u{2014} Reconstruct PIN",
+            CeremonyPhase::ClockReconfirm => "Clock Re-confirm \u{2014} Verify Before Signing",
             CeremonyPhase::Done => "Ceremony Complete",
         };
 
@@ -590,6 +595,25 @@ impl CeremonyMode {
                 ]
             }
 
+            CeremonyPhase::ClockReconfirm => {
+                let now = time::OffsetDateTime::now_utc();
+                let time_str = now
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_else(|_| "unknown".into());
+                vec![
+                    String::new(),
+                    "  HSM unlocked. Before signing, confirm the system clock is correct.".into(),
+                    String::new(),
+                    format!("  Current time:  {time_str}"),
+                    String::new(),
+                    "  Certificates will be timestamped with this time.".into(),
+                    "  If the clock is wrong, quit and correct it before proceeding.".into(),
+                    String::new(),
+                    "  [1]  Clock is correct \u{2014} proceed with signing".into(),
+                    "  [q]  Abort".into(),
+                ]
+            }
+
             CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => {
                 let session_count = app.data.migrate_sessions.len();
                 let disc_info = match &app.disc.optical_dev {
@@ -745,6 +769,14 @@ impl Component for CeremonyMode {
             CeremonyPhase::Planning(PlanningState::RekeyShareVerify) => Action::Noop, // handled by ShareInput component
 
             CeremonyPhase::Quorum => Action::Noop, // handled by ShareInput component
+
+            CeremonyPhase::ClockReconfirm => {
+                if key.code == KeyCode::Char('1') {
+                    Action::ReconfirmClock
+                } else {
+                    Action::Noop
+                }
+            }
 
             CeremonyPhase::Done => Action::Noop,
         }

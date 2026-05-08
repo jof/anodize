@@ -33,6 +33,7 @@ use x509_cert::{
 
 pub use x509_cert::ext::pkix::CrlReason;
 
+const ECDSA_WITH_SHA256_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
 const ECDSA_WITH_SHA384_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3");
 
 const ID_EXTENSION_REQ: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.14");
@@ -56,6 +57,8 @@ pub enum CaError {
     X509Build(String),
     #[error("CSR signature invalid")]
     CsrSignatureInvalid,
+    #[error("CSR uses unsupported signature algorithm: {0}")]
+    CsrAlgorithmUnsupported(String),
     #[error("CSR contains rejected extension OID: {0}")]
     CsrExtensionRejected(String),
     #[error("DER error: {0}")]
@@ -164,6 +167,50 @@ pub fn build_root_cert<H: Hsm>(
     Ok(builder.build::<DerSignature>()?)
 }
 
+/// Verify a CSR's self-signature, dispatching on the signature algorithm OID.
+///
+/// Supported algorithms:
+/// - ecdsa-with-SHA256 (OID 1.2.840.10045.4.3.2) — P-256 key
+/// - ecdsa-with-SHA384 (OID 1.2.840.10045.4.3.3) — P-384 key
+///
+/// The CA output is always P-384/SHA-384, but we accept CSRs from subordinate
+/// CAs that may use P-256/SHA-256 or other common combinations.
+fn verify_csr_signature(csr: &CertReq) -> Result<(), CaError> {
+    let tbs_bytes = csr.info.to_der()?;
+    let spki_der = csr.info.public_key.to_der()?;
+    let sig_bytes = csr
+        .signature
+        .as_bytes()
+        .ok_or(CaError::CsrSignatureInvalid)?;
+    let alg_oid = csr.algorithm.oid;
+
+    match alg_oid {
+        ECDSA_WITH_SHA256_OID => {
+            use p256::ecdsa::signature::Verifier;
+            let vk = p256::ecdsa::VerifyingKey::from_public_key_der(&spki_der)
+                .map_err(|_| CaError::CsrSignatureInvalid)?;
+            let sig = p256::ecdsa::DerSignature::try_from(sig_bytes)
+                .map_err(|_| CaError::CsrSignatureInvalid)?;
+            vk.verify(&tbs_bytes, &sig)
+                .map_err(|_| CaError::CsrSignatureInvalid)?;
+        }
+        ECDSA_WITH_SHA384_OID => {
+            use p384::ecdsa::signature::Verifier;
+            let vk = p384::ecdsa::VerifyingKey::from_public_key_der(&spki_der)
+                .map_err(|_| CaError::CsrSignatureInvalid)?;
+            let sig = p384::ecdsa::DerSignature::try_from(sig_bytes)
+                .map_err(|_| CaError::CsrSignatureInvalid)?;
+            vk.verify(&tbs_bytes, &sig)
+                .map_err(|_| CaError::CsrSignatureInvalid)?;
+        }
+        other => {
+            return Err(CaError::CsrAlgorithmUnsupported(other.to_string()));
+        }
+    }
+
+    Ok(())
+}
+
 /// Sign an intermediate CA CSR, applying the hardcoded extension policy.
 ///
 /// The CSR signature is verified **before** any fields are read. Extensions not
@@ -176,26 +223,12 @@ pub fn sign_intermediate_csr<H: Hsm>(
     validity_days: u32,
     cdp_url: Option<&str>,
 ) -> Result<Certificate, CaError> {
-    use p384::ecdsa::signature::Verifier;
     use std::time::Duration;
 
     let csr = CertReq::from_der(csr_der).map_err(|e| CaError::Der(e.to_string()))?;
 
     // Verify the CSR self-signature BEFORE reading any other fields.
-    {
-        let tbs_bytes = csr.info.to_der()?;
-        let spki_der = csr.info.public_key.to_der()?;
-        let vk = VerifyingKey::from_public_key_der(&spki_der)
-            .map_err(|_| CaError::CsrSignatureInvalid)?;
-        let sig_bytes = csr
-            .signature
-            .as_bytes()
-            .ok_or(CaError::CsrSignatureInvalid)?;
-        let der_sig =
-            DerSignature::try_from(sig_bytes).map_err(|_| CaError::CsrSignatureInvalid)?;
-        vk.verify(&tbs_bytes, &der_sig)
-            .map_err(|_| CaError::CsrSignatureInvalid)?;
-    }
+    verify_csr_signature(&csr)?;
 
     // Check extension policy before processing subject/key fields.
     for attr in csr.info.attributes.iter() {
