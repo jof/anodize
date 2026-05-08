@@ -67,6 +67,12 @@ instruction panels all reflect the all-shares requirement.
 The revoke-certificate input dialog should allow the operator to press Escape to
 cancel even while the cursor is in the serial number field.
 
+## anodize-shuttle: add `list-usb` top-level command
+
+Add a command to enumerate USB devices that could be discs (e.g. USB mass-storage
+devices, optical drives). Useful for operator discovery before ceremony start.
+The `lint --list-usb` help text references this but it doesn't exist yet.
+
 ## cdemu: verify multi-session append after CLOSE SESSION
 
 The intent session write confirmed `sessions=0 → write → CLOSE TRACK → CLOSE
