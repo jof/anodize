@@ -358,7 +358,11 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
         anyhow::bail!("refusing to write to rewritable media (profile {profile:#06x})");
     }
     let is_bdr = matches!(profile, 0x0041 | 0x0042);
-    tracing::info!(profile = format_args!("{profile:#06x}"), is_bdr, "write_session_inner: profile");
+    tracing::info!(
+        profile = format_args!("{profile:#06x}"),
+        is_bdr,
+        "write_session_inner: profile"
+    );
 
     // Verify disc is appendable
     tracing::info!("write_session_inner: reading disc info");
@@ -457,7 +461,12 @@ fn write_session_inner(dev: &Path, sessions: &[SessionEntry], is_final: bool) ->
             p
         };
         let lba = nwa + written_sectors;
-        tracing::debug!(chunk = i, lba, sectors = padded.len() / iso9660::SECTOR, "WRITE(10)");
+        tracing::debug!(
+            chunk = i,
+            lba,
+            sectors = padded.len() / iso9660::SECTOR,
+            "WRITE(10)"
+        );
         write_sectors(&sg, lba, &padded).context("WRITE(10)")?;
         written_sectors += (padded.len() / iso9660::SECTOR) as u32;
     }

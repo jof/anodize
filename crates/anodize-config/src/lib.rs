@@ -86,7 +86,6 @@ pub enum KeySpec {
     EcdsaP384,
 }
 
-
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("cannot read config file {path}: {source}")]
@@ -104,7 +103,6 @@ pub enum ConfigError {
     #[error("revocation list TOML parse error: {source}")]
     RevocationToml { source: toml::de::Error },
 }
-
 
 pub fn load(path: &Path) -> Result<Profile, ConfigError> {
     let contents = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {

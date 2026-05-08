@@ -133,19 +133,19 @@ impl HsmBackend for SoftHsmBackend {
     fn list_tokens(&self) -> Result<Vec<SlotTokenInfo>> {
         let ctx = init_ctx(&self.module_path)?;
         let slots = ctx.get_slots_with_token()?;
-        Ok(slots.iter().filter_map(|&s| token_info_from_slot(&ctx, s)).collect())
+        Ok(slots
+            .iter()
+            .filter_map(|&s| token_info_from_slot(&ctx, s))
+            .collect())
     }
 
     fn probe_token(&self, label: &str) -> Result<bool> {
         let ctx = init_ctx(&self.module_path)?;
-        let found = ctx
-            .get_slots_with_token()?
-            .into_iter()
-            .any(|slot| {
-                ctx.get_token_info(slot)
-                    .map(|info| info.label().trim() == label.trim())
-                    .unwrap_or(false)
-            });
+        let found = ctx.get_slots_with_token()?.into_iter().any(|slot| {
+            ctx.get_token_info(slot)
+                .map(|info| info.label().trim() == label.trim())
+                .unwrap_or(false)
+        });
         Ok(found)
     }
 
@@ -218,13 +218,18 @@ pub struct Pkcs11Module {
 
 impl Pkcs11Module {
     pub fn open(module_path: &std::path::Path) -> Result<Self> {
-        Ok(Self { ctx: init_ctx(module_path)? })
+        Ok(Self {
+            ctx: init_ctx(module_path)?,
+        })
     }
 
     /// Enumerate all slots that have a token present.
     pub fn list_tokens(&self) -> Result<Vec<SlotTokenInfo>> {
         let slots = self.ctx.get_slots_with_token()?;
-        Ok(slots.iter().filter_map(|&s| token_info_from_slot(&self.ctx, s)).collect())
+        Ok(slots
+            .iter()
+            .filter_map(|&s| token_info_from_slot(&self.ctx, s))
+            .collect())
     }
 
     /// Bootstrap a token and return an authenticated `Pkcs11Hsm`.
@@ -578,7 +583,10 @@ impl Hsm for Pkcs11Hsm {
 
     fn list_slot_details(&self) -> Result<Vec<SlotTokenInfo>> {
         let slots = self.ctx.get_slots_with_token()?;
-        Ok(slots.iter().filter_map(|&s| token_info_from_slot(&self.ctx, s)).collect())
+        Ok(slots
+            .iter()
+            .filter_map(|&s| token_info_from_slot(&self.ctx, s))
+            .collect())
     }
 }
 

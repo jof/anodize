@@ -279,7 +279,10 @@ fn ensure_cdemu() {
         }
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            println!("  WARNING: cdemu start failed (exit {}): {stderr}\r", out.status);
+            println!(
+                "  WARNING: cdemu start failed (exit {}): {stderr}\r",
+                out.status
+            );
         }
         Err(e) => {
             println!("  WARNING: could not run systemctl: {e}\r");

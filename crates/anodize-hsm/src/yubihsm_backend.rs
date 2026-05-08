@@ -36,7 +36,10 @@ impl HsmBackend for YubiHsmBackend {
         // connect with default credentials.  On success we fabricate a
         // SlotTokenInfo (YubiHSM2 doesn't have a PKCS#11 slot model).
         let connector = yubihsm::Connector::usb(&yubihsm::UsbConfig::default());
-        let creds = yubihsm::Credentials::from_password(DEFAULT_AUTH_KEY_ID, DEFAULT_AUTH_PASSWORD.as_bytes());
+        let creds = yubihsm::Credentials::from_password(
+            DEFAULT_AUTH_KEY_ID,
+            DEFAULT_AUTH_PASSWORD.as_bytes(),
+        );
 
         match yubihsm::Client::open(connector, creds, true) {
             Ok(client) => {
@@ -46,7 +49,10 @@ impl HsmBackend for YubiHsmBackend {
                 Ok(vec![SlotTokenInfo {
                     slot_id: 0,
                     token_label: "YubiHSM2".to_string(),
-                    model: format!("YubiHSM2 (fw {}.{}.{})", info.major_version, info.minor_version, info.build_version),
+                    model: format!(
+                        "YubiHSM2 (fw {}.{}.{})",
+                        info.major_version, info.minor_version, info.build_version
+                    ),
                     serial_number: format!("{}", info.serial_number),
                     login_required: true,
                     user_pin_initialized: false, // No pin concept in native mode
@@ -63,7 +69,10 @@ impl HsmBackend for YubiHsmBackend {
     fn probe_token(&self, _label: &str) -> Result<bool> {
         // YubiHSM2 doesn't have per-token labels.  We probe by connecting.
         let connector = yubihsm::Connector::usb(&yubihsm::UsbConfig::default());
-        let creds = yubihsm::Credentials::from_password(DEFAULT_AUTH_KEY_ID, DEFAULT_AUTH_PASSWORD.as_bytes());
+        let creds = yubihsm::Credentials::from_password(
+            DEFAULT_AUTH_KEY_ID,
+            DEFAULT_AUTH_PASSWORD.as_bytes(),
+        );
         Ok(yubihsm::Client::open(connector, creds, true).is_ok())
     }
 
@@ -91,16 +100,18 @@ impl HsmBackend for YubiHsmBackend {
     ) -> Result<Box<dyn Hsm>> {
         // 1. Connect with factory-default credentials.
         let connector = yubihsm::Connector::usb(&yubihsm::UsbConfig::default());
-        let creds = yubihsm::Credentials::from_password(DEFAULT_AUTH_KEY_ID, DEFAULT_AUTH_PASSWORD.as_bytes());
+        let creds = yubihsm::Credentials::from_password(
+            DEFAULT_AUTH_KEY_ID,
+            DEFAULT_AUTH_PASSWORD.as_bytes(),
+        );
 
         let client = yubihsm::Client::open(connector, creds, true)
             .map_err(|e| HsmError::BackendError(format!("YubiHSM bootstrap connect: {e}")))?;
 
         // 2. Create a new auth key (ID 2) derived from the SSS user_pin.
         //    This replaces the factory default for future sessions.
-        let auth_key = yubihsm::authentication::Key::derive_from_password(
-            user_pin.expose_secret().as_bytes(),
-        );
+        let auth_key =
+            yubihsm::authentication::Key::derive_from_password(user_pin.expose_secret().as_bytes());
         client
             .put_authentication_key(
                 ANODIZE_AUTH_KEY_ID,
@@ -118,7 +129,10 @@ impl HsmBackend for YubiHsmBackend {
 
         // 3. Delete the factory default auth key to lock down the device.
         client
-            .delete_object(DEFAULT_AUTH_KEY_ID, yubihsm::object::Type::AuthenticationKey)
+            .delete_object(
+                DEFAULT_AUTH_KEY_ID,
+                yubihsm::object::Type::AuthenticationKey,
+            )
             .map_err(|e| HsmError::BackendError(format!("delete default auth key: {e}")))?;
 
         tracing::info!("YubiHSM bootstrap: deleted factory auth key {DEFAULT_AUTH_KEY_ID}");
@@ -174,10 +188,9 @@ impl Hsm for YubiHsmSession {
             _ => return Err(HsmError::UnsupportedKeySpec),
         };
 
-        let obj_label = yubihsm::object::Label::from_bytes(
-            &label.as_bytes()[..label.len().min(40)],
-        )
-        .map_err(|e| HsmError::BackendError(format!("label: {e}")))?;
+        let obj_label =
+            yubihsm::object::Label::from_bytes(&label.as_bytes()[..label.len().min(40)])
+                .map_err(|e| HsmError::BackendError(format!("label: {e}")))?;
 
         self.client
             .generate_asymmetric_key(
@@ -242,7 +255,9 @@ impl Hsm for YubiHsmSession {
         let mut point = vec![0x04u8];
         point.extend_from_slice(raw_point);
 
-        Ok(crate::softhsm::ec_spki_from_params_and_point(ec_params, &point))
+        Ok(crate::softhsm::ec_spki_from_params_and_point(
+            ec_params, &point,
+        ))
     }
 
     fn list_slot_details(&self) -> Result<Vec<SlotTokenInfo>> {
