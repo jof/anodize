@@ -287,11 +287,14 @@ qemu-nographic: anodize-prod-amd64.iso fake-shuttle.img
 # Dev arm64 with graphical window — near-native speed via HVF on Apple Silicon.
 qemu-aarch64: anodize-dev-arm64.iso fake-shuttle.img
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
+	@# 9p mapped-xattr leaves 0600 perms; strip so cdemu can read on next boot
+	@for f in $(DEV_DISC_DIR)/*.iso; do [ -f "$$f" ] && xattr -c "$$f" && chmod 666 "$$f"; done 2>/dev/null || true
 	$(QEMU_AARCH64_BASE) -display cocoa -device virtio-gpu-pci
 
 # Dev arm64 serial console only.  Ctrl-A X to quit.
 qemu-aarch64-nographic: anodize-dev-arm64.iso fake-shuttle.img
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
+	@for f in $(DEV_DISC_DIR)/*.iso; do [ -f "$$f" ] && xattr -c "$$f" && chmod 666 "$$f"; done 2>/dev/null || true
 	$(subst -serial stdio,-nographic,$(QEMU_AARCH64_BASE))
 
 # ---------------------------------------------------------------------------
@@ -401,11 +404,13 @@ qemu-dev: qemu-dev-sdl
 
 qemu-dev-sdl: anodize-dev-amd64.iso fake-shuttle.img
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
+	@for f in $(DEV_DISC_DIR)/*.iso; do [ -f "$$f" ] && xattr -c "$$f" && chmod 666 "$$f"; done 2>/dev/null || true
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_DEV_BASE) -display sdl -vga std
 
 qemu-dev-nographic: anodize-dev-amd64.iso fake-shuttle.img
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
+	@for f in $(DEV_DISC_DIR)/*.iso; do [ -f "$$f" ] && xattr -c "$$f" && chmod 666 "$$f"; done 2>/dev/null || true
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(subst -serial stdio,-nographic,$(QEMU_DEV_BASE))
 
