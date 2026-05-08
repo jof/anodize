@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 anodize-config = { path = "../anodize-config" }
 cryptoki.workspace = true
+getrandom.workspace = true
 yubihsm.workspace = true
 secrecy.workspace = true
 sha2.workspace = true
@@ -15,5 +16,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
+getrandom.workspace = true
 p384.workspace = true
 secrecy.workspace = true

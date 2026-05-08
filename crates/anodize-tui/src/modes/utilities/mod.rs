@@ -1,3 +1,5 @@
+pub mod backup;
+
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
@@ -17,6 +19,7 @@ pub enum UtilScreen {
     SystemInfo,
     AuditLog,
     HsmBrowser,
+    KeyBackup,
 }
 
 /// Utilities mode component: system info, audit log browser, HSM slot browser.
@@ -24,6 +27,8 @@ pub struct UtilitiesMode {
     pub screen: UtilScreen,
     /// Cached lines for the current sub-screen (populated on entry).
     cached_lines: Vec<String>,
+    /// Backup FSM state (persists across re-renders).
+    pub backup: backup::BackupState,
 }
 
 impl UtilitiesMode {
@@ -31,6 +36,7 @@ impl UtilitiesMode {
         Self {
             screen: UtilScreen::Menu,
             cached_lines: Vec::new(),
+            backup: backup::BackupState::new(),
         }
     }
 
@@ -42,6 +48,7 @@ impl UtilitiesMode {
             UtilScreen::SystemInfo => Self::gather_system_info(app),
             UtilScreen::AuditLog => Self::gather_audit_log(app),
             UtilScreen::HsmBrowser => Self::gather_hsm_info(app),
+            UtilScreen::KeyBackup => Vec::new(), // Backup uses its own FSM state
         }
     }
 
@@ -338,6 +345,7 @@ impl UtilitiesMode {
                     "  [1]  System Info",
                     "  [2]  Audit Log Browser",
                     "  [3]  PKCS#11 / HSM Info",
+                    "  [4]  HSM Key Backup",
                     "",
                     "  [Esc]  Back",
                 ];
@@ -376,6 +384,16 @@ impl UtilitiesMode {
                     .scroll((app.content_scroll, 0));
                 frame.render_widget(para, area);
             }
+            UtilScreen::KeyBackup => {
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .title("HSM Key Backup  [Esc] back");
+                let para = Paragraph::new(Text::from(self.backup.lines.join("\n")))
+                    .block(block)
+                    .wrap(Wrap { trim: false })
+                    .scroll((app.content_scroll, 0));
+                frame.render_widget(para, area);
+            }
         }
     }
 }
@@ -387,8 +405,39 @@ impl Component for UtilitiesMode {
                 KeyCode::Char('1') => Action::UtilScreen(1),
                 KeyCode::Char('2') => Action::UtilScreen(2),
                 KeyCode::Char('3') => Action::UtilScreen(3),
+                KeyCode::Char('4') => Action::UtilScreen(4),
                 _ => Action::Noop,
             },
+            UtilScreen::KeyBackup => {
+                match key.code {
+                    KeyCode::Esc => {
+                        if !self.backup.go_back() {
+                            self.screen = UtilScreen::Menu;
+                        }
+                        Action::Noop
+                    }
+                    KeyCode::Char(c @ '1'..='9') => {
+                        let idx = (c as usize) - ('1' as usize);
+                        self.backup.select(idx);
+                        Action::Noop
+                    }
+                    KeyCode::Enter => {
+                        use backup::BackupPhase;
+                        match self.backup.phase {
+                            BackupPhase::Overview => {
+                                self.backup.confirm_overview();
+                                Action::Noop
+                            }
+                            BackupPhase::Confirm => {
+                                // Signal app to execute (needs pin + backup impl)
+                                Action::BackupExecute
+                            }
+                            _ => Action::Noop,
+                        }
+                    }
+                    _ => Action::Noop,
+                }
+            }
             // Sub-screens: Esc returns to menu, 'r' refreshes
             _ => match key.code {
                 KeyCode::Esc => {
@@ -401,7 +450,7 @@ impl Component for UtilitiesMode {
                         UtilScreen::SystemInfo => 1,
                         UtilScreen::AuditLog => 2,
                         UtilScreen::HsmBrowser => 3,
-                        UtilScreen::Menu => return Action::Noop,
+                        UtilScreen::Menu | UtilScreen::KeyBackup => return Action::Noop,
                     };
                     Action::UtilScreen(screen_idx)
                 }

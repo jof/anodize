@@ -143,6 +143,62 @@ pub fn create_backend(kind: HsmBackendKind) -> Result<Box<dyn HsmBackend>> {
     }
 }
 
+// ── HsmBackup ──────────────────────────────────────────────────────────────────
+
+/// A device or token that can participate in a key backup operation.
+#[derive(Debug, Clone)]
+pub struct BackupTarget {
+    /// Unique identifier: serial number (YubiHSM) or token label (PKCS#11).
+    pub identifier: String,
+    /// Human-readable description (firmware version, model, etc.).
+    pub description: String,
+    /// Whether the device still has factory-default auth.
+    pub needs_bootstrap: bool,
+    /// Whether a shared wrap key is already installed.
+    pub has_wrap_key: bool,
+    /// Whether the signing key (0x0100 / key label) is present.
+    pub has_signing_key: bool,
+}
+
+/// Result of a backup (wrap-export + wrap-import) operation.
+#[derive(Debug, Clone)]
+pub struct BackupResult {
+    pub source_id: String,
+    pub dest_id: String,
+    pub key_id: String,
+    pub public_keys_match: bool,
+}
+
+/// Pluggable backup operations — wrap-export/import key material between two
+/// devices or tokens of the same backend type.
+pub trait HsmBackup: Send {
+    /// List all devices/tokens available for backup.
+    fn enumerate_backup_targets(&self) -> Result<Vec<BackupTarget>>;
+
+    /// Ensure both source and dest share a wrap key.  Generates a fresh
+    /// AES-256 wrap key and installs it on both.  Returns a description
+    /// of the wrap key (e.g. "0x0200").
+    fn pair_devices(&self, src: &str, dst: &str, pin: &SecretString) -> Result<String>;
+
+    /// Export the signing key from `src`, import into `dst`, verify public
+    /// keys match.
+    fn backup_key(
+        &self,
+        src: &str,
+        dst: &str,
+        pin: &SecretString,
+        key_id: &str,
+    ) -> Result<BackupResult>;
+}
+
+/// Create the backup implementation for the given backend kind.
+pub fn create_backup(kind: HsmBackendKind) -> Result<Box<dyn HsmBackup>> {
+    match kind {
+        HsmBackendKind::Yubihsm => Ok(Box::new(yubihsm_backend::YubiHsmBackupImpl::new()?)),
+        HsmBackendKind::Softhsm => Ok(Box::new(softhsm::Pkcs11BackupImpl::new()?)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // HsmActor — serialises all HSM calls onto a dedicated thread.
 //

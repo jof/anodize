@@ -111,10 +111,7 @@ impl ShareReveal {
         let footer_height = 2u16;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(0),
-                Constraint::Length(footer_height),
-            ])
+            .constraints([Constraint::Min(0), Constraint::Length(footer_height)])
             .split(inner);
         let content_area = chunks[0];
         let footer_area = chunks[1];

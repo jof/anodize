@@ -8,7 +8,10 @@
 use secrecy::{ExposeSecret, SecretString};
 use sha2::Digest as _;
 
-use crate::{Hsm, HsmBackend, HsmError, KeyHandle, KeySpec, Result, SignMech, SlotTokenInfo};
+use crate::{
+    BackupResult, BackupTarget, Hsm, HsmBackend, HsmBackup, HsmError, KeyHandle, KeySpec, Result,
+    SignMech, SlotTokenInfo,
+};
 
 // Default auth key slot on factory-fresh YubiHSM2 devices.
 const DEFAULT_AUTH_KEY_ID: yubihsm::object::Id = 1;
@@ -18,6 +21,9 @@ const DEFAULT_AUTH_PASSWORD: &str = "password";
 const SIGNING_KEY_ID: yubihsm::object::Id = 0x0100;
 // Object ID for the anodize-managed auth key that replaces the default.
 const ANODIZE_AUTH_KEY_ID: yubihsm::object::Id = 2;
+
+// Object ID for the shared wrap key used in backup operations.
+const WRAP_KEY_ID: yubihsm::object::Id = 0x0200;
 
 // ── YubiHsmBackend ───────────────────────────────────────────────────────────
 
@@ -280,5 +286,229 @@ impl Hsm for YubiHsmSession {
             }]),
             Err(e) => Err(HsmError::BackendError(format!("device_info: {e}"))),
         }
+    }
+}
+
+// ── YubiHsmBackupImpl ──────────────────────────────────────────────────────────
+
+/// YubiHSM backup implementation using native SDK wrap/unwrap over USB.
+pub struct YubiHsmBackupImpl;
+
+impl YubiHsmBackupImpl {
+    pub fn new() -> Result<Self> {
+        Ok(Self)
+    }
+
+    /// Open a client to a specific device by serial string.
+    /// Tries anodize auth key (2) with `pin` first, falls back to factory default.
+    fn open_client(serial_str: &str, pin: &SecretString) -> Result<yubihsm::Client> {
+        let serial: yubihsm::device::SerialNumber = serial_str
+            .parse()
+            .map_err(|e| HsmError::BackendError(format!("invalid serial '{serial_str}': {e}")))?;
+
+        let cfg = yubihsm::UsbConfig {
+            serial: Some(serial),
+            ..Default::default()
+        };
+
+        // Try anodize auth (key 2) first.
+        let connector = yubihsm::Connector::usb(&cfg);
+        let creds = yubihsm::Credentials::from_password(
+            ANODIZE_AUTH_KEY_ID,
+            pin.expose_secret().as_bytes(),
+        );
+        if let Ok(client) = yubihsm::Client::open(connector, creds, true) {
+            return Ok(client);
+        }
+
+        // Fall back to factory default auth (key 1).
+        let connector2 = yubihsm::Connector::usb(&cfg);
+        let default_creds = yubihsm::Credentials::from_password(
+            DEFAULT_AUTH_KEY_ID,
+            DEFAULT_AUTH_PASSWORD.as_bytes(),
+        );
+        yubihsm::Client::open(connector2, default_creds, true)
+            .map_err(|e| HsmError::BackendError(format!("connect to {serial_str}: {e}")))
+    }
+
+    fn has_object(
+        client: &yubihsm::Client,
+        id: yubihsm::object::Id,
+        obj_type: yubihsm::object::Type,
+    ) -> bool {
+        client.get_object_info(id, obj_type).is_ok()
+    }
+}
+
+impl HsmBackup for YubiHsmBackupImpl {
+    fn enumerate_backup_targets(&self) -> Result<Vec<BackupTarget>> {
+        let serials = yubihsm::connector::usb::Devices::serial_numbers()
+            .map_err(|e| HsmError::BackendError(format!("USB enumeration: {e}")))?;
+
+        let mut targets = Vec::with_capacity(serials.len());
+        for serial in serials {
+            let serial_str = format!("{serial}");
+
+            let cfg = yubihsm::UsbConfig {
+                serial: Some(serial),
+                ..Default::default()
+            };
+
+            // Try factory-default auth to probe the device.
+            let connector = yubihsm::Connector::usb(&cfg);
+            let default_creds = yubihsm::Credentials::from_password(
+                DEFAULT_AUTH_KEY_ID,
+                DEFAULT_AUTH_PASSWORD.as_bytes(),
+            );
+
+            let (description, needs_bootstrap, has_wrap, has_signing) =
+                match yubihsm::Client::open(connector, default_creds, false) {
+                    Ok(client) => {
+                        let fw = match client.device_info() {
+                            Ok(info) => format!(
+                                "YubiHSM2 fw {}.{}.{}",
+                                info.major_version, info.minor_version, info.build_version
+                            ),
+                            Err(_) => "YubiHSM2".to_string(),
+                        };
+                        let has_wrap =
+                            Self::has_object(&client, WRAP_KEY_ID, yubihsm::object::Type::WrapKey);
+                        let has_signing = Self::has_object(
+                            &client,
+                            SIGNING_KEY_ID,
+                            yubihsm::object::Type::AsymmetricKey,
+                        );
+                        (fw, true, has_wrap, has_signing)
+                    }
+                    Err(_) => {
+                        // Can't open with default — device is bootstrapped.
+                        ("YubiHSM2 (bootstrapped)".to_string(), false, false, false)
+                    }
+                };
+
+            targets.push(BackupTarget {
+                identifier: serial_str,
+                description,
+                needs_bootstrap,
+                has_wrap_key: has_wrap,
+                has_signing_key: has_signing,
+            });
+        }
+
+        Ok(targets)
+    }
+
+    fn pair_devices(&self, src: &str, dst: &str, pin: &SecretString) -> Result<String> {
+        let client_a = Self::open_client(src, pin)?;
+        let client_b = Self::open_client(dst, pin)?;
+
+        // Generate a fresh AES-256-CCM wrap key.
+        let mut key_bytes = [0u8; 32];
+        getrandom::getrandom(&mut key_bytes)
+            .map_err(|e| HsmError::BackendError(format!("getrandom: {e}")))?;
+
+        let label_a = yubihsm::object::Label::from_bytes(b"anodize-wrap")
+            .map_err(|e| HsmError::BackendError(format!("label: {e}")))?;
+        let label_b = yubihsm::object::Label::from_bytes(b"anodize-wrap")
+            .map_err(|e| HsmError::BackendError(format!("label: {e}")))?;
+
+        let wrap_caps = yubihsm::Capability::EXPORT_WRAPPED
+            | yubihsm::Capability::IMPORT_WRAPPED
+            | yubihsm::Capability::WRAP_DATA
+            | yubihsm::Capability::UNWRAP_DATA;
+
+        // Remove any existing wrap key first.
+        let _ = client_a.delete_object(WRAP_KEY_ID, yubihsm::object::Type::WrapKey);
+        let _ = client_b.delete_object(WRAP_KEY_ID, yubihsm::object::Type::WrapKey);
+
+        client_a
+            .put_wrap_key(
+                WRAP_KEY_ID,
+                label_a,
+                yubihsm::Domain::all(),
+                wrap_caps,
+                yubihsm::Capability::all(),
+                yubihsm::wrap::Algorithm::Aes256Ccm,
+                key_bytes.to_vec(),
+            )
+            .map_err(|e| HsmError::BackendError(format!("put_wrap_key on {src}: {e}")))?;
+
+        client_b
+            .put_wrap_key(
+                WRAP_KEY_ID,
+                label_b,
+                yubihsm::Domain::all(),
+                wrap_caps,
+                yubihsm::Capability::all(),
+                yubihsm::wrap::Algorithm::Aes256Ccm,
+                key_bytes.to_vec(),
+            )
+            .map_err(|e| HsmError::BackendError(format!("put_wrap_key on {dst}: {e}")))?;
+
+        // Zeroize the raw key material.
+        key_bytes.fill(0);
+
+        tracing::info!(
+            src,
+            dst,
+            wrap_key_id = WRAP_KEY_ID,
+            "YubiHSM backup: devices paired"
+        );
+        Ok(format!("0x{WRAP_KEY_ID:04X}"))
+    }
+
+    fn backup_key(
+        &self,
+        src: &str,
+        dst: &str,
+        pin: &SecretString,
+        _key_id: &str,
+    ) -> Result<BackupResult> {
+        let client_src = Self::open_client(src, pin)?;
+        let client_dst = Self::open_client(dst, pin)?;
+
+        // 1. Get public key from source before export.
+        let pubkey_src = client_src
+            .get_public_key(SIGNING_KEY_ID)
+            .map_err(|e| HsmError::BackendError(format!("get_public_key on {src}: {e}")))?;
+
+        // 2. Export-wrapped from source.
+        let wrapped = client_src
+            .export_wrapped(
+                WRAP_KEY_ID,
+                yubihsm::object::Type::AsymmetricKey,
+                SIGNING_KEY_ID,
+            )
+            .map_err(|e| HsmError::BackendError(format!("export_wrapped on {src}: {e}")))?;
+
+        // 3. Clear any existing key at the target slot on dest.
+        let _ = client_dst.delete_object(SIGNING_KEY_ID, yubihsm::object::Type::AsymmetricKey);
+
+        // 4. Import-wrapped into dest.
+        client_dst
+            .import_wrapped(WRAP_KEY_ID, wrapped)
+            .map_err(|e| HsmError::BackendError(format!("import_wrapped on {dst}: {e}")))?;
+
+        // 5. Verify public keys match.
+        let pubkey_dst = client_dst
+            .get_public_key(SIGNING_KEY_ID)
+            .map_err(|e| HsmError::BackendError(format!("get_public_key on {dst}: {e}")))?;
+
+        let keys_match = pubkey_src.as_ref() == pubkey_dst.as_ref();
+
+        tracing::info!(
+            src,
+            dst,
+            keys_match,
+            key_id = format!("0x{SIGNING_KEY_ID:04X}"),
+            "YubiHSM backup: key transferred"
+        );
+
+        Ok(BackupResult {
+            source_id: src.to_string(),
+            dest_id: dst.to_string(),
+            key_id: format!("0x{SIGNING_KEY_ID:04X}"),
+            public_keys_match: keys_match,
+        })
     }
 }

@@ -78,6 +78,7 @@ dependencies = [
  "anodize-config",
  "anyhow",
  "cryptoki",
+ "getrandom 0.2.17",
  "p384",
  "secrecy",
  "sha2",

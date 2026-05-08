@@ -729,13 +729,50 @@ impl App {
                     1 => UtilScreen::SystemInfo,
                     2 => UtilScreen::AuditLog,
                     3 => UtilScreen::HsmBrowser,
+                    4 => UtilScreen::KeyBackup,
                     _ => UtilScreen::Menu,
                 };
-                // Gather data while borrowing self immutably, then assign
-                let lines = UtilitiesMode::gather_for_screen(screen, self);
-                self.utilities.screen = screen;
-                self.utilities.set_cached_lines(lines);
+                if screen == UtilScreen::KeyBackup {
+                    // Initialise backup FSM: discover devices.
+                    self.utilities.backup.reset();
+                    if let Some(ref profile) = self.profile {
+                        match anodize_hsm::create_backup(profile.hsm.backend) {
+                            Ok(backup_impl) => {
+                                self.utilities.backup.discover(backup_impl.as_ref());
+                            }
+                            Err(e) => {
+                                self.utilities.backup.phase =
+                                    crate::modes::utilities::backup::BackupPhase::Error(format!(
+                                        "Backend init: {e}"
+                                    ));
+                                self.utilities.backup.render_lines();
+                            }
+                        }
+                    } else {
+                        self.utilities.backup.phase =
+                            crate::modes::utilities::backup::BackupPhase::Error(
+                                "Profile not loaded.".into(),
+                            );
+                        self.utilities.backup.render_lines();
+                    }
+                    self.utilities.screen = screen;
+                } else {
+                    // Gather data while borrowing self immutably, then assign
+                    let lines = UtilitiesMode::gather_for_screen(screen, self);
+                    self.utilities.screen = screen;
+                    self.utilities.set_cached_lines(lines);
+                }
                 self.content_scroll = 0;
+            }
+
+            Action::BackupExecute => {
+                // Execute the confirmed backup/pair operation.
+                if let Some(ref profile) = self.profile {
+                    if let Ok(backup_impl) = anodize_hsm::create_backup(profile.hsm.backend) {
+                        let pin = secrecy::SecretString::new(self.pin_buf.clone());
+                        self.utilities.backup.execute(backup_impl.as_ref(), &pin);
+                    }
+                }
             }
 
             Action::ConfirmMigrateTarget => {
