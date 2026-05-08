@@ -38,38 +38,62 @@ impl YubiHsmBackend {
 
 impl HsmBackend for YubiHsmBackend {
     fn list_tokens(&self) -> Result<Vec<SlotTokenInfo>> {
-        // Probe whether any YubiHSM2 device is reachable by trying to
-        // connect with default credentials.  On success we fabricate a
-        // SlotTokenInfo (YubiHSM2 doesn't have a PKCS#11 slot model).
-        let connector = yubihsm::Connector::usb(&yubihsm::UsbConfig::default());
-        let creds = yubihsm::Credentials::from_password(
-            DEFAULT_AUTH_KEY_ID,
-            DEFAULT_AUTH_PASSWORD.as_bytes(),
-        );
+        // Enumerate connected YubiHSM2 devices by USB serial (no auth needed).
+        let serials = yubihsm::connector::usb::Devices::serial_numbers()
+            .map_err(|e| HsmError::BackendError(format!("USB enumerate: {e}")))?;
 
-        match yubihsm::Client::open(connector, creds, true) {
-            Ok(client) => {
-                let info = client
-                    .device_info()
-                    .map_err(|e| HsmError::BackendError(format!("device_info: {e}")))?;
-                Ok(vec![SlotTokenInfo {
-                    slot_id: 0,
-                    token_label: "YubiHSM2".to_string(),
-                    model: format!(
-                        "YubiHSM2 (fw {}.{}.{})",
-                        info.major_version, info.minor_version, info.build_version
-                    ),
-                    serial_number: format!("{}", info.serial_number),
-                    login_required: true,
-                    user_pin_initialized: false, // No pin concept in native mode
-                    user_pin_locked: false,
-                    min_pin_len: 0,
-                    max_pin_len: 0,
-                    token_initialized: true,
-                }])
-            }
-            Err(_) => Ok(vec![]),
+        if serials.is_empty() {
+            return Ok(vec![]);
         }
+
+        let mut tokens = Vec::new();
+        for (i, serial) in serials.iter().enumerate() {
+            let serial_str = format!("{serial}");
+            // Try connecting to get firmware version.
+            // First try factory default auth, then a dummy connect just for device_info.
+            let connector = yubihsm::Connector::usb(&yubihsm::UsbConfig {
+                serial: Some(*serial),
+                ..Default::default()
+            });
+            let creds = yubihsm::Credentials::from_password(
+                DEFAULT_AUTH_KEY_ID,
+                DEFAULT_AUTH_PASSWORD.as_bytes(),
+            );
+
+            let (model, needs_bootstrap) = match yubihsm::Client::open(connector, creds, true) {
+                Ok(client) => {
+                    let info = client.device_info().ok();
+                    let fw = info
+                        .map(|i| {
+                            format!(
+                                "YubiHSM2 (fw {}.{}.{})",
+                                i.major_version, i.minor_version, i.build_version
+                            )
+                        })
+                        .unwrap_or_else(|| "YubiHSM2".to_string());
+                    (fw, true) // factory default auth works → not yet bootstrapped
+                }
+                Err(_) => {
+                    // Factory auth failed — device already bootstrapped with anodize key.
+                    ("YubiHSM2 (bootstrapped)".to_string(), false)
+                }
+            };
+
+            tokens.push(SlotTokenInfo {
+                slot_id: i as u64,
+                token_label: "YubiHSM2".to_string(),
+                model,
+                serial_number: serial_str,
+                login_required: true,
+                user_pin_initialized: !needs_bootstrap,
+                user_pin_locked: false,
+                min_pin_len: 0,
+                max_pin_len: 0,
+                token_initialized: true,
+            });
+        }
+
+        Ok(tokens)
     }
 
     fn probe_token(&self, _label: &str) -> Result<bool> {
