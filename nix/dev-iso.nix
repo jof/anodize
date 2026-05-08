@@ -111,13 +111,14 @@ in
         set -euo pipefail
         share=/run/anodize/share
 
-        # Wait for the 9p mount (system mount unit, can't depend from user service).
-        # Note: mountpoint is from util-linux and not in the service's PATH,
-        # so use /proc/mounts instead.
+        # Wait for the share directory to be ready.
+        # Under QEMU this is a 9p virtio mount; on bare metal it's a plain
+        # tmpfs directory created by tmpfiles.rules.  Either way, we just
+        # need it to exist and be writable.
         for i in $(seq 1 30); do
-          if grep -q " $share " /proc/mounts 2>/dev/null; then break; fi
+          if [ -d "$share" ] && [ -w "$share" ]; then break; fi
           if [ "$i" -eq 30 ]; then
-            echo "ERROR: 9p share not mounted at $share after 30s" >&2
+            echo "ERROR: share dir $share not writable after 30s" >&2
             exit 1
           fi
           sleep 1
@@ -173,9 +174,11 @@ in
   };
 
   # Mount point for the virtio-9p host share (dev-disc/ in the repo).
+  # On bare metal the 9p device doesn't exist; nofail + short timeout let
+  # boot proceed — the tmpfiles rule above already created the directory.
   fileSystems."/run/anodize/share" = {
     device  = "dev-disc";
     fsType  = "9p";
-    options = [ "trans=virtio" "version=9p2000.L" "msize=104857600" "nofail" "access=any" ];
+    options = [ "trans=virtio" "version=9p2000.L" "msize=104857600" "nofail" "x-systemd.device-timeout=5s" "access=any" ];
   };
 }
