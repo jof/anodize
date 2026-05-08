@@ -274,27 +274,40 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
             if track.blank {
                 break; // reached the blank/invisible track — no more data
             }
-            // CD media reports a 150-sector pregap before the data area.
-            // When start_lba wraps (>= 0x8000_0000), it's a negative CD-style
-            // offset; skip to the data area.  BD-R/DVD start at 0 with no gap.
-            let (read_lba, read_sectors_n) = if track.start_lba >= 0x8000_0000 {
+            // The track may have a 150-sector pregap (CD Red Book style)
+            // before the actual ISO data.  Try reading from the data area
+            // first (skip pregap), then fall back to reading from track start.
+            let data_sectors = track.size_sectors.max(1) as usize;
+            let candidates: &[(u32, usize)] = if track.start_lba >= 0x8000_0000 {
+                // Negative LBA (e.g. -150): data starts at absolute LBA 0
                 let gap = 0u32.wrapping_sub(track.start_lba);
-                (0u32, track.size_sectors.saturating_sub(gap).max(1) as usize)
+                &[(0u32, data_sectors.saturating_sub(gap as usize).max(1))]
+            } else if data_sectors > 150 {
+                // Positive LBA: try with 150-sector pregap skip, then without
+                &[
+                    (track.start_lba + 150, data_sectors - 150),
+                    (track.start_lba, data_sectors),
+                ]
             } else {
-                (track.start_lba, track.size_sectors.max(1) as usize)
+                &[(track.start_lba, data_sectors)]
             };
-            let mut image = vec![0u8; read_sectors_n * iso9660::SECTOR];
-            if let Err(e) = read_sectors(&sg, read_lba, &mut image) {
-                tracing::warn!(
-                    "cannot read session {} at LBA {}: {e}",
-                    track_num,
-                    read_lba
-                );
-                continue;
+            let mut parsed = false;
+            for &(read_lba, read_n) in candidates {
+                let mut image = vec![0u8; read_n * iso9660::SECTOR];
+                if read_sectors(&sg, read_lba, &mut image).is_err() {
+                    continue;
+                }
+                match iso9660::parse_iso(&image) {
+                    Ok(entries) => {
+                        sessions.extend(entries);
+                        parsed = true;
+                        break;
+                    }
+                    Err(_) => continue,
+                }
             }
-            match iso9660::parse_iso(&image) {
-                Ok(entries) => sessions.extend(entries),
-                Err(e) => tracing::warn!("cannot parse ISO for session {track_num}: {e}"),
+            if !parsed {
+                tracing::warn!("cannot parse ISO for track {track_num}");
             }
         }
         sessions.sort_by(|a, b| a.dir_name.cmp(&b.dir_name));
