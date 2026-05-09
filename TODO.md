@@ -25,20 +25,6 @@ second open, confirming the first session was committed and the disc remained
 appendable. Full end-to-end test (two complete session writes in one ceremony run)
 is blocked by the state machine bug above.
 
-## 8. Dev disc swap automation for MigrateDisc testing
-
-`MigrateDisc` prompts "Insert Blank Target Disc."  In the dev/QEMU environment
-the operator must swap the cdemu BD-R image.  Currently this requires manual SSH
-+ gdbus commands.  Add either:
-
-- A `make cdemu-swap-disc` target, or
-- A helper script callable from the debug SSH session
-
-that stops cdemu, moves old ISO files aside, and restarts with a fresh blank
-BD-R image.
-
-No code dependencies; can be done in parallel with the above.
-
 ## 9. Full end-to-end ceremony test
 
 Depends on **all** of the above plus the existing "cdemu multi-session append"
