@@ -267,9 +267,14 @@ impl App {
             return Action::Noop; // dialog stays open
         }
 
-        // Ctrl+C always quits
+        // Ctrl+C: quit with confirmation (blocked during ephemeral ceremony phases)
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            return Action::Quit;
+            if self.mode == Mode::Ceremony && self.ceremony.holds_ephemeral_state() {
+                self.set_status("Ctrl+C blocked: press Esc to go back to the menu first.");
+                return Action::Noop;
+            }
+            self.show_quit_confirm();
+            return Action::Noop;
         }
 
         // Ctrl+L clears the screen
@@ -282,7 +287,6 @@ impl App {
 
         if !in_text_entry {
             match key.code {
-                KeyCode::Char('q') | KeyCode::Char('Q') => return Action::Quit,
                 KeyCode::Char('l') | KeyCode::Char('L') => {
                     self.log_view = !self.log_view;
                     if self.log_view {
@@ -1016,6 +1020,12 @@ impl App {
                 self.do_validate_export_report();
             }
 
+            Action::CeremonyCancel => {
+                self.current_op = None;
+                self.ceremony.state = CeremonyPhase::OperationSelect;
+                self.set_status("Cancelled.");
+            }
+
             Action::ConfirmMigrateTarget => {
                 let ready = self.skip_disc
                     || (self.disc.optical_dev.is_some()
@@ -1156,5 +1166,14 @@ impl App {
     /// Show a two-key confirmation dialog for a critical action.
     pub fn show_confirm(&mut self, title: impl Into<String>, body: Vec<String>, action: Action) {
         self.confirm_dialog = Some(ConfirmDialog::new(title, body, action));
+    }
+
+    /// Show a quit-confirmation dialog (two-key: [1] then [Enter]).
+    fn show_quit_confirm(&mut self) {
+        self.show_confirm(
+            "Quit Anodize?",
+            vec!["All unsaved state will be lost.".into()],
+            Action::Quit,
+        );
     }
 }

@@ -74,6 +74,8 @@ pub enum Action {
     // Disc validation
     ValidateRunHsmCheck,
     ValidateExportReport,
+    // Generic cancel: return to OperationSelect from any ceremony phase
+    CeremonyCancel,
 }
 
 /// Top-level application modes, switchable via F1/F2/F3.

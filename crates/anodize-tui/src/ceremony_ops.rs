@@ -2893,4 +2893,170 @@ mod tests {
         assert_eq!(app.data.migrate_total_bytes, 0);
         assert!(app.data.migrate_source_fingerprint.is_none());
     }
+
+    // ── Quit-guard tests ────────────────────────────────────────────────
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    #[test]
+    fn q_never_quits() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        // Setup mode
+        let action = app.handle_key_event(key(KeyCode::Char('q')));
+        assert!(
+            !matches!(action, Action::Quit),
+            "'q' should not produce Quit in Setup mode"
+        );
+
+        // Ceremony OperationSelect
+        app.mode = crate::action::Mode::Ceremony;
+        app.ceremony.state = CeremonyPhase::OperationSelect;
+        let action = app.handle_key_event(key(KeyCode::Char('q')));
+        assert!(
+            !matches!(action, Action::Quit),
+            "'q' should not produce Quit in OperationSelect"
+        );
+
+        // Ceremony ephemeral phase
+        app.ceremony.state =
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::CsrPreview);
+        let action = app.handle_key_event(key(KeyCode::Char('q')));
+        assert!(
+            !matches!(action, Action::Quit),
+            "'q' should not produce Quit in CsrPreview"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_shows_confirm_in_safe_phase() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.mode = crate::action::Mode::Ceremony;
+        app.ceremony.state = CeremonyPhase::OperationSelect;
+
+        let action = app.handle_key_event(ctrl_c());
+
+        assert!(
+            matches!(action, Action::Noop),
+            "Ctrl+C should return Noop (dialog opened)"
+        );
+        assert!(
+            app.confirm_dialog.is_some(),
+            "Ctrl+C should open quit confirmation dialog"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_blocked_in_ephemeral_phase() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.mode = crate::action::Mode::Ceremony;
+        app.ceremony.state =
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::ShareReveal);
+
+        let action = app.handle_key_event(ctrl_c());
+
+        assert!(
+            matches!(action, Action::Noop),
+            "Ctrl+C should return Noop in ephemeral phase"
+        );
+        assert!(
+            app.confirm_dialog.is_none(),
+            "Ctrl+C should NOT open dialog in ephemeral phase"
+        );
+    }
+
+    #[test]
+    fn esc_cancels_from_csr_preview() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.mode = crate::action::Mode::Ceremony;
+        app.setup_complete = true;
+        app.current_op = Some(Operation::SignCsr);
+        app.ceremony.state =
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::CsrPreview);
+
+        let action = app.handle_key_event(key(KeyCode::Esc));
+        app.update(action);
+
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::OperationSelect,
+            "Esc in CsrPreview should return to OperationSelect"
+        );
+        assert!(app.current_op.is_none());
+    }
+
+    #[test]
+    fn esc_cancels_from_clock_reconfirm() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.mode = crate::action::Mode::Ceremony;
+        app.setup_complete = true;
+        app.current_op = Some(Operation::SignCsr);
+        app.ceremony.state = CeremonyPhase::ClockReconfirm;
+
+        let action = app.handle_key_event(key(KeyCode::Esc));
+        app.update(action);
+
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::OperationSelect,
+            "Esc in ClockReconfirm should return to OperationSelect"
+        );
+    }
+
+    #[test]
+    fn holds_ephemeral_state_correct() {
+        use crate::modes::ceremony::{CeremonyMode, CeremonyPhase, PlanningState};
+        let mut cm = CeremonyMode::new();
+
+        cm.state = CeremonyPhase::OperationSelect;
+        assert!(!cm.holds_ephemeral_state(), "OperationSelect is safe");
+
+        cm.state = CeremonyPhase::Done;
+        assert!(!cm.holds_ephemeral_state(), "Done is safe");
+
+        cm.state = CeremonyPhase::DiscDone;
+        assert!(!cm.holds_ephemeral_state(), "DiscDone is safe");
+
+        cm.state = CeremonyPhase::Planning(PlanningState::ShareReveal);
+        assert!(cm.holds_ephemeral_state(), "ShareReveal is ephemeral");
+
+        cm.state = CeremonyPhase::Commit;
+        assert!(cm.holds_ephemeral_state(), "Commit is ephemeral");
+
+        cm.state = CeremonyPhase::Quorum;
+        assert!(cm.holds_ephemeral_state(), "Quorum is ephemeral");
+
+        cm.state = CeremonyPhase::BurningDisc;
+        assert!(cm.holds_ephemeral_state(), "BurningDisc is ephemeral");
+    }
+
+    #[test]
+    fn ceremony_cancel_resets_state() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.current_op = Some(Operation::RevokeCert);
+        app.ceremony.state =
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::RevokePreview);
+
+        app.update(Action::CeremonyCancel);
+
+        assert_eq!(app.ceremony.state, CeremonyPhase::OperationSelect);
+        assert!(app.current_op.is_none());
+    }
 }

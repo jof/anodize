@@ -108,6 +108,15 @@ impl CeremonyMode {
         self.state == CeremonyPhase::BurningDisc
     }
 
+    /// Whether the current phase holds ephemeral/unrecoverable state in RAM.
+    /// Quit is blocked entirely during these phases.
+    pub fn holds_ephemeral_state(&self) -> bool {
+        !matches!(
+            self.state,
+            CeremonyPhase::OperationSelect | CeremonyPhase::Done | CeremonyPhase::DiscDone
+        )
+    }
+
     pub fn set_state_csr_preview(&mut self) {
         self.state = CeremonyPhase::Planning(PlanningState::CsrPreview);
     }
@@ -344,7 +353,7 @@ impl CeremonyMode {
                     ));
                 }
                 lines.push(String::new());
-                lines.push("  [q]  Cancel".into());
+                lines.push("  [Esc]  Cancel".into());
                 lines
             }
 
@@ -377,7 +386,7 @@ impl CeremonyMode {
                 lines.push("  The CSR DER bytes are recorded in the intent audit log.".into());
                 lines.push(String::new());
                 lines.push("  [1]  Sign CSR and write to disc".into());
-                lines.push("  [q]  Cancel".into());
+                lines.push("  [Esc]  Cancel".into());
                 lines
             }
 
@@ -410,7 +419,7 @@ impl CeremonyMode {
                 lines.push("  Compare this fingerprint against your paper checklist.".into());
                 lines.push(String::new());
                 lines.push("  [1]  Proceed to disc write".into());
-                lines.push("  [q]  Abort".into());
+                lines.push("  [Esc]  Abort".into());
                 lines
             }
 
@@ -506,7 +515,7 @@ impl CeremonyMode {
                 }
                 lines.push(String::new());
                 lines.push("  [1]  Sign CRL and write to disc".into());
-                lines.push("  [q]  Cancel".into());
+                lines.push("  [Esc]  Cancel".into());
                 lines
             }
 
@@ -532,7 +541,7 @@ impl CeremonyMode {
                 }
                 lines.push(String::new());
                 lines.push("  [1]  Sign CRL and write to disc".into());
-                lines.push("  [q]  Cancel".into());
+                lines.push("  [Esc]  Cancel".into());
                 lines
             }
 
@@ -567,12 +576,13 @@ impl CeremonyMode {
                 lines.push(String::new());
                 match app.current_op {
                     Some(Operation::MigrateDisc) => {
-                        lines.push("  [q]  Quit (migration complete; no USB export)".into());
+                        lines.push("  [Ctrl+C]  Quit (migration complete; no USB export)".into());
                     }
                     _ => {
                         lines.push("  [1]  Copy artifacts to shuttle".into());
                         lines.push(
-                            "  [q]  Quit without shuttle copy (disc is the primary record)".into(),
+                            "  [Ctrl+C]  Quit without shuttle copy (disc is the primary record)"
+                                .into(),
                         );
                     }
                 }
@@ -685,7 +695,7 @@ impl CeremonyMode {
                     "  Verify chain is OK before proceeding.".into(),
                     String::new(),
                     "  [1]  Eject old disc, insert blank new disc".into(),
-                    "  [q]  Abort".into(),
+                    "  [Esc]  Abort".into(),
                 ]
             }
 
@@ -716,7 +726,7 @@ impl CeremonyMode {
                     "  If the clock is wrong, quit and correct it before proceeding.".into(),
                     String::new(),
                     "  [1]  Clock is correct \u{2014} proceed with signing".into(),
-                    "  [q]  Abort".into(),
+                    "  [Esc]  Abort".into(),
                 ]
             }
 
@@ -733,7 +743,7 @@ impl CeremonyMode {
                     disc_info,
                     String::new(),
                     "  [1]  Write all sessions to new disc".into(),
-                    "  [q]  Abort".into(),
+                    "  [Esc]  Abort".into(),
                 ]
             }
 
@@ -778,10 +788,10 @@ impl CeremonyMode {
                         lines.push("  [1]  Run HSM audit log cross-check (requires quorum)".into());
                     }
                     lines.push("  [2]  Export VALIDATE.LOG to shuttle".into());
-                    lines.push("  [q]  Done".into());
+                    lines.push("  [Esc]  Done".into());
                 } else {
                     lines.push("  [2]  Export VALIDATE.LOG to shuttle".into());
-                    lines.push("  [q]  Done".into());
+                    lines.push("  [Esc]  Done".into());
                 }
                 lines
             }
@@ -801,7 +811,7 @@ impl CeremonyMode {
                     "  Remove and store both disc and USB separately.".into(),
                     "  The HSM holds the private key; no key material was written to disk.".into(),
                     String::new(),
-                    "  [q]  Quit".into(),
+                    "  [Ctrl+C]  Quit".into(),
                 ]
             }
         }
@@ -837,33 +847,31 @@ impl Component for CeremonyMode {
                 _ => Action::Noop,
             },
 
-            CeremonyPhase::Planning(PlanningState::LoadCsr) => {
-                if let KeyCode::Char(c) = key.code {
+            CeremonyPhase::Planning(PlanningState::LoadCsr) => match key.code {
+                KeyCode::Esc => Action::CeremonyCancel,
+                KeyCode::Char(c) => {
                     if let Some(d) = c.to_digit(10) {
                         let idx = d as usize;
                         if idx >= 1 {
                             return Action::SelectCertProfile(idx - 1);
                         }
                     }
-                }
-                Action::Noop
-            }
-
-            CeremonyPhase::Planning(PlanningState::CsrPreview) => {
-                if key.code == KeyCode::Char('1') {
-                    Action::ConfirmCsrSign
-                } else {
                     Action::Noop
                 }
-            }
+                _ => Action::Noop,
+            },
 
-            CeremonyPhase::Execute => {
-                if key.code == KeyCode::Char('1') {
-                    Action::ConfirmCertBurn
-                } else {
-                    Action::Noop
-                }
-            }
+            CeremonyPhase::Planning(PlanningState::CsrPreview) => match key.code {
+                KeyCode::Char('1') => Action::ConfirmCsrSign,
+                KeyCode::Esc => Action::CeremonyCancel,
+                _ => Action::Noop,
+            },
+
+            CeremonyPhase::Execute => match key.code {
+                KeyCode::Char('1') => Action::ConfirmCertBurn,
+                KeyCode::Esc => Action::CeremonyCancel,
+                _ => Action::Noop,
+            },
 
             CeremonyPhase::Planning(PlanningState::RevokeSelect) => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => Action::RevokeSelectUp,
@@ -882,21 +890,17 @@ impl Component for CeremonyMode {
                 _ => Action::Noop,
             },
 
-            CeremonyPhase::Planning(PlanningState::RevokePreview) => {
-                if key.code == KeyCode::Char('1') {
-                    Action::ConfirmCrlSign
-                } else {
-                    Action::Noop
-                }
-            }
+            CeremonyPhase::Planning(PlanningState::RevokePreview) => match key.code {
+                KeyCode::Char('1') => Action::ConfirmCrlSign,
+                KeyCode::Esc => Action::CeremonyCancel,
+                _ => Action::Noop,
+            },
 
-            CeremonyPhase::Planning(PlanningState::CrlPreview) => {
-                if key.code == KeyCode::Char('1') {
-                    Action::ConfirmCrlSign
-                } else {
-                    Action::Noop
-                }
-            }
+            CeremonyPhase::Planning(PlanningState::CrlPreview) => match key.code {
+                KeyCode::Char('1') => Action::ConfirmCrlSign,
+                KeyCode::Esc => Action::CeremonyCancel,
+                _ => Action::Noop,
+            },
 
             CeremonyPhase::BurningDisc => Action::Noop, // auto-advance on burn
 
@@ -908,21 +912,17 @@ impl Component for CeremonyMode {
                 }
             }
 
-            CeremonyPhase::Planning(PlanningState::MigrateConfirm) => {
-                if key.code == KeyCode::Char('1') {
-                    Action::ConfirmMigrate
-                } else {
-                    Action::Noop
-                }
-            }
+            CeremonyPhase::Planning(PlanningState::MigrateConfirm) => match key.code {
+                KeyCode::Char('1') => Action::ConfirmMigrate,
+                KeyCode::Esc => Action::CeremonyCancel,
+                _ => Action::Noop,
+            },
 
-            CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => {
-                if key.code == KeyCode::Char('1') {
-                    Action::ConfirmMigrateTarget
-                } else {
-                    Action::Noop
-                }
-            }
+            CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => match key.code {
+                KeyCode::Char('1') => Action::ConfirmMigrateTarget,
+                KeyCode::Esc => Action::CeremonyCancel,
+                _ => Action::Noop,
+            },
 
             CeremonyPhase::Planning(PlanningState::CustodianSetup) => Action::Noop, // handled by CustodianSetup component
 
@@ -944,23 +944,23 @@ impl Component for CeremonyMode {
             CeremonyPhase::Planning(PlanningState::ValidateReport) => match key.code {
                 KeyCode::Char('1') => Action::ValidateRunHsmCheck,
                 KeyCode::Char('2') => Action::ValidateExportReport,
+                KeyCode::Esc => Action::CeremonyCancel,
                 _ => Action::Noop,
             },
 
             CeremonyPhase::Planning(PlanningState::ValidateHsmResult) => match key.code {
                 KeyCode::Char('2') => Action::ValidateExportReport,
+                KeyCode::Esc => Action::CeremonyCancel,
                 _ => Action::Noop,
             },
 
             CeremonyPhase::Quorum => Action::Noop, // handled by ShareInput component
 
-            CeremonyPhase::ClockReconfirm => {
-                if key.code == KeyCode::Char('1') {
-                    Action::ReconfirmClock
-                } else {
-                    Action::Noop
-                }
-            }
+            CeremonyPhase::ClockReconfirm => match key.code {
+                KeyCode::Char('1') => Action::ReconfirmClock,
+                KeyCode::Esc => Action::CeremonyCancel,
+                _ => Action::Noop,
+            },
 
             CeremonyPhase::Done => Action::Noop,
         }
