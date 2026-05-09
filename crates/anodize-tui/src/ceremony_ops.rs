@@ -511,18 +511,13 @@ impl App {
         };
 
         // Verify against pin_verify_hash
-        let pin_hash = {
-            use sha2::{Digest, Sha256};
-            hex::encode(Sha256::digest(&pin_bytes))
-        };
         let expected = self
             .disc
             .session_state
             .as_ref()
             .map(|s| s.sss.pin_verify_hash.as_str())
             .unwrap_or("");
-
-        if pin_hash != expected {
+        if !anodize_sss::verify_pin_hash(&pin_bytes, expected) {
             self.set_status("PIN verify hash mismatch — shares may be corrupted.");
             self.ceremony.state = CeremonyPhase::OperationSelect;
             self.current_op = None;
@@ -666,18 +661,13 @@ impl App {
         };
 
         // Verify against pin_verify_hash.
-        let pin_hash = {
-            use sha2::{Digest, Sha256};
-            hex::encode(Sha256::digest(&pin_bytes))
-        };
         let expected = self
             .disc
             .session_state
             .as_ref()
             .map(|s| s.sss.pin_verify_hash.as_str())
             .unwrap_or("");
-
-        if pin_hash != expected {
+        if !anodize_sss::verify_pin_hash(&pin_bytes, expected) {
             self.set_status("PIN verify hash mismatch — shares may be corrupted.");
             self.ceremony.state = CeremonyPhase::OperationSelect;
             self.current_op = None;
@@ -773,12 +763,7 @@ impl App {
             share_commitments.push(hex::encode(commitment));
         }
 
-        let pin_verify_hash = {
-            use sha2::{Digest, Sha256};
-            let mut h = Sha256::new();
-            h.update(&pin_bytes);
-            hex::encode(h.finalize())
-        };
+        let pin_verify_hash = hex::encode(anodize_sss::pin_verify_hash(&pin_bytes));
 
         // Store the PIN hex for HSM init later (held in memory only)
         self.pin_buf = hex::encode(&pin_bytes);
@@ -864,18 +849,13 @@ impl App {
         };
 
         // Verify against pin_verify_hash
-        let pin_hash = {
-            use sha2::{Digest, Sha256};
-            hex::encode(Sha256::digest(&pin_bytes))
-        };
         let expected = self
             .disc
             .session_state
             .as_ref()
             .map(|s| s.sss.pin_verify_hash.as_str())
             .unwrap_or("");
-
-        if pin_hash != expected {
+        if !anodize_sss::verify_pin_hash(&pin_bytes, expected) {
             self.set_status("PIN verify hash mismatch — shares may be corrupted.");
             self.ceremony.state = CeremonyPhase::OperationSelect;
             self.current_op = None;

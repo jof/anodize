@@ -296,6 +296,11 @@ pub fn pin_verify_hash(pin: &[u8]) -> [u8; 32] {
     Sha256::digest(pin).into()
 }
 
+/// Check a reconstructed PIN against the hex-encoded hash stored in STATE.JSON.
+pub fn verify_pin_hash(pin: &[u8], expected_hex: &str) -> bool {
+    hex::encode(pin_verify_hash(pin)) == expected_hex
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

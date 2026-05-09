@@ -13,8 +13,7 @@ use std::path::PathBuf;
 use std::process;
 
 use anodize_config::state::SessionState;
-use anodize_sss::{reconstruct, verify_commitment, Share};
-use sha2::{Digest, Sha256};
+use anodize_sss::{reconstruct, verify_commitment, verify_pin_hash, Share};
 
 fn main() {
     let state_path = parse_args();
@@ -134,11 +133,8 @@ fn main() {
     };
 
     // Verify against pin_verify_hash.
-    let pin_hash = hex::encode(Sha256::digest(&pin_bytes));
-    if pin_hash != sss.pin_verify_hash {
+    if !verify_pin_hash(&pin_bytes, &sss.pin_verify_hash) {
         eprintln!("error: reconstructed PIN does not match pin_verify_hash");
-        eprintln!("  expected: {}", sss.pin_verify_hash);
-        eprintln!("  got:      {pin_hash}");
         eprintln!("Shares may be corrupted or from a different ceremony.");
         process::exit(1);
     }

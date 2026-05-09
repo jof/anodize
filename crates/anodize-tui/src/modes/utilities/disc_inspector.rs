@@ -644,8 +644,8 @@ pub fn gather_cert_detail_pub(
     }
 
     // Revocation status
-    let serial_val = serial_to_u64(&tbs.serial_number);
-    if let Some(serial_val) = serial_val {
+    let serial_val = crate::helpers::serial_to_u64(&tbs.serial_number);
+    if serial_val != 0 {
         if let Some(rev) = revocations.iter().find(|r| r.serial == serial_val) {
             let reason = rev.reason.as_deref().unwrap_or("unspecified");
             lines.push(format!(
@@ -679,17 +679,6 @@ fn format_time(t: &x509_cert::time::Time) -> String {
     format!("{t}")
 }
 
-fn serial_to_u64(sn: &x509_cert::serial_number::SerialNumber) -> Option<u64> {
-    let bytes = sn.as_bytes();
-    if bytes.len() > 8 {
-        return None;
-    }
-    let mut val = 0u64;
-    for &b in bytes {
-        val = val.checked_shl(8)?.checked_add(b as u64)?;
-    }
-    Some(val)
-}
 
 fn oid_name(oid: der::asn1::ObjectIdentifier) -> &'static str {
     match oid.to_string().as_str() {

@@ -220,7 +220,7 @@ pub fn gather_cert_list_from_sessions(
 }
 
 /// Convert an X.509 SerialNumber to u64. Returns 0 if it doesn't fit.
-fn serial_to_u64(sn: &x509_cert::serial_number::SerialNumber) -> u64 {
+pub fn serial_to_u64(sn: &x509_cert::serial_number::SerialNumber) -> u64 {
     let bytes = sn.as_bytes();
     if bytes.len() > 8 {
         return 0;
