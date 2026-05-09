@@ -35,6 +35,52 @@ pub use x509_cert::ext::pkix::CrlReason;
 
 const ECDSA_WITH_SHA256_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
 const ECDSA_WITH_SHA384_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3");
+const ECDSA_WITH_SHA512_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.4");
+
+const EC_PUBLIC_KEY_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+const SECP256R1_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
+const SECP384R1_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.132.0.34");
+
+/// EC curve identified from the SPKI algorithm parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EcCurve {
+    P256,
+    P384,
+}
+
+/// Hash algorithm identified from the signature algorithm OID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SigHash {
+    Sha256,
+    Sha384,
+    Sha512,
+}
+
+/// Extract the EC curve from a DER-encoded SubjectPublicKeyInfo.
+fn spki_curve(spki_der: &[u8]) -> Result<EcCurve, CaError> {
+    let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der)
+        .map_err(|_| CaError::CsrSignatureInvalid)?;
+    if spki.algorithm.oid != EC_PUBLIC_KEY_OID {
+        return Err(CaError::CsrAlgorithmUnsupported(
+            spki.algorithm.oid.to_string(),
+        ));
+    }
+    let params = spki
+        .algorithm
+        .parameters
+        .as_ref()
+        .ok_or_else(|| CaError::CsrAlgorithmUnsupported("missing EC parameters".into()))?;
+    let curve_oid: ObjectIdentifier = params
+        .decode_as()
+        .map_err(|_| CaError::CsrAlgorithmUnsupported("bad EC parameters".into()))?;
+    match curve_oid {
+        SECP256R1_OID => Ok(EcCurve::P256),
+        SECP384R1_OID => Ok(EcCurve::P384),
+        other => Err(CaError::CsrAlgorithmUnsupported(format!(
+            "unsupported curve {other}"
+        ))),
+    }
+}
 
 const ID_EXTENSION_REQ: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.9.14");
 
@@ -182,44 +228,57 @@ pub fn build_root_cert<H: Hsm>(
     Ok(builder.build::<DerSignature>()?)
 }
 
-/// Verify a CSR's self-signature, dispatching on the signature algorithm OID.
+/// Verify a CSR's self-signature, dispatching on (curve, hash) independently.
 ///
-/// Supported algorithms:
-/// - ecdsa-with-SHA256 (OID 1.2.840.10045.4.3.2) — P-256 key
-/// - ecdsa-with-SHA384 (OID 1.2.840.10045.4.3.3) — P-384 key
+/// The curve is determined from the SPKI algorithm parameters, and the hash
+/// from the outer signature algorithm OID. This supports any valid pairing
+/// (e.g. P-384 key with SHA-256 signature) rather than assuming OID ↔ curve.
 ///
-/// The CA output is always P-384/SHA-384, but we accept CSRs from subordinate
-/// CAs that may use P-256/SHA-256 or other common combinations.
+/// Supported matrix:
+/// - P-256 × {SHA-256, SHA-384}
+/// - P-384 × {SHA-256, SHA-384, SHA-512}
 fn verify_csr_signature(csr: &CertReq) -> Result<(), CaError> {
+    use sha2::Digest;
+
     let tbs_bytes = csr.info.to_der()?;
     let spki_der = csr.info.public_key.to_der()?;
     let sig_bytes = csr
         .signature
         .as_bytes()
         .ok_or(CaError::CsrSignatureInvalid)?;
-    let alg_oid = csr.algorithm.oid;
 
-    match alg_oid {
-        ECDSA_WITH_SHA256_OID => {
-            use p256::ecdsa::signature::Verifier;
+    let hash = match csr.algorithm.oid {
+        ECDSA_WITH_SHA256_OID => SigHash::Sha256,
+        ECDSA_WITH_SHA384_OID => SigHash::Sha384,
+        ECDSA_WITH_SHA512_OID => SigHash::Sha512,
+        other => return Err(CaError::CsrAlgorithmUnsupported(other.to_string())),
+    };
+    let curve = spki_curve(&spki_der)?;
+
+    let prehash: Vec<u8> = match hash {
+        SigHash::Sha256 => sha2::Sha256::digest(&tbs_bytes).to_vec(),
+        SigHash::Sha384 => sha2::Sha384::digest(&tbs_bytes).to_vec(),
+        SigHash::Sha512 => sha2::Sha512::digest(&tbs_bytes).to_vec(),
+    };
+
+    match curve {
+        EcCurve::P256 => {
+            use p256::ecdsa::signature::hazmat::PrehashVerifier;
             let vk = p256::ecdsa::VerifyingKey::from_public_key_der(&spki_der)
                 .map_err(|_| CaError::CsrSignatureInvalid)?;
-            let sig = p256::ecdsa::DerSignature::try_from(sig_bytes)
+            let sig = p256::ecdsa::Signature::from_der(sig_bytes)
                 .map_err(|_| CaError::CsrSignatureInvalid)?;
-            vk.verify(&tbs_bytes, &sig)
+            vk.verify_prehash(&prehash, &sig)
                 .map_err(|_| CaError::CsrSignatureInvalid)?;
         }
-        ECDSA_WITH_SHA384_OID => {
-            use p384::ecdsa::signature::Verifier;
+        EcCurve::P384 => {
+            use p384::ecdsa::signature::hazmat::PrehashVerifier;
             let vk = p384::ecdsa::VerifyingKey::from_public_key_der(&spki_der)
                 .map_err(|_| CaError::CsrSignatureInvalid)?;
-            let sig = p384::ecdsa::DerSignature::try_from(sig_bytes)
+            let sig = p384::ecdsa::Signature::from_der(sig_bytes)
                 .map_err(|_| CaError::CsrSignatureInvalid)?;
-            vk.verify(&tbs_bytes, &sig)
+            vk.verify_prehash(&prehash, &sig)
                 .map_err(|_| CaError::CsrSignatureInvalid)?;
-        }
-        other => {
-            return Err(CaError::CsrAlgorithmUnsupported(other.to_string()));
         }
     }
 

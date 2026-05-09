@@ -10,6 +10,7 @@ getrandom.workspace = true
 x509-cert.workspace = true
 der.workspace = true
 spki.workspace = true
+sha2.workspace = true
 p256.workspace = true
 p384.workspace = true
 time.workspace = true
@@ -21,4 +22,5 @@ anodize-hsm = { path = "../anodize-hsm" }
 p256.workspace = true
 p384.workspace = true
 secrecy.workspace = true
+sha2.workspace = true
 anyhow.workspace = true

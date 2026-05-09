@@ -52,6 +52,7 @@ dependencies = [
  "p256",
  "p384",
  "secrecy",
+ "sha2",
  "spki",
  "thiserror 2.0.18",
  "time",

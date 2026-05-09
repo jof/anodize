@@ -34,8 +34,8 @@ serde_json     = "1"
 base64         = "0.22"
 zeroize        = { version = "1", features = ["derive"] }
 # ECDSA verification (tests + anodize-ca)
-p256           = { version = "0.13", features = ["ecdsa", "pkcs8"] }
-p384           = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+p256           = { version = "0.13", features = ["ecdsa", "pkcs8", "digest"] }
+p384           = { version = "0.13", features = ["ecdsa", "pkcs8", "digest"] }
 # Time (date arithmetic for validity periods)
 time           = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 # Error handling

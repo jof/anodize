@@ -428,5 +428,349 @@ fn build_p256_csr_der(subject_str: &str) -> Vec<u8> {
     csr.to_der().expect("encode CertReq")
 }
 
+/// A P-384 key signed with SHA-256 (the combination OpenSSL produces by default
+/// for `ecparam -name secp384r1`) should be accepted.
+#[test]
+fn sign_csr_p384_sha256_accepted() {
+    let module = match softhsm_env() {
+        Some(m) => m,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE not set");
+            return;
+        }
+    };
+
+    init_test_token("ca-p384sha256-test");
+    let hsm = Pkcs11Hsm::new(&module, "ca-p384sha256-test").expect("open session");
+    let mut actor = HsmActor::spawn(Box::new(hsm));
+    let pin = secrecy::SecretString::new("1234".to_string());
+    actor.login(&pin).expect("login");
+
+    let root_key = actor
+        .generate_keypair("root-key", KeySpec::EcdsaP384)
+        .expect("generate root keypair");
+    let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
+    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
+        Ok(c) => c,
+        Err(e) => panic!("root cert: {e}"),
+    };
+
+    let csr_der = build_p384_sha256_csr_der("CN=P384-SHA256 Intermediate,O=Test Org,C=US");
+
+    let int_cert =
+        sign_intermediate_csr(&root_signer, &root_cert, &csr_der, Some(0), 1825, None, &[])
+            .expect("sign P-384/SHA-256 CSR");
+
+    let int_der = int_cert.to_der().expect("encode intermediate cert DER");
+    let decoded =
+        x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
+    assert_eq!(
+        decoded.tbs_certificate.issuer,
+        root_cert.tbs_certificate.subject
+    );
+
+    println!(
+        "sign_csr_p384_sha256_accepted: OK ({} bytes intermediate cert DER)",
+        int_der.len()
+    );
+}
+
+/// Build a P-384 key / ecdsa-with-SHA256 CSR DER for testing.
+fn build_p384_sha256_csr_der(subject_str: &str) -> Vec<u8> {
+    use der::{Decode, Encode};
+    use p384::ecdsa::signature::hazmat::PrehashSigner;
+    use p384::ecdsa::SigningKey;
+    use p384::pkcs8::EncodePublicKey;
+    use sha2::Digest;
+    use spki::AlgorithmIdentifierOwned;
+    use x509_cert::request::CertReqInfo;
+
+    let sk = SigningKey::random(&mut p384::elliptic_curve::rand_core::OsRng);
+    let vk = sk.verifying_key();
+    let spki_der = vk.to_public_key_der().expect("encode SPKI");
+    let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse SPKI");
+
+    let subject = x509_cert::name::Name::from_str(subject_str).unwrap();
+    let info = CertReqInfo {
+        version: x509_cert::request::Version::V1,
+        subject,
+        public_key: spki,
+        attributes: Default::default(),
+    };
+    let info_der = info.to_der().expect("encode CertReqInfo");
+
+    let digest = sha2::Sha256::digest(&info_der);
+    let sig: p384::ecdsa::Signature = sk.sign_prehash(&digest).expect("prehash sign");
+    let sig_bytes = sig.to_der();
+
+    let ecdsa_sha256_oid = der::oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
+    let alg = AlgorithmIdentifierOwned {
+        oid: ecdsa_sha256_oid,
+        parameters: None,
+    };
+
+    let csr = x509_cert::request::CertReq {
+        info,
+        algorithm: alg,
+        signature: der::asn1::BitString::from_bytes(sig_bytes.as_bytes()).expect("bitstring"),
+    };
+    csr.to_der().expect("encode CertReq")
+}
+
+/// A P-256 key signed with SHA-384 should be accepted.
+#[test]
+fn sign_csr_p256_sha384_accepted() {
+    let module = match softhsm_env() {
+        Some(m) => m,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE not set");
+            return;
+        }
+    };
+
+    init_test_token("ca-p256sha384-test");
+    let hsm = Pkcs11Hsm::new(&module, "ca-p256sha384-test").expect("open session");
+    let mut actor = HsmActor::spawn(Box::new(hsm));
+    let pin = secrecy::SecretString::new("1234".to_string());
+    actor.login(&pin).expect("login");
+
+    let root_key = actor
+        .generate_keypair("root-key", KeySpec::EcdsaP384)
+        .expect("generate root keypair");
+    let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
+    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
+        Ok(c) => c,
+        Err(e) => panic!("root cert: {e}"),
+    };
+
+    let csr_der = build_p256_sha384_csr_der("CN=P256-SHA384 Intermediate,O=Test Org,C=US");
+
+    let int_cert =
+        sign_intermediate_csr(&root_signer, &root_cert, &csr_der, Some(0), 1825, None, &[])
+            .expect("sign P-256/SHA-384 CSR");
+
+    let int_der = int_cert.to_der().expect("encode intermediate cert DER");
+    let decoded =
+        x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
+    assert_eq!(
+        decoded.tbs_certificate.issuer,
+        root_cert.tbs_certificate.subject
+    );
+
+    println!(
+        "sign_csr_p256_sha384_accepted: OK ({} bytes)",
+        int_der.len()
+    );
+}
+
+/// A P-384 key signed with SHA-512 should be accepted.
+#[test]
+fn sign_csr_p384_sha512_accepted() {
+    let module = match softhsm_env() {
+        Some(m) => m,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE not set");
+            return;
+        }
+    };
+
+    init_test_token("ca-p384sha512-test");
+    let hsm = Pkcs11Hsm::new(&module, "ca-p384sha512-test").expect("open session");
+    let mut actor = HsmActor::spawn(Box::new(hsm));
+    let pin = secrecy::SecretString::new("1234".to_string());
+    actor.login(&pin).expect("login");
+
+    let root_key = actor
+        .generate_keypair("root-key", KeySpec::EcdsaP384)
+        .expect("generate root keypair");
+    let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
+    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
+        Ok(c) => c,
+        Err(e) => panic!("root cert: {e}"),
+    };
+
+    let csr_der = build_p384_sha512_csr_der("CN=P384-SHA512 Intermediate,O=Test Org,C=US");
+
+    let int_cert =
+        sign_intermediate_csr(&root_signer, &root_cert, &csr_der, Some(0), 1825, None, &[])
+            .expect("sign P-384/SHA-512 CSR");
+
+    let int_der = int_cert.to_der().expect("encode intermediate cert DER");
+    let decoded =
+        x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
+    assert_eq!(
+        decoded.tbs_certificate.issuer,
+        root_cert.tbs_certificate.subject
+    );
+
+    println!(
+        "sign_csr_p384_sha512_accepted: OK ({} bytes)",
+        int_der.len()
+    );
+}
+
+/// A CSR with an unsupported signature algorithm OID should be rejected.
+#[test]
+fn sign_csr_unsupported_algorithm_rejected() {
+    let module = match softhsm_env() {
+        Some(m) => m,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE not set");
+            return;
+        }
+    };
+
+    init_test_token("ca-unsup-alg-test");
+    let hsm = Pkcs11Hsm::new(&module, "ca-unsup-alg-test").expect("open session");
+    let mut actor = HsmActor::spawn(Box::new(hsm));
+    let pin = secrecy::SecretString::new("1234".to_string());
+    actor.login(&pin).expect("login");
+
+    let root_key = actor
+        .generate_keypair("root-key", KeySpec::EcdsaP384)
+        .expect("generate root keypair");
+    let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
+    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
+        Ok(c) => c,
+        Err(e) => panic!("root cert: {e}"),
+    };
+
+    let csr_der = build_csr_with_bogus_alg("CN=Bogus,O=Test Org,C=US");
+
+    let result =
+        sign_intermediate_csr(&root_signer, &root_cert, &csr_der, Some(0), 1825, None, &[]);
+    assert!(
+        matches!(result, Err(CaError::CsrAlgorithmUnsupported(_))),
+        "expected CsrAlgorithmUnsupported, got: {:?}",
+        result
+    );
+
+    println!("sign_csr_unsupported_algorithm_rejected: OK");
+}
+
+/// Build a P-256 key / ecdsa-with-SHA384 CSR DER for testing.
+fn build_p256_sha384_csr_der(subject_str: &str) -> Vec<u8> {
+    use der::{Decode, Encode};
+    use p256::ecdsa::signature::hazmat::PrehashSigner;
+    use p256::ecdsa::SigningKey;
+    use p256::pkcs8::EncodePublicKey;
+    use sha2::Digest;
+    use spki::AlgorithmIdentifierOwned;
+    use x509_cert::request::CertReqInfo;
+
+    let sk = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let vk = sk.verifying_key();
+    let spki_der = vk.to_public_key_der().expect("encode SPKI");
+    let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse SPKI");
+
+    let subject = x509_cert::name::Name::from_str(subject_str).unwrap();
+    let info = CertReqInfo {
+        version: x509_cert::request::Version::V1,
+        subject,
+        public_key: spki,
+        attributes: Default::default(),
+    };
+    let info_der = info.to_der().expect("encode CertReqInfo");
+
+    let digest = sha2::Sha384::digest(&info_der);
+    let sig: p256::ecdsa::Signature = sk.sign_prehash(&digest).expect("prehash sign");
+    let sig_bytes = sig.to_der();
+
+    let ecdsa_sha384_oid = der::oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3");
+    let alg = AlgorithmIdentifierOwned {
+        oid: ecdsa_sha384_oid,
+        parameters: None,
+    };
+
+    let csr = x509_cert::request::CertReq {
+        info,
+        algorithm: alg,
+        signature: der::asn1::BitString::from_bytes(sig_bytes.as_bytes()).expect("bitstring"),
+    };
+    csr.to_der().expect("encode CertReq")
+}
+
+/// Build a P-384 key / ecdsa-with-SHA512 CSR DER for testing.
+fn build_p384_sha512_csr_der(subject_str: &str) -> Vec<u8> {
+    use der::{Decode, Encode};
+    use p384::ecdsa::signature::hazmat::PrehashSigner;
+    use p384::ecdsa::SigningKey;
+    use p384::pkcs8::EncodePublicKey;
+    use sha2::Digest;
+    use spki::AlgorithmIdentifierOwned;
+    use x509_cert::request::CertReqInfo;
+
+    let sk = SigningKey::random(&mut p384::elliptic_curve::rand_core::OsRng);
+    let vk = sk.verifying_key();
+    let spki_der = vk.to_public_key_der().expect("encode SPKI");
+    let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse SPKI");
+
+    let subject = x509_cert::name::Name::from_str(subject_str).unwrap();
+    let info = CertReqInfo {
+        version: x509_cert::request::Version::V1,
+        subject,
+        public_key: spki,
+        attributes: Default::default(),
+    };
+    let info_der = info.to_der().expect("encode CertReqInfo");
+
+    let digest = sha2::Sha512::digest(&info_der);
+    let sig: p384::ecdsa::Signature = sk.sign_prehash(&digest).expect("prehash sign");
+    let sig_bytes = sig.to_der();
+
+    let ecdsa_sha512_oid = der::oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.4");
+    let alg = AlgorithmIdentifierOwned {
+        oid: ecdsa_sha512_oid,
+        parameters: None,
+    };
+
+    let csr = x509_cert::request::CertReq {
+        info,
+        algorithm: alg,
+        signature: der::asn1::BitString::from_bytes(sig_bytes.as_bytes()).expect("bitstring"),
+    };
+    csr.to_der().expect("encode CertReq")
+}
+
+/// Build a CSR with a valid P-256 signature but a bogus algorithm OID.
+fn build_csr_with_bogus_alg(subject_str: &str) -> Vec<u8> {
+    use der::{Decode, Encode};
+    use p256::ecdsa::signature::Signer;
+    use p256::ecdsa::{DerSignature, SigningKey};
+    use p256::pkcs8::EncodePublicKey;
+    use spki::AlgorithmIdentifierOwned;
+    use x509_cert::request::CertReqInfo;
+
+    let sk = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let vk = sk.verifying_key();
+    let spki_der = vk.to_public_key_der().expect("encode SPKI");
+    let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse SPKI");
+
+    let subject = x509_cert::name::Name::from_str(subject_str).unwrap();
+    let info = CertReqInfo {
+        version: x509_cert::request::Version::V1,
+        subject,
+        public_key: spki,
+        attributes: Default::default(),
+    };
+    let info_der = info.to_der().expect("encode CertReqInfo");
+    let sig: DerSignature = sk.sign(&info_der);
+    let sig_bytes = sig.to_bytes();
+
+    // Ed25519 OID — not supported
+    let bogus_oid = der::oid::ObjectIdentifier::new_unwrap("1.3.101.112");
+    let alg = AlgorithmIdentifierOwned {
+        oid: bogus_oid,
+        parameters: None,
+    };
+
+    let csr = x509_cert::request::CertReq {
+        info,
+        algorithm: alg,
+        signature: der::asn1::BitString::from_bytes(&sig_bytes).expect("bitstring"),
+    };
+    csr.to_der().expect("encode CertReq")
+}
+
 // Required for Name::from_str in tests
 use std::str::FromStr;
