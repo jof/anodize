@@ -34,5 +34,4 @@ InitRoot → KeyBackup (pair + backup) → SignCsr → RevokeCert → IssueCrl �
 RekeyShares (with real PIN rotation across all HSMs) → MigrateDisc →
 ValidateDisc.
 
-Test methodology document to be written as a separate plan once prerequisites
-are complete.
+Test methodology: see `docs/e2e-test-plan.md`.
