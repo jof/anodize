@@ -1,7 +1,7 @@
 # Full End-to-End Ceremony Test Plan
 
-Covers the complete ceremony lifecycle on a dev VM running the NixOS dev ISO
-with SoftHSM and cdemu:
+Covers the complete ceremony lifecycle on a dev VM (bare-metal or QEMU)
+running the NixOS dev ISO with SoftHSM and cdemu:
 
     InitRoot → KeyBackup → SignCsr → RevokeCert → IssueCrl →
     RekeyShares → MigrateDisc → ValidateDisc
@@ -9,13 +9,16 @@ with SoftHSM and cdemu:
 Each operation is a separate ceremony session (Ctrl+C exits → sentinel
 restarts → next SSH connects to a fresh TUI).
 
+All verification is done via the **debug SSH shell** on the guest.  The
+cdemu BD-R image and session ISOs live at `/run/anodize/share/` inside
+the VM.  There is no 9p host share on standalone hardware.
+
 ## Prerequisites
 
 | Item | Command / Notes |
 |------|-----------------|
 | Dev ISO built | `make dev-amd64` or `make dev-arm64` |
 | Shuttle image | `make fake-shuttle.img` |
-| Host dev-disc dir | `mkdir -p dev-disc` |
 | VM running | `make qemu-dev` (local) or bare-metal with `DEV_VM_IP` set |
 | SSH reachable | `make ssh-dev-debug` (local) or `make ssh-vm-debug` (remote) |
 | CSR on shuttle | Place `csr.der` in `fake-shuttle.img` before SignCsr (see step 3) |
@@ -77,13 +80,17 @@ split HSM PIN into 2-of-2 SSS shares, burn session 0 to disc.
 
 ### Verification
 
-```sh
-# On host — session 0 ISO written to dev-disc/:
-ls -lh dev-disc/
+All verification runs via the debug shell on the guest:
 
-# On shuttle — root.crt + root.crl + audit.log:
-# (mount fake-shuttle.img to inspect, or check via debug SSH)
-make ssh-vm-debug   # then: ls /mnt/usb/
+```sh
+make ssh-vm-debug   # or: make ssh-dev-debug (local QEMU)
+
+# BD-R image written by cdemu:
+ls -lh /run/anodize/share/test-bdr*.iso
+
+# Shuttle artifacts (root.crt + root.crl + audit.log):
+ls -l /mnt/usb/
+openssl x509 -in /mnt/usb/root.crt -inform DER -noout -subject -fingerprint
 ```
 
 ### Artifacts to save
@@ -121,9 +128,11 @@ wrap-export / wrap-import.
 ### Verification
 
 ```sh
-# Debug SSH — verify both tokens have the signing key:
 make ssh-vm-debug
+
+# Verify both SoftHSM tokens have the signing key:
 pkcs11-tool --module $SOFTHSM2_MODULE --list-objects --token-label anodize-root-2026
+# Repeat with the backup token label.
 ```
 
 ---
@@ -168,11 +177,10 @@ mcopy -i fake-shuttle.img -o /tmp/csr.der ::csr.der
 ### Verification
 
 ```sh
-# Shuttle should contain intermediate.crt:
 make ssh-vm-debug
-ls /mnt/usb/intermediate.crt
 
-# Verify cert chain:
+# Shuttle should contain intermediate.crt:
+ls -l /mnt/usb/intermediate.crt
 openssl x509 -in /mnt/usb/intermediate.crt -inform DER -noout -subject -issuer
 ```
 
@@ -202,9 +210,10 @@ openssl x509 -in /mnt/usb/intermediate.crt -inform DER -noout -subject -issuer
 ### Verification
 
 ```sh
-# Updated CRL on shuttle:
+make ssh-vm-debug
+
+# CRL on shuttle should list the revoked serial:
 openssl crl -in /mnt/usb/root.crl -inform DER -noout -text | head -30
-# Should list the revoked serial number.
 ```
 
 ---
@@ -231,6 +240,8 @@ openssl crl -in /mnt/usb/root.crl -inform DER -noout -text | head -30
 ### Verification
 
 ```sh
+make ssh-vm-debug
+
 # CRL thisUpdate should be fresh:
 openssl crl -in /mnt/usb/root.crl -inform DER -noout -lastupdate -nextupdate
 ```
@@ -262,8 +273,9 @@ PIN change propagates to all backup HSMs and rollback works on failure.
 ### Verification
 
 ```sh
-# Audit log should show rekey event with backup_devices_updated:
 make ssh-vm-debug
+
+# Audit log should show rekey event with backup_devices_updated:
 cat /mnt/usb/audit.log | jq 'select(.event == "sss.rekey")'
 ```
 
@@ -309,10 +321,11 @@ cat /mnt/usb/audit.log | jq 'select(.event == "sss.rekey")'
 ### Verification
 
 ```sh
-# dev-disc/ should now contain:
-#   - Old ISOs archived as *.iso.bak
-#   - New test-bdr.iso with all sessions re-written
-ls -lh dev-disc/
+make ssh-vm-debug
+
+# Old ISOs archived, new blank BD-R loaded:
+ls -lh /run/anodize/share/test-bdr*
+# Should show *.iso.bak (archived) + fresh test-bdr.iso with migrated sessions.
 ```
 
 ---
