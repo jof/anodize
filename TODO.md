@@ -31,21 +31,6 @@ Add a command to enumerate USB devices that could be discs (e.g. USB mass-storag
 devices, optical drives). Useful for operator discovery before ceremony start.
 The `lint --list-usb` help text references this but it doesn't exist yet.
 
-## TUI: "q" instantly quits — destructive during ceremony
-
-Pressing "q" at most/many points in the TUI instantly exits the application with
-no confirmation. This is highly destructive when there is unrecoverable state in
-RAM (e.g. generated shares, partially completed ceremony steps). The quit path
-should require multiple confirmations before actually exiting. Options:
-
-- Replace bare "q" with a Ctrl-C trap that opens a "really quit?" confirmation
-  modal (require typing "yes" or a second Ctrl-C within a short window).
-- Remove single-key quit entirely during ceremony phases that hold ephemeral
-  state; only allow quit from the top-level menu or after state has been
-  persisted.
-- At minimum, any quit during an active ceremony should display a warning about
-  data loss and require an explicit second confirmation.
-
 ## cdemu: verify multi-session append after CLOSE SESSION
 
 The intent session write confirmed `sessions=0 → write → CLOSE TRACK → CLOSE
