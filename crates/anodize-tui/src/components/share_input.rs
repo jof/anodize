@@ -258,7 +258,11 @@ impl ShareInput {
             .title(format!(
                 "Share Input — {}/{} shares",
                 self.collected.len(),
-                if self.verify_all { self.sss_meta.total } else { self.threshold }
+                if self.verify_all {
+                    self.sss_meta.total
+                } else {
+                    self.threshold
+                }
             ))
             .border_style(Style::default().fg(Color::Cyan));
 
@@ -283,7 +287,11 @@ impl ShareInput {
             ]));
         }
 
-        let required = if self.verify_all { self.sss_meta.total as usize } else { self.threshold as usize };
+        let required = if self.verify_all {
+            self.sss_meta.total as usize
+        } else {
+            self.threshold as usize
+        };
         let remaining = required - self.collected.len().min(required);
         if remaining > 0 {
             // Word progress

@@ -192,8 +192,12 @@ impl CeremonyMode {
                 "Disc Migration \u{2014} Verify Chain"
             }
             CeremonyPhase::Planning(PlanningState::WaitMigrateTarget) => "Insert Blank Target Disc",
-            CeremonyPhase::Planning(PlanningState::BackupQuorum) => "Key Backup \u{2014} Reconstruct PIN",
-            CeremonyPhase::Planning(PlanningState::BackupDevices) => "Key Backup \u{2014} Device Selection",
+            CeremonyPhase::Planning(PlanningState::BackupQuorum) => {
+                "Key Backup \u{2014} Reconstruct PIN"
+            }
+            CeremonyPhase::Planning(PlanningState::BackupDevices) => {
+                "Key Backup \u{2014} Device Selection"
+            }
             CeremonyPhase::Quorum => "Quorum \u{2014} Reconstruct PIN",
             CeremonyPhase::ClockReconfirm => "Clock Re-confirm \u{2014} Verify Before Signing",
             CeremonyPhase::Done => "Ceremony Complete",

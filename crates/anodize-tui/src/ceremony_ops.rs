@@ -716,9 +716,7 @@ impl App {
         if let Some(ref profile) = self.profile {
             match anodize_hsm::create_backup(profile.hsm.backend) {
                 Ok(backup_impl) => {
-                    self.utilities
-                        .backup
-                        .execute(backup_impl.as_ref(), &pin);
+                    self.utilities.backup.execute(backup_impl.as_ref(), &pin);
                 }
                 Err(e) => {
                     self.utilities.backup.phase =
