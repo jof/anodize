@@ -73,6 +73,11 @@ Add a command to enumerate USB devices that could be discs (e.g. USB mass-storag
 devices, optical drives). Useful for operator discovery before ceremony start.
 The `lint --list-usb` help text references this but it doesn't exist yet.
 
+## TUI: clock re-confirm screen shows nanosecond precision
+
+The clock re-confirm screen displays the timestamp with nanosecond granularity.
+Seconds is sufficient—truncate the display to whole seconds.
+
 ## cdemu: verify multi-session append after CLOSE SESSION
 
 The intent session write confirmed `sessions=0 → write → CLOSE TRACK → CLOSE
