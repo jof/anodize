@@ -18,16 +18,15 @@ pub enum UtilScreen {
     Menu,
     SystemInfo,
     AuditLog,
-    HsmBrowser,
-    KeyBackup,
+    HsmInventory,
 }
 
-/// Utilities mode component: system info, audit log browser, HSM slot browser.
+/// Utilities mode component: system info, audit log browser, HSM inventory.
 pub struct UtilitiesMode {
     pub screen: UtilScreen,
     /// Cached lines for the current sub-screen (populated on entry).
     cached_lines: Vec<String>,
-    /// Backup FSM state (persists across re-renders).
+    /// Backup FSM state (persists across re-renders, used by ceremony backup).
     pub backup: backup::BackupState,
 }
 
@@ -47,8 +46,7 @@ impl UtilitiesMode {
             UtilScreen::Menu => Vec::new(),
             UtilScreen::SystemInfo => Self::gather_system_info(app),
             UtilScreen::AuditLog => Self::gather_audit_log(app),
-            UtilScreen::HsmBrowser => Self::gather_hsm_info(app),
-            UtilScreen::KeyBackup => Vec::new(), // Backup uses its own FSM state
+            UtilScreen::HsmInventory => Self::gather_hsm_inventory(app),
         }
     }
 
@@ -248,87 +246,72 @@ impl UtilitiesMode {
         }
     }
 
-    // ── HSM Slot Browser ─────────────────────────────────────────────────────
+    // ── HSM Inventory ────────────────────────────────────────────────────────
 
-    fn gather_hsm_info(app: &App) -> Vec<String> {
+    fn gather_hsm_inventory(app: &App) -> Vec<String> {
+        use anodize_config::HsmBackendKind;
+
         let mut lines = Vec::new();
 
-        let Some(ref profile) = app.profile else {
-            lines.push("  Profile not loaded — cannot query PKCS#11 module.".into());
-            return lines;
-        };
+        // Determine which backend to probe.
+        let backend = app
+            .profile
+            .as_ref()
+            .map(|p| p.hsm.backend)
+            .unwrap_or(HsmBackendKind::Yubihsm);
 
-        let cfg_token = profile.hsm.token_label.as_str();
-        let cfg_key = profile.hsm.key_label.as_str();
-        let cfg_spec = format!("{:?}", profile.hsm.key_spec);
-        let logged_in = app.hw.actor.is_some();
-
-        lines.push(format!("  Backend: {:?}", profile.hsm.backend));
+        lines.push(format!("  Backend: {backend:?}"));
         lines.push(String::new());
 
-        let Some(ref actor) = app.hw.actor else {
-            lines.push("  HSM not connected — log in first to browse slots.".into());
-            return lines;
+        let inventory = match anodize_hsm::create_inventory(backend) {
+            Ok(inv) => inv,
+            Err(e) => {
+                lines.push(format!("  Failed to initialise inventory: {e}"));
+                return lines;
+            }
         };
 
-        match actor.list_slot_details() {
-            Ok(slots) => {
-                if slots.is_empty() {
-                    lines.push("  (no slots with tokens found)".into());
-                }
-                for (i, si) in slots.iter().enumerate() {
-                    let is_active = si.token_label == cfg_token;
-                    let tag = if is_active { "  ★ " } else { "    " };
-
-                    lines.push(format!("{tag}Slot {i}  (id {}):", si.slot_id));
-                    lines.push(format!("{tag}└─ Token: \"{}\"", si.token_label));
-
-                    if !si.model.is_empty() {
-                        lines.push(format!("{tag}   ├─ Model: {}", si.model));
-                    }
-                    if !si.serial_number.is_empty() {
-                        lines.push(format!("{tag}   ├─ Serial: {}", si.serial_number));
-                    }
-
-                    // PIN status
-                    let pin_status = if si.user_pin_locked {
-                        "LOCKED"
-                    } else if si.user_pin_initialized {
-                        "initialized"
-                    } else {
-                        "not initialized"
-                    };
+        match inventory.enumerate_devices() {
+            Ok(devices) if devices.is_empty() => {
+                lines.push("  (no devices found)".into());
+            }
+            Ok(devices) => {
+                for (i, dev) in devices.iter().enumerate() {
                     lines.push(format!(
-                        "{tag}   ├─ User PIN: {}  ({}-{} chars)",
-                        pin_status, si.min_pin_len, si.max_pin_len
-                    ));
-                    lines.push(format!(
-                        "{tag}   ├─ Login required: {}",
-                        if si.login_required { "yes" } else { "no" }
+                        "  Device {}:  {} — {}",
+                        i + 1,
+                        dev.model,
+                        dev.serial
                     ));
 
-                    if is_active {
-                        lines.push(format!(
-                            "{tag}   ├─ Session: {}",
-                            if logged_in {
-                                "logged in"
-                            } else {
-                                "not logged in"
-                            }
-                        ));
-                        lines.push(format!("{tag}   └─ Key: \"{}\" ({})", cfg_key, cfg_spec));
-                        lines.push(format!("{tag}      └─ Private key protected by User PIN"));
-                    } else {
-                        lines.push(format!("{tag}   └─ (not the configured token)"));
+                    if let Some(ref fw) = dev.firmware {
+                        lines.push(format!("    Firmware:    {fw}"));
                     }
 
-                    if i + 1 < slots.len() {
+                    lines.push(format!("    Auth state:  {}", dev.auth_state));
+
+                    if let (Some(used), Some(total)) = (dev.log_used, dev.log_total) {
+                        lines.push(format!("    Audit log:   {used}/{total} entries"));
+                    }
+
+                    match dev.has_wrap_key {
+                        Some(true) => lines.push("    Wrap key:    present".into()),
+                        Some(false) => lines.push("    Wrap key:    absent".into()),
+                        None => lines.push("    Wrap key:    (requires auth)".into()),
+                    }
+                    match dev.has_signing_key {
+                        Some(true) => lines.push("    Signing key: present".into()),
+                        Some(false) => lines.push("    Signing key: absent".into()),
+                        None => lines.push("    Signing key: (requires auth)".into()),
+                    }
+
+                    if i + 1 < devices.len() {
                         lines.push(String::new());
                     }
                 }
             }
             Err(e) => {
-                lines.push(format!("  Slot enumeration failed: {e}"));
+                lines.push(format!("  Enumeration failed: {e}"));
             }
         }
 
@@ -344,8 +327,7 @@ impl UtilitiesMode {
                     "",
                     "  [1]  System Info",
                     "  [2]  Audit Log Browser",
-                    "  [3]  PKCS#11 / HSM Info",
-                    "  [4]  HSM Key Backup",
+                    "  [3]  HSM Inventory",
                     "",
                     "  [Esc]  Back",
                 ];
@@ -357,7 +339,7 @@ impl UtilitiesMode {
             UtilScreen::SystemInfo => {
                 let block = Block::default()
                     .borders(Borders::ALL)
-                    .title("System Info  [Esc] back");
+                    .title("System Info  [r] refresh  [Esc] back");
                 let para = Paragraph::new(Text::from(self.cached_lines.join("\n")))
                     .block(block)
                     .wrap(Wrap { trim: false })
@@ -367,28 +349,18 @@ impl UtilitiesMode {
             UtilScreen::AuditLog => {
                 let block = Block::default()
                     .borders(Borders::ALL)
-                    .title("Audit Log  [Esc] back");
+                    .title("Audit Log  [r] refresh  [Esc] back");
                 let para = Paragraph::new(Text::from(self.cached_lines.join("\n")))
                     .block(block)
                     .wrap(Wrap { trim: false })
                     .scroll((app.content_scroll, 0));
                 frame.render_widget(para, area);
             }
-            UtilScreen::HsmBrowser => {
+            UtilScreen::HsmInventory => {
                 let block = Block::default()
                     .borders(Borders::ALL)
-                    .title("PKCS#11 / HSM Info  [Esc] back");
+                    .title("HSM Inventory  [r] refresh  [Esc] back");
                 let para = Paragraph::new(Text::from(self.cached_lines.join("\n")))
-                    .block(block)
-                    .wrap(Wrap { trim: false })
-                    .scroll((app.content_scroll, 0));
-                frame.render_widget(para, area);
-            }
-            UtilScreen::KeyBackup => {
-                let block = Block::default()
-                    .borders(Borders::ALL)
-                    .title("HSM Key Backup  [Esc] back");
-                let para = Paragraph::new(Text::from(self.backup.lines.join("\n")))
                     .block(block)
                     .wrap(Wrap { trim: false })
                     .scroll((app.content_scroll, 0));
@@ -405,39 +377,8 @@ impl Component for UtilitiesMode {
                 KeyCode::Char('1') => Action::UtilScreen(1),
                 KeyCode::Char('2') => Action::UtilScreen(2),
                 KeyCode::Char('3') => Action::UtilScreen(3),
-                KeyCode::Char('4') => Action::UtilScreen(4),
                 _ => Action::Noop,
             },
-            UtilScreen::KeyBackup => {
-                match key.code {
-                    KeyCode::Esc => {
-                        if !self.backup.go_back() {
-                            self.screen = UtilScreen::Menu;
-                        }
-                        Action::Noop
-                    }
-                    KeyCode::Char(c @ '1'..='9') => {
-                        let idx = (c as usize) - ('1' as usize);
-                        self.backup.select(idx);
-                        Action::Noop
-                    }
-                    KeyCode::Enter => {
-                        use backup::BackupPhase;
-                        match self.backup.phase {
-                            BackupPhase::Overview => {
-                                self.backup.confirm_overview();
-                                Action::Noop
-                            }
-                            BackupPhase::Confirm => {
-                                // Signal app to execute (needs pin + backup impl)
-                                Action::BackupExecute
-                            }
-                            _ => Action::Noop,
-                        }
-                    }
-                    _ => Action::Noop,
-                }
-            }
             // Sub-screens: Esc returns to menu, 'r' refreshes
             _ => match key.code {
                 KeyCode::Esc => {
@@ -445,12 +386,11 @@ impl Component for UtilitiesMode {
                     Action::Noop
                 }
                 KeyCode::Char('r') => {
-                    // Signal the app to re-enter the current screen (refresh)
                     let screen_idx = match self.screen {
                         UtilScreen::SystemInfo => 1,
                         UtilScreen::AuditLog => 2,
-                        UtilScreen::HsmBrowser => 3,
-                        UtilScreen::Menu | UtilScreen::KeyBackup => return Action::Noop,
+                        UtilScreen::HsmInventory => 3,
+                        UtilScreen::Menu => return Action::Noop,
                     };
                     Action::UtilScreen(screen_idx)
                 }

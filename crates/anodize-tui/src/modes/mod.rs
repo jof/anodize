@@ -29,8 +29,7 @@ pub fn utility_phases(screen: &utilities::UtilScreen) -> Vec<PhaseStep> {
     let items: &[(&str, UtilScreen)] = &[
         ("System", UtilScreen::SystemInfo),
         ("Audit", UtilScreen::AuditLog),
-        ("HSM", UtilScreen::HsmBrowser),
-        ("Backup", UtilScreen::KeyBackup),
+        ("HSM Inventory", UtilScreen::HsmInventory),
     ];
     items
         .iter()

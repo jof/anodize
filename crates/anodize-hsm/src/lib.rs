@@ -143,6 +143,37 @@ pub fn create_backend(kind: HsmBackendKind) -> Result<Box<dyn HsmBackend>> {
     }
 }
 
+// ── HsmInventory ───────────────────────────────────────────────────────────────
+
+/// Diagnostic snapshot of a single HSM device, gathered without requiring
+/// the ceremony PIN (SSS reconstruction).
+#[derive(Debug, Clone)]
+pub struct HsmDeviceInfo {
+    pub serial: String,
+    pub model: String,
+    pub firmware: Option<String>,
+    pub auth_state: String,
+    /// Audit log entries used (YubiHSM only).
+    pub log_used: Option<u8>,
+    /// Audit log total capacity (YubiHSM only).
+    pub log_total: Option<u8>,
+    pub has_wrap_key: Option<bool>,
+    pub has_signing_key: Option<bool>,
+}
+
+/// Enumerate connected HSM devices without requiring authentication.
+pub trait HsmInventory: Send {
+    fn enumerate_devices(&self) -> Result<Vec<HsmDeviceInfo>>;
+}
+
+/// Create the inventory implementation for the given backend kind.
+pub fn create_inventory(kind: HsmBackendKind) -> Result<Box<dyn HsmInventory>> {
+    match kind {
+        HsmBackendKind::Yubihsm => Ok(Box::new(YubiHsmBackend::new()?)),
+        HsmBackendKind::Softhsm => Ok(Box::new(SoftHsmBackend::new()?)),
+    }
+}
+
 // ── HsmBackup ──────────────────────────────────────────────────────────────────
 
 /// A device or token that can participate in a key backup operation.

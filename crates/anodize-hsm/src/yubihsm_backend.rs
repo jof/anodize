@@ -9,8 +9,8 @@ use secrecy::{ExposeSecret, SecretString};
 use sha2::Digest as _;
 
 use crate::{
-    BackupResult, BackupTarget, Hsm, HsmBackend, HsmBackup, HsmError, KeyHandle, KeySpec, Result,
-    SignMech, SlotTokenInfo,
+    BackupResult, BackupTarget, Hsm, HsmBackend, HsmBackup, HsmDeviceInfo, HsmError, HsmInventory,
+    KeyHandle, KeySpec, Result, SignMech, SlotTokenInfo,
 };
 
 // Default auth key slot on factory-fresh YubiHSM2 devices.
@@ -387,9 +387,8 @@ impl YubiHsmBackupImpl {
             DEFAULT_AUTH_KEY_ID,
             DEFAULT_AUTH_PASSWORD.as_bytes(),
         );
-        let client = yubihsm::Client::open(connector2, default_creds, true).map_err(|e| {
-            HsmError::BackendError(format!("connect to {serial_str}: {e}"))
-        })?;
+        let client = yubihsm::Client::open(connector2, default_creds, true)
+            .map_err(|e| HsmError::BackendError(format!("connect to {serial_str}: {e}")))?;
 
         // Install anodize auth key derived from PIN.
         let auth_key =
@@ -513,9 +512,12 @@ impl HsmBackup for YubiHsmBackupImpl {
                                     );
                                     (format!("{fw} (bootstrapped)"), false, has_wrap, has_signing)
                                 }
-                                Err(_) => {
-                                    ("YubiHSM2 (bootstrapped, auth failed)".to_string(), false, false, false)
-                                }
+                                Err(_) => (
+                                    "YubiHSM2 (bootstrapped, auth failed)".to_string(),
+                                    false,
+                                    false,
+                                    false,
+                                ),
                             }
                         } else {
                             ("YubiHSM2 (bootstrapped)".to_string(), false, false, false)
@@ -650,5 +652,98 @@ impl HsmBackup for YubiHsmBackupImpl {
             key_id: format!("0x{SIGNING_KEY_ID:04X}"),
             public_keys_match: keys_match,
         })
+    }
+}
+
+// ── HsmInventory ─────────────────────────────────────────────────────────────
+
+/// Check whether a specific object exists on an authenticated client.
+fn probe_object(
+    client: &yubihsm::Client,
+    id: yubihsm::object::Id,
+    obj_type: yubihsm::object::Type,
+) -> bool {
+    client.get_object_info(id, obj_type).is_ok()
+}
+
+impl HsmInventory for YubiHsmBackend {
+    fn enumerate_devices(&self) -> Result<Vec<HsmDeviceInfo>> {
+        let serials = yubihsm::connector::usb::Devices::serial_numbers()
+            .map_err(|e| HsmError::BackendError(format!("USB enumeration: {e}")))?;
+
+        let mut devices = Vec::with_capacity(serials.len());
+        for serial in serials {
+            let serial_str = format!("{serial}");
+
+            let cfg = yubihsm::UsbConfig {
+                serial: Some(serial),
+                ..Default::default()
+            };
+
+            // Try factory-default auth to probe the device.
+            // GET DEVICE INFO is a pre-auth command at the protocol level, but
+            // the yubihsm crate's connector::Message is pub(crate), so we
+            // cannot send raw commands.  Factory-default auth gives us full
+            // device_info + object inventory for unbootstrapped devices.
+            let connector = yubihsm::Connector::usb(&cfg);
+            let default_creds = yubihsm::Credentials::from_password(
+                DEFAULT_AUTH_KEY_ID,
+                DEFAULT_AUTH_PASSWORD.as_bytes(),
+            );
+
+            let info = match yubihsm::Client::open(connector, default_creds, false) {
+                Ok(client) => {
+                    let (firmware, log_used, log_total) = match client.device_info() {
+                        Ok(di) => (
+                            Some(format!(
+                                "{}.{}.{}",
+                                di.major_version, di.minor_version, di.build_version
+                            )),
+                            Some(di.log_store_used),
+                            Some(di.log_store_capacity),
+                        ),
+                        Err(_) => (None, None, None),
+                    };
+                    let has_wrap = Some(probe_object(
+                        &client,
+                        WRAP_KEY_ID,
+                        yubihsm::object::Type::WrapKey,
+                    ));
+                    let has_signing = Some(probe_object(
+                        &client,
+                        SIGNING_KEY_ID,
+                        yubihsm::object::Type::AsymmetricKey,
+                    ));
+                    HsmDeviceInfo {
+                        serial: serial_str,
+                        model: "YubiHSM2".into(),
+                        firmware,
+                        auth_state: "factory-default".into(),
+                        log_used,
+                        log_total,
+                        has_wrap_key: has_wrap,
+                        has_signing_key: has_signing,
+                    }
+                }
+                Err(_) => {
+                    // Factory auth failed — device is bootstrapped.
+                    // Without auth we can only report the serial.
+                    HsmDeviceInfo {
+                        serial: serial_str,
+                        model: "YubiHSM2".into(),
+                        firmware: None,
+                        auth_state: "bootstrapped".into(),
+                        log_used: None,
+                        log_total: None,
+                        has_wrap_key: None,
+                        has_signing_key: None,
+                    }
+                }
+            };
+
+            devices.push(info);
+        }
+
+        Ok(devices)
     }
 }

@@ -381,9 +381,9 @@ impl App {
                         self.sss.share_reveal = None;
                         if let Some(ref state) = self.disc.session_state {
                             let mut si = crate::components::share_input::ShareInput::new(
-                                    state.sss.clone(),
-                                    32, // PIN is 32 bytes
-                                );
+                                state.sss.clone(),
+                                32, // PIN is 32 bytes
+                            );
                             si.verify_all = true;
                             self.sss.share_input = Some(si);
                         }
@@ -513,15 +513,17 @@ impl App {
                         self.sss.share_reveal = None;
                         if let Some(ref state) = self.disc.session_state {
                             let mut si = crate::components::share_input::ShareInput::new(
-                                    state.sss.clone(),
-                                    32,
-                                );
+                                state.sss.clone(),
+                                32,
+                            );
                             si.verify_all = true;
                             self.sss.share_input = Some(si);
                         }
                         self.ceremony.state =
                             CeremonyPhase::Planning(PlanningState::RekeyShareVerify);
-                        self.set_status("Verify new shares: every custodian must re-enter their share.");
+                        self.set_status(
+                            "Verify new shares: every custodian must re-enter their share.",
+                        );
                     }
                 }
                 return Action::Noop;
@@ -788,33 +790,17 @@ impl App {
                 let screen = match idx {
                     1 => UtilScreen::SystemInfo,
                     2 => UtilScreen::AuditLog,
-                    3 => UtilScreen::HsmBrowser,
-                    4 => UtilScreen::KeyBackup,
+                    3 => UtilScreen::HsmInventory,
                     _ => UtilScreen::Menu,
                 };
-                if screen == UtilScreen::KeyBackup {
-                    // Key backup is now a ceremony operation ([7] in ceremony mode).
-                    // Show a redirect message.
-                    self.utilities.backup.reset();
-                    self.utilities.backup.phase =
-                        crate::modes::utilities::backup::BackupPhase::Error(
-                            "Key backup is now a ceremony operation.\n\
-                             Use [F2] Ceremony → [7] Key Backup to pair or back up HSMs."
-                                .into(),
-                        );
-                    self.utilities.backup.render_lines();
-                    self.utilities.screen = screen;
-                } else {
-                    // Gather data while borrowing self immutably, then assign
-                    let lines = UtilitiesMode::gather_for_screen(screen, self);
-                    self.utilities.screen = screen;
-                    self.utilities.set_cached_lines(lines);
-                }
+                let lines = UtilitiesMode::gather_for_screen(screen, self);
+                self.utilities.screen = screen;
+                self.utilities.set_cached_lines(lines);
                 self.content_scroll = 0;
             }
 
             Action::BackupExecute => {
-                // Execute the confirmed backup/pair operation.
+                // Execute the confirmed backup/pair operation (ceremony mode).
                 if let Some(ref profile) = self.profile {
                     if let Ok(backup_impl) = anodize_hsm::create_backup(profile.hsm.backend) {
                         let pin = secrecy::SecretString::new(self.pin_buf.clone());

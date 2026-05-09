@@ -15,8 +15,8 @@ use cryptoki::{
 use secrecy::{ExposeSecret, SecretString};
 
 use crate::{
-    BackupResult, BackupTarget, Hsm, HsmBackend, HsmBackup, HsmError, KeyHandle, KeySpec, Result,
-    SignMech, SlotTokenInfo,
+    BackupResult, BackupTarget, Hsm, HsmBackend, HsmBackup, HsmDeviceInfo, HsmError, HsmInventory,
+    KeyHandle, KeySpec, Result, SignMech, SlotTokenInfo,
 };
 
 // ── ObjectHandle ↔ u64 conversion ────────────────────────────────────────────
@@ -593,10 +593,64 @@ impl Hsm for Pkcs11Hsm {
     }
 }
 
+// ── HsmInventory ─────────────────────────────────────────────────────────────
+
+const SIGNING_KEY_LABEL: &str = "anodize-root";
+
+impl HsmInventory for SoftHsmBackend {
+    fn enumerate_devices(&self) -> Result<Vec<HsmDeviceInfo>> {
+        let ctx = init_ctx(&self.module_path)?;
+        let slots = ctx.get_slots_with_token()?;
+
+        let mut devices = Vec::new();
+        for &slot in &slots {
+            let Some(ti) = token_info_from_slot(&ctx, slot) else {
+                continue;
+            };
+
+            let auth_state = if ti.user_pin_initialized {
+                "initialized"
+            } else {
+                "uninitialized"
+            };
+
+            // Unauthenticated session — search for public key to detect signing key.
+            let has_signing = match ctx.open_rw_session(slot) {
+                Ok(session) => Some(
+                    session
+                        .find_objects(&[
+                            Attribute::Label(SIGNING_KEY_LABEL.as_bytes().to_vec()),
+                            Attribute::Class(ObjectClass::PUBLIC_KEY),
+                        ])
+                        .map(|v| !v.is_empty())
+                        .unwrap_or(false),
+                ),
+                Err(_) => None,
+            };
+
+            devices.push(HsmDeviceInfo {
+                serial: ti.serial_number.clone(),
+                model: if ti.model.is_empty() {
+                    "SoftHSM".into()
+                } else {
+                    ti.model.clone()
+                },
+                firmware: None, // PKCS#11 token_info doesn't expose firmware cleanly
+                auth_state: auth_state.into(),
+                log_used: None,
+                log_total: None,
+                has_wrap_key: None, // SECRET_KEY invisible without login
+                has_signing_key: has_signing,
+            });
+        }
+
+        Ok(devices)
+    }
+}
+
 // ── Pkcs11BackupImpl ─────────────────────────────────────────────────────────
 
 const WRAP_KEY_LABEL: &str = "anodize-wrap";
-const SIGNING_KEY_LABEL: &str = "anodize-root";
 
 /// PKCS#11 backup implementation using `C_WrapKey`/`C_UnwrapKey`.
 ///

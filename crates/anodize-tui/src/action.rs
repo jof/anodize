@@ -60,9 +60,9 @@ pub enum Action {
     InitRootAbort,
     RekeyAbort,
     RetryPostCommit,
-    // Utilities sub-screens (1=SystemInfo, 2=AuditLog, 3=HsmBrowser, 4=KeyBackup)
+    // Utilities sub-screens (1=SystemInfo, 2=AuditLog, 3=HsmInventory)
     UtilScreen(u8),
-    // HSM backup: execute the confirmed pair/backup operation
+    // HSM backup: execute the confirmed pair/backup operation (ceremony mode)
     BackupExecute,
 }
 
