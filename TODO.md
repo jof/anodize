@@ -78,6 +78,54 @@ The `lint --list-usb` help text references this but it doesn't exist yet.
 The clock re-confirm screen displays the timestamp with nanosecond granularity.
 Seconds is sufficient—truncate the display to whole seconds.
 
+## TUI: signing review should show the resulting certificate structure, not just CSR + profile name
+
+The CSR-signing review screen currently displays the raw CSR fields alongside the
+certificate profile name. This gives reviewers insufficient information to
+understand what the final signed certificate will actually contain. The review
+screen should instead present the *compiled* certificate document structure—i.e.
+the result of applying the selected profile to the CSR—so that custodians can
+verify the exact extensions, key usages, validity period, issuer chain, and any
+profile-injected fields before authorizing the signature. Showing the certificate
+as it will be signed (rather than its two inputs separately) eliminates guesswork
+and makes the approval decision meaningful.
+
+## CSR signature verification: flexible algorithm support
+
+`verify_csr_signature()` in `anodize-ca/src/lib.rs` currently hard-codes two
+combinations: P-256/SHA-256 and P-384/SHA-384. It assumes the signature algorithm
+OID implies a specific curve—e.g. `ecdsa-with-SHA256` → P-256—so a CSR that pairs
+a P-384 key with a SHA-256 signature (perfectly valid, and what OpenSSL produces by
+default for `ecparam -name secp384r1`) is rejected as corrupt.
+
+The fix should decouple curve detection from the hash algorithm OID:
+
+1. **Parse the SPKI to determine the actual curve** (from the algorithm parameters
+   OID inside SubjectPublicKeyInfo), independent of the signature algorithm.
+2. **Match the signature hash from the outer algorithm OID** (SHA-256, SHA-384,
+   SHA-512).
+3. **Verify using the correct (curve, hash) pair.** This gives a matrix of
+   supported combinations rather than a 1:1 mapping.
+
+Target combinations to support:
+
+| Curve   | Hash    | OID (sigAlg)              | Status   |
+|---------|---------|---------------------------|----------|
+| P-256   | SHA-256 | 1.2.840.10045.4.3.2       | ✅ works |
+| P-256   | SHA-384 | 1.2.840.10045.4.3.3       | missing  |
+| P-384   | SHA-256 | 1.2.840.10045.4.3.2       | ❌ broken|
+| P-384   | SHA-384 | 1.2.840.10045.4.3.3       | ✅ works |
+| P-384   | SHA-512 | 1.2.840.10045.4.3.4       | missing  |
+| Ed25519 | —       | 1.3.101.112               | missing  |
+| Ed448   | —       | 1.3.101.113               | missing  |
+| RSA-PSS | SHA-256 | 1.2.840.113549.1.1.10     | missing  |
+| RSA-PSS | SHA-384 | 1.2.840.113549.1.1.10     | missing  |
+
+EdDSA and RSA-PSS are lower priority but worth supporting since subordinate CAs
+from other PKI stacks may use them. The `spki` and `signature` crates already
+provide the building blocks; the main work is restructuring the match to dispatch
+on (curve, hash) rather than assuming OID ↔ curve.
+
 ## cdemu: verify multi-session append after CLOSE SESSION
 
 The intent session write confirmed `sessions=0 → write → CLOSE TRACK → CLOSE
