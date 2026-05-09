@@ -805,6 +805,7 @@ impl App {
             revocation_list: vec![],
             crl_number: 0,
             last_audit_hash: String::new(),
+            last_hsm_log_seq: None,
         };
 
         self.disc.session_state = Some(state);

@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+pub mod validate;
+
 #[derive(Debug, Error)]
 pub enum AuditError {
     #[error("I/O error on {path}: {source}")]
@@ -49,7 +51,7 @@ pub fn genesis_hash(anchor: &[u8]) -> [u8; 32] {
     Sha256::digest(anchor).into()
 }
 
-fn compute_entry_hash(
+pub(crate) fn compute_entry_hash(
     seq: u64,
     timestamp: &str,
     event: &str,

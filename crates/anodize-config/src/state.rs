@@ -39,6 +39,11 @@ pub struct SessionState {
     pub crl_number: u64,
     /// Entry hash of the last audit log record, for chain verification.
     pub last_audit_hash: String,
+    /// Sequence number of the last consumed YubiHSM audit log entry.
+    /// `None` for states created before audit log tracking was added, or
+    /// when using a backend that has no internal audit log (e.g. SoftHSM).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_hsm_log_seq: Option<u64>,
 }
 
 /// SSS metadata stored on the audit disc.
@@ -194,6 +199,7 @@ mod tests {
             revocation_list: vec![],
             crl_number: 0,
             last_audit_hash: "f".repeat(64),
+            last_hsm_log_seq: None,
         }
     }
 

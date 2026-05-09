@@ -8,6 +8,9 @@ use anodize_config::HsmBackendKind;
 use secrecy::SecretString;
 use thiserror::Error;
 
+// Re-export audit log types so consumers can use them.
+pub use audit_log::{HsmAuditEntry, HsmAuditSnapshot};
+
 #[derive(Debug, Error)]
 pub enum HsmError {
     #[error("PKCS#11 error: {0}")]
@@ -97,6 +100,24 @@ pub trait Hsm: Send {
     /// List all populated slots/tokens visible to this session (optional).
     fn list_slot_details(&self) -> Result<Vec<SlotTokenInfo>> {
         Ok(Vec::new())
+    }
+
+    /// Fetch the HSM's internal audit log. Returns `NotSupported` for
+    /// backends without an internal audit log (e.g. SoftHSM/PKCS#11).
+    fn get_audit_log(&self) -> Result<HsmAuditSnapshot> {
+        Err(HsmError::BackendError(
+            "audit log not supported by this backend".into(),
+        ))
+    }
+
+    /// Acknowledge consumption of audit log entries up to (and including)
+    /// the given sequence number. Required on YubiHSM when force-audit is
+    /// enabled to prevent the device from blocking operations.
+    fn drain_audit_log(&self, up_to_seq: u16) -> Result<()> {
+        let _ = up_to_seq;
+        Err(HsmError::BackendError(
+            "audit log not supported by this backend".into(),
+        ))
     }
 }
 
@@ -242,6 +263,38 @@ pub fn create_backup(kind: HsmBackendKind) -> Result<Box<dyn HsmBackup>> {
 // freely across threads.
 // ---------------------------------------------------------------------------
 
+/// HSM internal audit log snapshot.
+pub mod audit_log {
+    /// A single entry from the HSM's internal audit log.
+    #[derive(Debug, Clone)]
+    pub struct HsmAuditEntry {
+        /// Monotonic command sequence number.
+        pub item: u16,
+        /// Command code byte.
+        pub command: u8,
+        /// Auth key ID used for the session that issued this command.
+        pub session_key: u16,
+        /// Target object ID affected by the command.
+        pub target_key: u16,
+        /// Secondary key ID (e.g. wrap key for export/import).
+        pub second_key: u16,
+        /// Result code byte.
+        pub result: u8,
+        /// HSM systick at command execution.
+        pub tick: u32,
+        /// 16-byte truncated SHA-256 digest chain.
+        pub digest: [u8; 16],
+    }
+
+    /// Snapshot of the HSM audit log.
+    #[derive(Debug, Clone)]
+    pub struct HsmAuditSnapshot {
+        pub unlogged_boot_events: u16,
+        pub unlogged_auth_events: u16,
+        pub entries: Vec<HsmAuditEntry>,
+    }
+}
+
 enum HsmRequest {
     Login {
         pin: SecretString,
@@ -271,6 +324,13 @@ enum HsmRequest {
     },
     ListSlotDetails {
         tx: std::sync::mpsc::SyncSender<Result<Vec<SlotTokenInfo>>>,
+    },
+    GetAuditLog {
+        tx: std::sync::mpsc::SyncSender<Result<HsmAuditSnapshot>>,
+    },
+    DrainAuditLog {
+        up_to_seq: u16,
+        tx: std::sync::mpsc::SyncSender<Result<()>>,
     },
 }
 
@@ -302,6 +362,12 @@ fn actor_loop(mut hsm: Box<dyn Hsm>, rx: std::sync::mpsc::Receiver<HsmRequest>) 
             }
             HsmRequest::ListSlotDetails { tx } => {
                 let _ = tx.send(hsm.list_slot_details());
+            }
+            HsmRequest::GetAuditLog { tx } => {
+                let _ = tx.send(hsm.get_audit_log());
+            }
+            HsmRequest::DrainAuditLog { up_to_seq, tx } => {
+                let _ = tx.send(hsm.drain_audit_log(up_to_seq));
             }
         }
     }
@@ -385,5 +451,13 @@ impl Hsm for HsmActor {
 
     fn public_key_der(&self, key: KeyHandle) -> Result<Vec<u8>> {
         self.call(|tx| HsmRequest::PublicKeyDer { key, tx })
+    }
+
+    fn get_audit_log(&self) -> Result<HsmAuditSnapshot> {
+        self.call(|tx| HsmRequest::GetAuditLog { tx })
+    }
+
+    fn drain_audit_log(&self, up_to_seq: u16) -> Result<()> {
+        self.call(|tx| HsmRequest::DrainAuditLog { up_to_seq, tx })
     }
 }

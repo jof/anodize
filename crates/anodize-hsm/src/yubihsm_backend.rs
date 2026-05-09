@@ -9,8 +9,8 @@ use secrecy::{ExposeSecret, SecretString};
 use sha2::Digest as _;
 
 use crate::{
-    BackupResult, BackupTarget, Hsm, HsmBackend, HsmBackup, HsmDeviceInfo, HsmError, HsmInventory,
-    KeyHandle, KeySpec, Result, SignMech, SlotTokenInfo,
+    BackupResult, BackupTarget, Hsm, HsmAuditEntry, HsmAuditSnapshot, HsmBackend, HsmBackup,
+    HsmDeviceInfo, HsmError, HsmInventory, KeyHandle, KeySpec, Result, SignMech, SlotTokenInfo,
 };
 
 // Default auth key slot on factory-fresh YubiHSM2 devices.
@@ -386,6 +386,44 @@ impl Hsm for YubiHsmSession {
             }]),
             Err(e) => Err(HsmError::BackendError(format!("device_info: {e}"))),
         }
+    }
+
+    fn get_audit_log(&self) -> Result<HsmAuditSnapshot> {
+        let log = self
+            .client
+            .get_log_entries()
+            .map_err(|e| HsmError::BackendError(format!("get_log_entries: {e}")))?;
+
+        let entries = log
+            .entries
+            .iter()
+            .map(|e| HsmAuditEntry {
+                item: e.item,
+                command: e.cmd as u8,
+                session_key: e.session_key,
+                target_key: e.target_key,
+                second_key: e.second_key,
+                result: match e.result {
+                    yubihsm::response::Code::Success(_) => 0,
+                    _ => 0xff,
+                },
+                tick: e.tick,
+                digest: e.digest.0,
+            })
+            .collect();
+
+        Ok(HsmAuditSnapshot {
+            unlogged_boot_events: log.unlogged_boot_events,
+            unlogged_auth_events: log.unlogged_auth_events,
+            entries,
+        })
+    }
+
+    fn drain_audit_log(&self, up_to_seq: u16) -> Result<()> {
+        self.client
+            .set_log_index(up_to_seq)
+            .map_err(|e| HsmError::BackendError(format!("set_log_index: {e}")))?;
+        Ok(())
     }
 }
 

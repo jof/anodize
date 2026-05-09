@@ -764,6 +764,7 @@ mod tests {
                 revocation_list: vec![],
                 crl_number: 5,
                 last_audit_hash: "deadbeef".into(),
+                last_hsm_log_seq: None,
             }),
         }
     }
