@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use anodize_config::state::SessionState;
 use anodize_config::{Profile, RevocationEntry};
@@ -167,6 +167,12 @@ impl SssContext {
     }
 }
 
+/// Maximum elapsed time since the last clock confirmation before a
+/// re-confirm is required.  On a live-boot, air-gapped system the clock
+/// cannot drift, but the guard catches the case where the operator walks
+/// away mid-ceremony and returns much later.
+pub const CLOCK_DRIFT_THRESHOLD: Duration = Duration::from_secs(5 * 60);
+
 /// Top-level application state.
 pub struct App {
     pub running: bool,
@@ -210,6 +216,11 @@ pub struct App {
     // Two-key confirmation dialog (modal overlay)
     pub confirm_dialog: Option<ConfirmDialog>,
 
+    // When true, the current ClockReconfirm is gating a disc burn (not a
+    // signing operation).  After re-confirm, proceed directly to the
+    // ConfirmCertBurn confirm dialog instead of dispatching crypto.
+    pub pending_burn_reconfirm: bool,
+
     // Content area vertical scroll offset
     pub content_scroll: u16,
 }
@@ -243,6 +254,7 @@ impl App {
             current_op: None,
             pin_buf: String::new(),
             confirm_dialog: None,
+            pending_burn_reconfirm: false,
             content_scroll: 0,
         }
     }
@@ -254,6 +266,15 @@ impl App {
         }
         self.status = s;
         self.content_scroll = 0;
+    }
+
+    /// Returns `true` if the operator's clock confirmation is recent enough
+    /// for a disc-write operation (within [`CLOCK_DRIFT_THRESHOLD`]).
+    pub fn clock_is_fresh(&self) -> bool {
+        match self.confirmed_time {
+            Some(t) => t.elapsed().unwrap_or(Duration::ZERO) < CLOCK_DRIFT_THRESHOLD,
+            None => false,
+        }
     }
 
     /// Process a crossterm key event at the app level.
@@ -809,14 +830,24 @@ impl App {
                 );
             }
             Action::ConfirmCertBurn => {
-                self.show_confirm(
-                    "Write Certificate to Disc",
-                    vec![
-                        "This will write the certificate and CRL to disc.".into(),
-                        "The disc session is permanent and cannot be erased.".into(),
-                    ],
-                    Action::DoStartBurn,
-                );
+                if self.clock_is_fresh() {
+                    self.show_confirm(
+                        "Write Certificate to Disc",
+                        vec![
+                            "This will write the certificate and CRL to disc.".into(),
+                            "The disc session is permanent and cannot be erased.".into(),
+                        ],
+                        Action::DoStartBurn,
+                    );
+                } else {
+                    // Clock confirmation has gone stale — ask the operator to
+                    // re-verify before writing timestamped data to disc.
+                    self.pending_burn_reconfirm = true;
+                    self.ceremony.state = CeremonyPhase::ClockReconfirm;
+                    self.set_status(
+                        "Clock confirmation expired — please re-confirm before disc write.",
+                    );
+                }
             }
             Action::ConfirmCrlSign => {
                 self.show_confirm(
@@ -914,7 +945,22 @@ impl App {
             // Clock re-confirm: operator attests clock is correct at signing time
             Action::ReconfirmClock => {
                 self.confirmed_time = Some(SystemTime::now());
-                self.do_dispatch_after_clock_reconfirm();
+                if self.pending_burn_reconfirm {
+                    // Returning from a stale-clock redirect — go back to the
+                    // cert preview and show the burn confirmation dialog.
+                    self.pending_burn_reconfirm = false;
+                    self.ceremony.state = CeremonyPhase::Execute;
+                    self.show_confirm(
+                        "Write Certificate to Disc",
+                        vec![
+                            "This will write the certificate and CRL to disc.".into(),
+                            "The disc session is permanent and cannot be erased.".into(),
+                        ],
+                        Action::DoStartBurn,
+                    );
+                } else {
+                    self.do_dispatch_after_clock_reconfirm();
+                }
             }
 
             // Disc/Shuttle
@@ -1027,6 +1073,7 @@ impl App {
 
             Action::CeremonyCancel => {
                 self.current_op = None;
+                self.pending_burn_reconfirm = false;
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.set_status("Cancelled.");
             }

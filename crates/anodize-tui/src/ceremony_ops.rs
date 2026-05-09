@@ -3091,4 +3091,117 @@ mod tests {
         assert_eq!(app.ceremony.state, CeremonyPhase::OperationSelect);
         assert!(app.current_op.is_none());
     }
+
+    // ── Clock drift guard tests ────────────────────────────────────────
+
+    #[test]
+    fn clock_is_fresh_when_just_confirmed() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.confirmed_time = Some(std::time::SystemTime::now());
+        assert!(app.clock_is_fresh());
+    }
+
+    #[test]
+    fn clock_is_stale_when_never_confirmed() {
+        let app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        assert!(!app.clock_is_fresh());
+    }
+
+    #[test]
+    fn clock_is_stale_after_threshold() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.confirmed_time = Some(std::time::SystemTime::now() - crate::app::CLOCK_DRIFT_THRESHOLD);
+        assert!(
+            !app.clock_is_fresh(),
+            "clock should be stale at exactly the threshold"
+        );
+    }
+
+    #[test]
+    fn confirm_cert_burn_with_fresh_clock_opens_dialog() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.confirmed_time = Some(std::time::SystemTime::now());
+        app.ceremony.state = CeremonyPhase::Execute;
+        app.current_op = Some(Operation::InitRoot);
+
+        app.update(Action::ConfirmCertBurn);
+
+        assert!(
+            app.confirm_dialog.is_some(),
+            "fresh clock should open confirm dialog"
+        );
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::Execute,
+            "should stay in Execute"
+        );
+    }
+
+    #[test]
+    fn confirm_cert_burn_with_stale_clock_redirects_to_reconfirm() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.confirmed_time = Some(std::time::SystemTime::now() - crate::app::CLOCK_DRIFT_THRESHOLD);
+        app.ceremony.state = CeremonyPhase::Execute;
+        app.current_op = Some(Operation::InitRoot);
+
+        app.update(Action::ConfirmCertBurn);
+
+        assert!(
+            app.confirm_dialog.is_none(),
+            "stale clock should NOT open confirm dialog"
+        );
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::ClockReconfirm,
+            "should redirect to ClockReconfirm"
+        );
+        assert!(app.pending_burn_reconfirm);
+    }
+
+    #[test]
+    fn reconfirm_clock_after_stale_burn_resumes_execute() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.pending_burn_reconfirm = true;
+        app.ceremony.state = CeremonyPhase::ClockReconfirm;
+        app.current_op = Some(Operation::InitRoot);
+
+        app.update(Action::ReconfirmClock);
+
+        assert!(
+            !app.pending_burn_reconfirm,
+            "flag should be cleared after reconfirm"
+        );
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::Execute,
+            "should return to Execute after reconfirm"
+        );
+        assert!(
+            app.confirm_dialog.is_some(),
+            "should open burn confirm dialog"
+        );
+        assert!(
+            app.clock_is_fresh(),
+            "clock should be fresh after reconfirm"
+        );
+    }
+
+    #[test]
+    fn esc_from_stale_clock_reconfirm_clears_flag() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.mode = crate::action::Mode::Ceremony;
+        app.setup_complete = true;
+        app.pending_burn_reconfirm = true;
+        app.ceremony.state = CeremonyPhase::ClockReconfirm;
+        app.current_op = Some(Operation::InitRoot);
+
+        let action = app.handle_key_event(key(KeyCode::Esc));
+        app.update(action);
+
+        assert!(
+            !app.pending_burn_reconfirm,
+            "CeremonyCancel should clear pending_burn_reconfirm"
+        );
+        assert_eq!(app.ceremony.state, CeremonyPhase::OperationSelect);
+    }
 }

@@ -1,14 +1,5 @@
 # TODO
 
-## Clock drift guard blocks disc write
-
-The "Clock drift > 5 min since ClockCheck" warning appears in the status bar after
-the ceremony takes several minutes (e.g. typing 34-word shares twice). Once the
-drift guard fires, the cert preview shows `[1] Proceed to disc write` but the
-write modal's confirm step doesn't advance. Either:
-- Relax the drift threshold for dev builds, or
-- Let the operator re-confirm the clock without restarting the entire ceremony.
-
 ## InitRoot: escape during share validation can leave half-initialized state
 
 During InitRoot, after shares have been generated and the operator is validating
