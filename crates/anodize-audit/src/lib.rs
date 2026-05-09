@@ -262,6 +262,49 @@ impl AuditLog {
     }
 }
 
+/// Walk a JSONL audit log held in memory, verify every entry hash and chain
+/// linkage, and return the record count.
+pub fn verify_log_bytes(data: &[u8]) -> Result<u64, AuditError> {
+    let mut count = 0u64;
+
+    for line in data.split(|&b| b == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+
+        let record: Record = serde_json::from_slice(line).map_err(|e| AuditError::Json {
+            seq: count,
+            source: e,
+        })?;
+
+        if record.seq != count {
+            return Err(AuditError::SeqMismatch {
+                expected: count,
+                actual: record.seq,
+            });
+        }
+
+        let expected_hash = compute_entry_hash(
+            record.seq,
+            &record.timestamp,
+            &record.event,
+            &record.op_data,
+            &record.prev_hash,
+        );
+        if expected_hash != record.entry_hash {
+            return Err(AuditError::ChainBroken {
+                seq: record.seq,
+                expected: expected_hash,
+                actual: record.entry_hash,
+            });
+        }
+
+        count += 1;
+    }
+
+    Ok(count)
+}
+
 /// Walk the JSONL log, verify every entry hash and chain linkage, return the record count.
 pub fn verify_log(path: &Path) -> Result<u64, AuditError> {
     let file = fs::File::open(path).map_err(|e| AuditError::Io {

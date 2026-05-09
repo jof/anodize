@@ -9,6 +9,7 @@ name = "anodize-shuttle"
 path = "src/main.rs"
 
 [dependencies]
+anodize-audit  = { path = "../anodize-audit" }
 anodize-config = { path = "../anodize-config" }
 clap           = { workspace = true }
 anyhow         = { workspace = true }

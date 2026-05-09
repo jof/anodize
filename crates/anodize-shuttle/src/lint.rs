@@ -186,17 +186,11 @@ pub fn run(args: LintArgs) -> Result<()> {
 
     let audit_path = root.join("audit.log");
     if audit_path.exists() {
-        match validate_audit_log(&audit_path) {
-            Ok((count, chain_ok)) => {
-                let chain_str = if chain_ok { "chain OK" } else { "CHAIN BROKEN" };
-                let msg = format!("audit.log: {count} records, {chain_str}");
-                if chain_ok {
-                    info.push(msg);
-                } else {
-                    errors.push(msg);
-                }
+        match anodize_audit::verify_log(&audit_path) {
+            Ok(count) => {
+                info.push(format!("audit.log: {count} records, chain OK"));
             }
-            Err(e) => errors.push(format!("audit.log: INVALID — {e}")),
+            Err(e) => errors.push(format!("audit.log: CHAIN BROKEN — {e}")),
         }
     }
 
@@ -414,38 +408,6 @@ fn validate_revoked_toml(path: &Path) -> Result<usize> {
     let data = std::fs::read(path)?;
     let entries = anodize_config::parse_revocation_list(&data)?;
     Ok(entries.len())
-}
-
-fn validate_audit_log(path: &Path) -> Result<(usize, bool)> {
-    let data = std::fs::read(path)?;
-    let mut count = 0usize;
-    let mut prev_hash: Option<String> = None;
-    let mut chain_ok = true;
-
-    for line in data.split(|&b| b == b'\n') {
-        if line.is_empty() {
-            continue;
-        }
-        let record: serde_json::Value =
-            serde_json::from_slice(line).context("audit.log: line is not valid JSON")?;
-
-        if let Some(expected) = &prev_hash {
-            let actual = record
-                .get("prev_hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if actual != expected {
-                chain_ok = false;
-            }
-        }
-        prev_hash = record
-            .get("entry_hash")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_owned());
-        count += 1;
-    }
-
-    Ok((count, chain_ok))
 }
 
 fn sha256_fingerprint(data: &[u8]) -> String {
