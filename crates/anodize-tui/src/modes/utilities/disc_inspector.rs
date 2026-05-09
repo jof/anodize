@@ -798,6 +798,7 @@ mod tests {
             migrate_sessions: vec![],
             migrate_chain_ok: false,
             migrate_total_bytes: 0,
+            cert_preview_lines: Vec::new(),
             validate_report_lines: Vec::new(),
             validate_has_hsm: false,
             validate_findings: Vec::new(),

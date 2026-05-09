@@ -169,7 +169,7 @@ impl CeremonyMode {
             CeremonyPhase::DiscDone => "Disc Session Written",
             CeremonyPhase::Planning(PlanningState::LoadCsr) => "Select Certificate Profile",
             CeremonyPhase::Planning(PlanningState::CsrPreview) => {
-                "CSR Review \u{2014} VERIFY BEFORE SIGNING"
+                "Certificate Review \u{2014} VERIFY BEFORE SIGNING"
             }
             CeremonyPhase::Planning(PlanningState::RevokeSelect) => {
                 "Revoke Certificate \u{2014} Select Certificate"
@@ -349,30 +349,36 @@ impl CeremonyMode {
             }
 
             CeremonyPhase::Planning(PlanningState::CsrPreview) => {
-                let subject = app
-                    .data
-                    .csr_subject_display
-                    .as_deref()
-                    .unwrap_or("(unknown)");
-                let profile_name = app
-                    .profile
-                    .as_ref()
-                    .and_then(|p| {
-                        app.data
-                            .selected_profile_idx
-                            .map(|i| p.cert_profiles[i].name.as_str())
-                    })
-                    .unwrap_or("?");
-                vec![
-                    String::new(),
-                    format!("  CSR Subject : {subject}"),
-                    format!("  Profile     : {profile_name}"),
-                    String::new(),
-                    "  The CSR DER bytes are recorded in the intent audit log.".into(),
-                    String::new(),
-                    "  [1]  Sign CSR and write to disc".into(),
-                    "  [q]  Cancel".into(),
-                ]
+                let mut lines = if app.data.cert_preview_lines.is_empty() {
+                    // Fallback if preview wasn't built (shouldn't happen).
+                    let subject = app
+                        .data
+                        .csr_subject_display
+                        .as_deref()
+                        .unwrap_or("(unknown)");
+                    let profile_name = app
+                        .profile
+                        .as_ref()
+                        .and_then(|p| {
+                            app.data
+                                .selected_profile_idx
+                                .map(|i| p.cert_profiles[i].name.as_str())
+                        })
+                        .unwrap_or("?");
+                    vec![
+                        String::new(),
+                        format!("  CSR Subject : {subject}"),
+                        format!("  Profile     : {profile_name}"),
+                        String::new(),
+                    ]
+                } else {
+                    app.data.cert_preview_lines.clone()
+                };
+                lines.push("  The CSR DER bytes are recorded in the intent audit log.".into());
+                lines.push(String::new());
+                lines.push("  [1]  Sign CSR and write to disc".into());
+                lines.push("  [q]  Cancel".into());
+                lines
             }
 
             CeremonyPhase::Execute => {

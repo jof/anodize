@@ -44,3 +44,7 @@ tracing-subscriber.workspace = true
 x509-cert.workspace = true
 nix.workspace = true
 time.workspace = true
+spki.workspace = true
+
+[dev-dependencies]
+p256.workspace = true

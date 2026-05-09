@@ -106,6 +106,8 @@ pub struct CeremonyData {
     pub migrate_sessions: Vec<SessionEntry>,
     pub migrate_chain_ok: bool,
     pub migrate_total_bytes: u64,
+    // Compiled certificate preview (CSR + profile → final cert structure)
+    pub cert_preview_lines: Vec<String>,
     // Disc validation
     pub validate_report_lines: Vec<String>,
     pub validate_has_hsm: bool,
@@ -132,6 +134,7 @@ impl CeremonyData {
             migrate_sessions: Vec::new(),
             migrate_chain_ok: false,
             migrate_total_bytes: 0,
+            cert_preview_lines: Vec::new(),
             validate_report_lines: Vec::new(),
             validate_has_hsm: false,
             validate_findings: Vec::new(),
@@ -765,8 +768,29 @@ impl App {
             }
             Action::SelectCertProfile(idx) => {
                 self.data.selected_profile_idx = Some(idx);
+                // Eagerly load root cert so the preview can show the real issuer DN.
+                if self.data.root_cert_der.is_none() {
+                    self.data.root_cert_der =
+                        crate::helpers::load_root_cert_der_from_sessions(&self.disc.prior_sessions);
+                }
+                // Build compiled certificate preview from CSR + profile + issuer.
+                if let (Some(csr_der), Some(profile)) =
+                    (self.data.csr_der.as_ref(), self.profile.as_ref())
+                {
+                    let prof = &profile.cert_profiles[idx];
+                    let cdp = profile.ca.cdp_url.as_deref();
+                    self.data.cert_preview_lines = crate::helpers::build_cert_preview(
+                        csr_der,
+                        prof,
+                        &profile.ca.common_name,
+                        &profile.ca.organization,
+                        &profile.ca.country,
+                        cdp,
+                        self.data.root_cert_der.as_deref(),
+                    );
+                }
                 self.ceremony.set_state_csr_preview();
-                self.set_status("Review CSR and profile. [1] to proceed, [q] to cancel.");
+                self.set_status("Review certificate document. [1] to proceed, [q] to cancel.");
             }
             Action::ConfirmCsrSign => {
                 self.show_confirm(
