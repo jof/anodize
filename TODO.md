@@ -14,15 +14,6 @@ operator. A future migration flow would let them carry the audit chain to a fres
 
 Separate TUI state or `--migrate-disc` CLI flag. Plan when multi-cert ceremony flow matures.
 
-## ~~State machine: intent burn → cert generation transition~~ (FIXED)
-
-Fixed: added `PostCommitError` phase to `CeremonyPhase`. `do_bootstrap_hsm`,
-`do_login_with_pin`, `do_generate_and_build`, `do_find_and_build`, and
-`do_build_cert` now return `Result<(), String>`. Extracted `post_intent_init_root`
-helper. `tick_intent_burn` transitions to `PostCommitError` on failure instead of
-silently advancing to `Execute`. Operator sees the error and can `[1]` retry or
-`[Esc]` abort. Safety-net removed.
-
 ## Clock drift guard blocks disc write
 
 The "Clock drift > 5 min since ClockCheck" warning appears in the status bar after
@@ -31,18 +22,6 @@ drift guard fires, the cert preview shows `[1] Proceed to disc write` but the
 write modal's confirm step doesn't advance. Either:
 - Relax the drift threshold for dev builds, or
 - Let the operator re-confirm the clock without restarting the entire ceremony.
-
-## ~~TUI: add j/k scroll hint to share display panel~~ ✅
-
-Done. Key hints (`[j/k] Scroll`, `[Enter]`, `[S]`, `[Esc]`) now render in a
-fixed 2-line footer pinned to the bottom of the share reveal panel, always
-visible regardless of scroll position. Scroll offset is also clamped.
-
-## TUI: share panel height
-
-Consider making the share panel expand to fill available terminal height, or
-auto-paginate shares into groups that fit the panel. Currently the panel is a fixed
-12-row box regardless of terminal size.
 
 ## InitRoot: escape during share validation can leave half-initialized state
 
@@ -54,13 +33,6 @@ occurred. On the next boot the appliance may not recognize the incomplete state
 cleanly. Need to either:
 - Prevent escape/quit during the share validation phase, or
 - Detect and recover from the half-initialized state on next launch.
-
-## ~~InitRoot: share validation should verify all shares, not just a quorum~~ (FIXED)
-
-Fixed: `ShareInput` now has a `verify_all` flag. When set (during `ShareVerify`
-and `RekeyShareVerify` phases), every custodian must re-enter their share—not
-just a threshold quorum. The UI title, remaining-count, completion message, and
-instruction panels all reflect the all-shares requirement.
 
 ## TUI: revoke cert input should accept Escape in serial field
 
@@ -137,6 +109,54 @@ verify the exact extensions, key usages, validity period, issuer chain, and any
 profile-injected fields before authorizing the signature. Showing the certificate
 as it will be signed (rather than its two inputs separately) eliminates guesswork
 and makes the approval decision meaningful.
+
+## Unify certificate serial number generation and prevent reuse
+
+Serial number generation in `anodize-ca/src/lib.rs` uses two unrelated codepaths:
+
+- **Root CA** (`build_self_signed_root`): 128-bit random via `random_serial()`.
+- **Subordinate certs** (`sign_intermediate_csr`): nanosecond Unix timestamp
+  truncated to `u64`.
+
+These should be consolidated into a single `generate_serial()` function that:
+
+1. **Uses the same entropy source for all certs.** 128-bit random is the right
+   default (per CA/Browser Forum Baseline Requirements §7.1, serials must contain
+   at least 64 bits of output from a CSPRNG). The timestamp approach is weaker—two
+   signing operations in the same nanosecond would collide, and the serial leaks
+   the exact signing time.
+
+2. **Checks for collisions against previously-issued serials.** For the self-signed
+   root there is nothing to check against (it is the first cert the CA issues). For
+   every subsequent certificate the CA signs, the function should accept an iterator
+   of previously-issued serial numbers (extracted from `prior_sessions` `.CRT`
+   files) and reject/regenerate if a collision is found. With 128-bit random serials
+   this is astronomically unlikely, but an explicit check costs nothing and
+   eliminates the theoretical risk entirely.
+
+### Proposed API
+
+```rust
+/// Generate a fresh serial number that does not collide with any
+/// previously-issued serial.  `existing` may be empty for the root cert.
+fn generate_serial(
+    existing: &HashSet<SerialNumber>,
+) -> Result<SerialNumber, CaError>;
+```
+
+### Call sites to update
+
+- `build_self_signed_root()` — pass empty set (no prior certs).
+- `sign_intermediate_csr()` — pass set of serials from `prior_sessions`.
+- Any future CRL or cross-sign codepaths.
+
+### Notes
+
+- The `cert_list` gathered for the revocation picker (`CertSummary`) already
+  walks `prior_sessions` and extracts serials. Factor the serial-set extraction
+  into a shared helper so both the picker and serial generation can use it.
+- The collision check loop should cap retries (e.g. 8) and fail hard rather than
+  loop forever, as a paranoid defense against CSPRNG failure.
 
 ## CSR signature verification: flexible algorithm support
 
