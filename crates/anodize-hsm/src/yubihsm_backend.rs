@@ -182,6 +182,57 @@ impl HsmBackend for YubiHsmBackend {
 
         tracing::info!("YubiHSM bootstrap: created auth key {ANODIZE_AUTH_KEY_ID}");
 
+        // 2a. Enable Force Audit permanently — HSM blocks ops when log is full.
+        client
+            .set_force_audit_option(yubihsm::audit::AuditOption::Fix)
+            .map_err(|e| HsmError::BackendError(format!("set_force_audit_option: {e}")))?;
+
+        tracing::info!("YubiHSM bootstrap: force audit set to Fix");
+
+        // 2b. Fix per-command audit for all security-critical commands.
+        const FIXED_AUDIT_COMMANDS: &[yubihsm::command::Code] = &[
+            yubihsm::command::Code::SignEcdsa,
+            yubihsm::command::Code::GenerateAsymmetricKey,
+            yubihsm::command::Code::GetPublicKey,
+            yubihsm::command::Code::PutAuthenticationKey,
+            yubihsm::command::Code::ChangeAuthenticationKey,
+            yubihsm::command::Code::DeleteObject,
+            yubihsm::command::Code::PutWrapKey,
+            yubihsm::command::Code::ExportWrapped,
+            yubihsm::command::Code::ImportWrapped,
+            yubihsm::command::Code::GetObjectInfo,
+            yubihsm::command::Code::GetLogEntries,
+            yubihsm::command::Code::SetOption,
+        ];
+
+        for &cmd in FIXED_AUDIT_COMMANDS {
+            client
+                .set_command_audit_option(cmd, yubihsm::audit::AuditOption::Fix)
+                .map_err(|e| {
+                    HsmError::BackendError(format!("set_command_audit_option({cmd:?}): {e}"))
+                })?;
+        }
+
+        tracing::info!(
+            "YubiHSM bootstrap: fixed audit for {} commands",
+            FIXED_AUDIT_COMMANDS.len()
+        );
+
+        // 2c. Drain the initial log so the validator has a clean baseline.
+        let log = client
+            .get_log_entries()
+            .map_err(|e| HsmError::BackendError(format!("get_log_entries: {e}")))?;
+        if let Some(last) = log.entries.last() {
+            client
+                .set_log_index(last.item)
+                .map_err(|e| HsmError::BackendError(format!("set_log_index: {e}")))?;
+        }
+
+        tracing::info!(
+            "YubiHSM bootstrap: drained {} initial log entries",
+            log.entries.len()
+        );
+
         // 3. Delete the factory default auth key to lock down the device.
         client
             .delete_object(
