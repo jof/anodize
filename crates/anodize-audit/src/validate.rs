@@ -212,13 +212,22 @@ pub fn validate_session_continuity(sessions: &[SessionSnapshot]) -> Vec<Finding>
         let check = format!("session.continuity[{}→{}]", i - 1, i);
 
         // Every file from the prior session must exist in the current session
-        // with identical content.
+        // with identical content.  AUDIT.LOG and STATE.JSON are exempt from
+        // the content check — they legitimately grow/change between session
+        // directories and are verified separately by validate_audit_chain
+        // and the state-field checks above.
+        const MUTABLE_FILES: &[&str] = &["AUDIT.LOG", "STATE.JSON"];
         let mut missing: Vec<String> = Vec::new();
         let mut changed: Vec<String> = Vec::new();
         for (name, prev_hash) in &prev.file_hashes {
             match curr.file_hashes.get(name) {
                 None => missing.push(name.clone()),
-                Some(curr_hash) if curr_hash != prev_hash => changed.push(name.clone()),
+                Some(curr_hash)
+                    if curr_hash != prev_hash
+                        && !MUTABLE_FILES.iter().any(|m| name.eq_ignore_ascii_case(m)) =>
+                {
+                    changed.push(name.clone())
+                }
                 _ => {}
             }
         }
@@ -743,12 +752,7 @@ mod tests {
 
     #[test]
     fn session_continuity_superset() {
-        let s0 = make_session_with_files(
-            0,
-            &[("AUDIT.LOG", "log-v1")],
-            &["key.generate"],
-            0,
-        );
+        let s0 = make_session_with_files(0, &[("AUDIT.LOG", "log-v1")], &["key.generate"], 0);
         let s1 = make_session_with_files(
             1,
             &[
@@ -790,12 +794,7 @@ mod tests {
 
     #[test]
     fn session_continuity_changed_content() {
-        let s0 = make_session_with_files(
-            0,
-            &[("ROOT.CRT", "original-cert")],
-            &["key.generate"],
-            0,
-        );
+        let s0 = make_session_with_files(0, &[("ROOT.CRT", "original-cert")], &["key.generate"], 0);
         // Session 1 has ROOT.CRT but with different content.
         let s1 = make_session_with_files(
             1,
@@ -812,7 +811,12 @@ mod tests {
     #[test]
     fn session_continuity_crl_regression() {
         let s0 = make_session_with_files(0, &[("a", "x")], &["key.generate"], 5);
-        let s1 = make_session_with_files(1, &[("a", "x"), ("b", "y")], &["key.generate", "crl.issue"], 3);
+        let s1 = make_session_with_files(
+            1,
+            &[("a", "x"), ("b", "y")],
+            &["key.generate", "crl.issue"],
+            3,
+        );
         let findings = validate_session_continuity(&[s0, s1]);
         assert!(findings
             .iter()
@@ -857,7 +861,12 @@ mod tests {
         };
         let s1 = SessionSnapshot {
             index: 1,
-            file_hashes: [("a".to_string(), "h1".to_string()), ("b".to_string(), "h2".to_string())].into_iter().collect(),
+            file_hashes: [
+                ("a".to_string(), "h1".to_string()),
+                ("b".to_string(), "h2".to_string()),
+            ]
+            .into_iter()
+            .collect(),
             audit_records: chain.clone(),
             state: StateFields {
                 root_cert_sha256: "a".repeat(64),
@@ -983,7 +992,12 @@ mod tests {
     #[test]
     fn session_continuity_root_cert_change() {
         let mut s0 = make_session_with_files(0, &[("a", "x")], &["key.generate"], 0);
-        let mut s1 = make_session_with_files(1, &[("a", "x"), ("b", "y")], &["key.generate", "cert.issue"], 0);
+        let mut s1 = make_session_with_files(
+            1,
+            &[("a", "x"), ("b", "y")],
+            &["key.generate", "cert.issue"],
+            0,
+        );
         s0.state.root_cert_sha256 = "a".repeat(64);
         s1.state.root_cert_sha256 = "b".repeat(64);
         let findings = validate_session_continuity(&[s0, s1]);
@@ -1026,7 +1040,12 @@ mod tests {
         );
         let s1 = SessionSnapshot {
             index: 1,
-            file_hashes: [("a".to_string(), "h1".to_string()), ("b".to_string(), "h2".to_string())].into_iter().collect(),
+            file_hashes: [
+                ("a".to_string(), "h1".to_string()),
+                ("b".to_string(), "h2".to_string()),
+            ]
+            .into_iter()
+            .collect(),
             audit_records: vec![bad_record],
             state: StateFields {
                 root_cert_sha256: "a".repeat(64),

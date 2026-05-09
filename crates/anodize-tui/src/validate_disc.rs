@@ -65,7 +65,8 @@ fn main() -> Result<()> {
             .into_owned();
 
         // Collect file names and SHA-256 content hashes.
-        let mut file_hashes: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        let mut file_hashes: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
         if let Ok(entries) = std::fs::read_dir(dir) {
             for e in entries.flatten() {
                 if let Some(name) = e.file_name().to_str() {
