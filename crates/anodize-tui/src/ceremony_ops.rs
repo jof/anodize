@@ -1036,6 +1036,10 @@ impl App {
     /// the new PIN, so it either fails auth (YubiHSM) or is filtered by
     /// `token_label` (PKCS#11).  Returns the list of device identifiers that
     /// were successfully updated.
+    ///
+    /// **Recovery**: if any backup device fails to change PIN, this function
+    /// rolls back all already-changed backups and the primary HSM to the old
+    /// PIN, leaving every device in a known, consistent state.
     pub(crate) fn do_rekey_change_pin_backups(
         &mut self,
         old_pin_hex: &str,
@@ -1054,7 +1058,7 @@ impl App {
             .map_err(|e| format!("Enumerate backup targets: {e}"))?;
 
         let new_pin = SecretString::new(new_pin_hex.to_string());
-        let mut changed = Vec::new();
+        let mut changed: Vec<String> = Vec::new();
 
         for target in &targets {
             // Skip primary HSM and devices without the signing key
@@ -1068,10 +1072,17 @@ impl App {
                     tracing::info!(device = %target.identifier, "RekeyShares: backup PIN changed");
                 }
                 Err(e) => {
-                    // Fail immediately — TODO #7 will add proper recovery.
+                    tracing::error!(
+                        device = %target.identifier,
+                        "RekeyShares: backup PIN change failed: {e}, initiating rollback"
+                    );
+                    // Roll back already-changed backups to the old PIN.
+                    Self::rollback_backup_pins(&*backup_impl, &changed, &new_pin, &old_pin);
+                    // Roll back primary HSM to the old PIN.
+                    Self::rollback_primary_pin(self.hw.actor.as_mut(), &new_pin, &old_pin);
                     return Err(format!(
                         "PIN change failed on backup {}: {e}. \
-                         Primary HSM was already changed; backups may be inconsistent.",
+                         All HSMs rolled back to old PIN.",
                         target.identifier
                     ));
                 }
@@ -1087,6 +1098,51 @@ impl App {
         }
 
         Ok(changed)
+    }
+
+    /// Roll back PIN on a list of backup devices from `current_pin` back to
+    /// `target_pin`.  Errors are logged but not propagated — this is a
+    /// best-effort recovery path.
+    fn rollback_backup_pins(
+        backup_impl: &dyn anodize_hsm::HsmBackup,
+        device_ids: &[String],
+        current_pin: &SecretString,
+        target_pin: &SecretString,
+    ) {
+        for id in device_ids {
+            match backup_impl.change_pin_on_device(id, current_pin, target_pin) {
+                Ok(()) => {
+                    tracing::info!(device = %id, "RekeyShares: backup rolled back to old PIN");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        device = %id,
+                        "RekeyShares: CRITICAL — backup rollback failed: {e}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Roll back the primary HSM PIN from `current_pin` to `target_pin`.
+    /// Errors are logged but not propagated.
+    fn rollback_primary_pin(
+        actor: Option<&mut anodize_hsm::HsmActor>,
+        current_pin: &SecretString,
+        target_pin: &SecretString,
+    ) {
+        if let Some(actor) = actor {
+            match actor.change_pin(current_pin, target_pin) {
+                Ok(()) => {
+                    tracing::info!("RekeyShares: primary HSM rolled back to old PIN");
+                }
+                Err(e) => {
+                    tracing::error!("RekeyShares: CRITICAL — primary rollback failed: {e}");
+                }
+            }
+        } else {
+            tracing::error!("RekeyShares: no HSM actor available for primary rollback");
+        }
     }
 
     // ── Mode 2: Load CSR ──────────────────────────────────────────────────────

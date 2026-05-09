@@ -25,19 +25,6 @@ second open, confirming the first session was committed and the disc remained
 appendable. Full end-to-end test (two complete session writes in one ceremony run)
 is blocked by the state machine bug above.
 
-## 7. RekeyShares: failure recovery for multi-HSM PIN change
-
-If PIN change succeeds on HSM A but fails on HSM B, there must be a defined
-recovery path:
-
-- The old PIN is still known (just reconstructed from shares), so rollback on A
-  is possible.
-- Options: (a) roll back A to old PIN on any failure, (b) record partial state
-  and let the operator retry B, (c) both.
-- Must not leave any HSM in an unknown authentication state.
-
-Depends on: backup PIN propagation (done).
-
 ## 8. Dev disc swap automation for MigrateDisc testing
 
 `MigrateDisc` prompts "Insert Blank Target Disc."  In the dev/QEMU environment

@@ -253,7 +253,9 @@ The HSM PIN is a 32-byte random value split via Shamir over GF(256) (`anodize-ss
 9. **Update `pin_verify_hash`** in `STATE.JSON` to reflect the new PIN.
 10. **Write rekey record session** to disc with `pin_rotated: true` and `backup_devices_updated` in the audit log.
 
-The old PIN is held in memory alongside the new PIN only for the duration of the `change_pin` calls (primary + backups), then discarded. If `change_pin` fails on the primary, the old PIN remains valid and the operation aborts cleanly. If a backup device fails, the primary has already been changed — the audit log records which backups were updated, and a future ceremony can reconcile any inconsistency (see TODO #7).
+The old PIN is held in memory alongside the new PIN only for the duration of the `change_pin` calls (primary + backups), then discarded.
+
+**Failure recovery**: if `change_pin` fails on the primary, the old PIN remains valid and the operation aborts cleanly — no state is written to disc. If a backup device fails mid-propagation, the system performs an automatic rollback: all already-changed backup devices are reverted to the old PIN via `change_pin_on_device(new, old)`, then the primary HSM is also rolled back via `change_pin(new, old)`. This guarantees that every HSM is left in a known, consistent state (old PIN) on any failure. Rollback errors are logged at CRITICAL level but do not propagate — if rollback itself fails, the operator is informed via the error message and the audit log records the partial state.
 
 This eliminates the risk that a colluding set of former custodians could reconstruct the original PIN even after losing custodianship.
 

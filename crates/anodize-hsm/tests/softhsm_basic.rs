@@ -347,6 +347,79 @@ fn change_pin_on_device_via_backup() {
     println!("change_pin_on_device (Pkcs11BackupImpl): OK");
 }
 
+/// Simulate rollback: change PIN then reverse it, verify original PIN works.
+#[test]
+fn change_pin_on_device_rollback() {
+    let (module, _conf) = match softhsm_env() {
+        Some(v) => v,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE or SOFTHSM2_CONF not set");
+            return;
+        }
+    };
+
+    init_test_token("anodize-chpin-rollback");
+
+    let backup = anodize_hsm::Pkcs11BackupImpl::new().expect("Pkcs11BackupImpl::new");
+    use anodize_hsm::HsmBackup;
+
+    let original_pin = secrecy::SecretString::new("1234".to_string());
+    let new_pin = secrecy::SecretString::new("changed".to_string());
+
+    // Forward: change to new PIN
+    backup
+        .change_pin_on_device("anodize-chpin-rollback", &original_pin, &new_pin)
+        .expect("forward change_pin_on_device");
+
+    // Rollback: revert to original PIN
+    backup
+        .change_pin_on_device("anodize-chpin-rollback", &new_pin, &original_pin)
+        .expect("rollback change_pin_on_device");
+
+    // Verify original PIN works after rollback
+    let mut hsm = Pkcs11Hsm::new(&module, "anodize-chpin-rollback").expect("open session");
+    hsm.login(&original_pin)
+        .expect("login with original pin after rollback");
+    hsm.logout().expect("logout");
+
+    // Verify new PIN no longer works
+    let mut hsm2 = Pkcs11Hsm::new(&module, "anodize-chpin-rollback").expect("open session");
+    assert!(
+        hsm2.login(&new_pin).is_err(),
+        "new PIN should be rejected after rollback"
+    );
+
+    println!("change_pin_on_device rollback: OK");
+}
+
+/// change_pin_on_device with wrong old PIN fails cleanly.
+#[test]
+fn change_pin_on_device_wrong_pin_fails() {
+    let (_module, _conf) = match softhsm_env() {
+        Some(v) => v,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE or SOFTHSM2_CONF not set");
+            return;
+        }
+    };
+
+    init_test_token("anodize-chpin-wrongpin");
+
+    let backup = anodize_hsm::Pkcs11BackupImpl::new().expect("Pkcs11BackupImpl::new");
+    use anodize_hsm::HsmBackup;
+
+    let wrong_pin = secrecy::SecretString::new("wrong".to_string());
+    let new_pin = secrecy::SecretString::new("whatever".to_string());
+
+    let result = backup.change_pin_on_device("anodize-chpin-wrongpin", &wrong_pin, &new_pin);
+    assert!(
+        result.is_err(),
+        "change_pin_on_device with wrong PIN should fail"
+    );
+
+    println!("change_pin_on_device wrong PIN rejection: OK");
+}
+
 /// change_pin_on_device works through dyn HsmBackup (object safety).
 #[test]
 fn change_pin_on_device_dyn_dispatch() {
