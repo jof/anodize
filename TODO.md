@@ -31,54 +31,6 @@ Add a command to enumerate USB devices that could be discs (e.g. USB mass-storag
 devices, optical drives). Useful for operator discovery before ceremony start.
 The `lint --list-usb` help text references this but it doesn't exist yet.
 
-## Unify certificate serial number generation and prevent reuse
-
-Serial number generation in `anodize-ca/src/lib.rs` uses two unrelated codepaths:
-
-- **Root CA** (`build_self_signed_root`): 128-bit random via `random_serial()`.
-- **Subordinate certs** (`sign_intermediate_csr`): nanosecond Unix timestamp
-  truncated to `u64`.
-
-These should be consolidated into a single `generate_serial()` function that:
-
-1. **Uses the same entropy source for all certs.** 128-bit random is the right
-   default (per CA/Browser Forum Baseline Requirements §7.1, serials must contain
-   at least 64 bits of output from a CSPRNG). The timestamp approach is weaker—two
-   signing operations in the same nanosecond would collide, and the serial leaks
-   the exact signing time.
-
-2. **Checks for collisions against previously-issued serials.** For the self-signed
-   root there is nothing to check against (it is the first cert the CA issues). For
-   every subsequent certificate the CA signs, the function should accept an iterator
-   of previously-issued serial numbers (extracted from `prior_sessions` `.CRT`
-   files) and reject/regenerate if a collision is found. With 128-bit random serials
-   this is astronomically unlikely, but an explicit check costs nothing and
-   eliminates the theoretical risk entirely.
-
-### Proposed API
-
-```rust
-/// Generate a fresh serial number that does not collide with any
-/// previously-issued serial.  `existing` may be empty for the root cert.
-fn generate_serial(
-    existing: &HashSet<SerialNumber>,
-) -> Result<SerialNumber, CaError>;
-```
-
-### Call sites to update
-
-- `build_self_signed_root()` — pass empty set (no prior certs).
-- `sign_intermediate_csr()` — pass set of serials from `prior_sessions`.
-- Any future CRL or cross-sign codepaths.
-
-### Notes
-
-- The `cert_list` gathered for the revocation picker (`CertSummary`) already
-  walks `prior_sessions` and extracts serials. Factor the serial-set extraction
-  into a shared helper so both the picker and serial generation can use it.
-- The collision check loop should cap retries (e.g. 8) and fail hard rather than
-  loop forever, as a paranoid defense against CSPRNG failure.
-
 ## CSR signature verification: flexible algorithm support
 
 `verify_csr_signature()` in `anodize-ca/src/lib.rs` currently hard-codes two
