@@ -98,7 +98,7 @@ impl SetupMode {
                         format!("  Shuttle     : {}", app.shuttle_mount.display()),
                         String::new(),
                         "  [1]  Detect HSM and continue".into(),
-                        "  [q]  Quit".into(),
+                        "  [Ctrl+C]  Quit".into(),
                     ]
                 } else {
                     vec![
@@ -147,7 +147,7 @@ impl SetupMode {
                     "  Only the InitRoot operation will be available.".into(),
                     String::new(),
                     "  [1]  Acknowledge and continue".into(),
-                    "  [q]  Quit".into(),
+                    "  [Ctrl+C]  Quit".into(),
                 ]
             }
             SetupPhase::WaitDisc => {

@@ -334,7 +334,7 @@ impl App {
                 self.set_status(format!(
                     "WARNING: HSM token '{label}' does not exist yet. \
                      This is expected for a first-time InitRoot ceremony. \
-                     Press [1] to continue or [q] to quit.",
+                     Press [1] to continue or [Ctrl+C] to quit.",
                 ));
             }
             Err(e) => {

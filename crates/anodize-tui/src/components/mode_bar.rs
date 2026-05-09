@@ -64,7 +64,7 @@ impl Widget for ModeBar {
         }
 
         // Right-aligned quit hint
-        let quit_hint = " [q] quit ";
+        let quit_hint = " [Ctrl+C] quit ";
         let quit_x = area.right().saturating_sub(quit_hint.len() as u16);
         if quit_x > x {
             buf.set_string(
