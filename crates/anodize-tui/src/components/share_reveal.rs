@@ -102,7 +102,9 @@ impl ShareReveal {
                 (self.current + 1).min(self.shares.len()),
                 self.shares.len()
             ))
-            .border_style(Style::default().fg(Color::Magenta));
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::MODAL_BORDER_MAGENTA)
+            .title_style(crate::theme::MODAL_BORDER_MAGENTA);
 
         let inner = block.inner(area);
         frame.render_widget(block, area);

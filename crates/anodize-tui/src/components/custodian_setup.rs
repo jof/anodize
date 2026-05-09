@@ -217,7 +217,12 @@ impl CustodianSetup {
             }
         }
 
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::BORDER)
+            .title_style(crate::theme::TITLE);
         let para = Paragraph::new(lines)
             .block(block)
             .wrap(Wrap { trim: false });

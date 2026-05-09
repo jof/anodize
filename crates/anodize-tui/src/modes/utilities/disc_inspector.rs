@@ -205,7 +205,12 @@ impl DiscInspectorState {
             .split(area);
 
         // Banner
-        let banner_block = Block::default().borders(Borders::ALL).title("Disc Summary");
+        let banner_block = Block::default()
+            .borders(Borders::ALL)
+            .title("Disc Summary")
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::BORDER)
+            .title_style(crate::theme::TITLE);
         let banner_para = Paragraph::new(Text::from(self.banner_lines.join("\n")))
             .block(banner_block)
             .wrap(Wrap { trim: false });
@@ -226,7 +231,10 @@ impl DiscInspectorState {
     fn render_session_list(&self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .borders(Borders::ALL)
-            .title("Sessions  [j/k] navigate  [Enter] inspect  [r] refresh  [Esc] back");
+            .title("Sessions  [j/k] navigate  [Enter] inspect  [r] refresh  [Esc] back")
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::BORDER)
+            .title_style(crate::theme::TITLE);
 
         if self.session_count == 0 {
             let para = Paragraph::new("  No sessions on disc.")
@@ -274,7 +282,12 @@ impl DiscInspectorState {
         } else {
             "Session Detail  [Esc] back".into()
         };
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::BORDER)
+            .title_style(crate::theme::TITLE);
         let para = Paragraph::new(Text::from(self.detail_lines.join("\n")))
             .block(block)
             .wrap(Wrap { trim: false })
@@ -291,13 +304,10 @@ impl DiscInspectorState {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan))
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::MODAL_BORDER_CYAN)
             .title("Certificate Detail")
-            .title_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .title_style(crate::theme::MODAL_TITLE_CYAN);
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
 

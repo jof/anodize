@@ -13,6 +13,7 @@ mod event;
 mod helpers;
 mod media;
 mod modes;
+mod theme;
 mod tui;
 
 use std::path::PathBuf;

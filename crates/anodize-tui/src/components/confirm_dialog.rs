@@ -87,13 +87,10 @@ impl ConfirmDialog {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow))
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::MODAL_BORDER_YELLOW)
             .title(self.title.as_str())
-            .title_style(
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .title_style(crate::theme::MODAL_TITLE_YELLOW);
 
         let inner = block.inner(dialog_area);
         frame.render_widget(block, dialog_area);

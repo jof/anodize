@@ -176,7 +176,12 @@ impl SetupMode {
             }
         };
 
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::BORDER)
+            .title_style(crate::theme::TITLE);
         let para = Paragraph::new(Text::from(content.join("\n")))
             .block(block)
             .wrap(Wrap { trim: false })
@@ -220,7 +225,12 @@ impl Component for SetupMode {
 
     fn render(&self, frame: &mut Frame, area: Rect) {
         // Fallback render without app context (used if called generically)
-        let block = Block::default().borders(Borders::ALL).title("Setup");
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Setup")
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::BORDER)
+            .title_style(crate::theme::TITLE);
         let para = Paragraph::new("  (Setup mode)").block(block);
         frame.render_widget(para, area);
     }

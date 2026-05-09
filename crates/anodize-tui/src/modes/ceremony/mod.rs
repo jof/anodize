@@ -214,7 +214,12 @@ impl CeremonyMode {
 
         let content = self.build_body(app);
 
-        let block = Block::default().borders(Borders::ALL).title(title);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title)
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::BORDER)
+            .title_style(crate::theme::TITLE);
         let para = Paragraph::new(Text::from(content.join("\n")))
             .block(block)
             .wrap(Wrap { trim: false })
@@ -881,7 +886,12 @@ impl Component for CeremonyMode {
 
     fn render(&self, frame: &mut Frame, area: Rect) {
         // Fallback render without app context
-        let block = Block::default().borders(Borders::ALL).title("Ceremony");
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Ceremony")
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::BORDER)
+            .title_style(crate::theme::TITLE);
         let para = Paragraph::new("  (Ceremony mode)").block(block);
         frame.render_widget(para, area);
     }

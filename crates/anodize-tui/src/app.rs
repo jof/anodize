@@ -949,7 +949,10 @@ impl App {
             let content = self.log_lines.join("\n");
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title("Status Log  [L/Esc] close  [\u{2191}/\u{2193}/PgUp/PgDn] scroll");
+                .title("Status Log  [L/Esc] close  [\u{2191}/\u{2193}/PgUp/PgDn] scroll")
+                .style(crate::theme::BLOCK)
+                .border_style(crate::theme::BORDER)
+                .title_style(crate::theme::TITLE);
             let para = ratatui::widgets::Paragraph::new(content.as_str())
                 .block(block)
                 .wrap(ratatui::widgets::Wrap { trim: false })
@@ -1003,7 +1006,9 @@ impl App {
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .border_style(border_style),
+                    .style(crate::theme::BLOCK)
+                    .border_style(border_style)
+                    .title_style(crate::theme::TITLE),
             );
         frame.render_widget(header, chunks[0]);
 
@@ -1043,7 +1048,14 @@ impl App {
         // Status line
         let status = Paragraph::new(self.status.as_str())
             .style(Style::default().fg(Color::Yellow))
-            .block(Block::default().borders(Borders::ALL).title("Status"));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Status")
+                    .style(crate::theme::BLOCK)
+                    .border_style(crate::theme::BORDER)
+                    .title_style(crate::theme::TITLE),
+            );
         frame.render_widget(status, chunks[5]);
 
         // Confirm dialog overlay (rendered last, on top)

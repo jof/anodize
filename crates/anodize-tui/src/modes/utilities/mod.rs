@@ -328,7 +328,12 @@ impl UtilitiesMode {
     pub fn render_with_app(&self, frame: &mut Frame, area: Rect, app: &App) {
         match self.screen {
             UtilScreen::Menu => {
-                let block = Block::default().borders(Borders::ALL).title("Utilities");
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .title("Utilities")
+                    .style(crate::theme::BLOCK)
+                    .border_style(crate::theme::BORDER)
+                    .title_style(crate::theme::TITLE);
                 let content = vec![
                     "",
                     "  [1]  System Info",
@@ -346,7 +351,10 @@ impl UtilitiesMode {
             UtilScreen::SystemInfo => {
                 let block = Block::default()
                     .borders(Borders::ALL)
-                    .title("System Info  [r] refresh  [Esc] back");
+                    .title("System Info  [r] refresh  [Esc] back")
+                    .style(crate::theme::BLOCK)
+                    .border_style(crate::theme::BORDER)
+                    .title_style(crate::theme::TITLE);
                 let para = Paragraph::new(Text::from(self.cached_lines.join("\n")))
                     .block(block)
                     .wrap(Wrap { trim: false })
@@ -356,7 +364,10 @@ impl UtilitiesMode {
             UtilScreen::AuditLog => {
                 let block = Block::default()
                     .borders(Borders::ALL)
-                    .title("Audit Log  [r] refresh  [Esc] back");
+                    .title("Audit Log  [r] refresh  [Esc] back")
+                    .style(crate::theme::BLOCK)
+                    .border_style(crate::theme::BORDER)
+                    .title_style(crate::theme::TITLE);
                 let para = Paragraph::new(Text::from(self.cached_lines.join("\n")))
                     .block(block)
                     .wrap(Wrap { trim: false })
@@ -366,7 +377,10 @@ impl UtilitiesMode {
             UtilScreen::HsmInventory => {
                 let block = Block::default()
                     .borders(Borders::ALL)
-                    .title("HSM Inventory  [r] refresh  [Esc] back");
+                    .title("HSM Inventory  [r] refresh  [Esc] back")
+                    .style(crate::theme::BLOCK)
+                    .border_style(crate::theme::BORDER)
+                    .title_style(crate::theme::TITLE);
                 let para = Paragraph::new(Text::from(self.cached_lines.join("\n")))
                     .block(block)
                     .wrap(Wrap { trim: false })
@@ -416,7 +430,12 @@ impl Component for UtilitiesMode {
 
     fn render(&self, frame: &mut Frame, area: Rect) {
         // Fallback — render_with_app is preferred
-        let block = Block::default().borders(Borders::ALL).title("Utilities");
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Utilities")
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::BORDER)
+            .title_style(crate::theme::TITLE);
         let para = Paragraph::new(Text::from("  Press F3 to enter Utilities"))
             .block(block)
             .wrap(Wrap { trim: false });

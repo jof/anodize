@@ -264,7 +264,9 @@ impl ShareInput {
                     self.threshold
                 }
             ))
-            .border_style(Style::default().fg(Color::Cyan));
+            .style(crate::theme::BLOCK)
+            .border_style(crate::theme::MODAL_BORDER_CYAN)
+            .title_style(crate::theme::MODAL_TITLE_CYAN);
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
