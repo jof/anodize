@@ -494,7 +494,7 @@ impl CeremonyMode {
                 for entry in &app.data.revocation_list {
                     let reason = entry.reason.as_deref().unwrap_or("(no reason)");
                     lines.push(format!(
-                        "    serial={:>20}  time={}  reason={}",
+                        "    serial={}  time={}  reason={}",
                         entry.serial, entry.revocation_time, reason
                     ));
                 }
@@ -519,7 +519,7 @@ impl CeremonyMode {
                     for entry in &app.data.revocation_list {
                         let reason = entry.reason.as_deref().unwrap_or("(no reason)");
                         lines.push(format!(
-                            "    serial={:>20}  time={}  reason={}",
+                            "    serial={}  time={}  reason={}",
                             entry.serial, entry.revocation_time, reason
                         ));
                     }
