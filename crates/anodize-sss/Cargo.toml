@@ -14,4 +14,15 @@ serde_json  = { workspace = true }
 thiserror   = { workspace = true }
 zeroize     = { version = "1", features = ["derive"] }
 
+[dependencies.anodize-config]
+path = "../anodize-config"
+optional = true
+
+[features]
+recover-bin = ["anodize-config"]
+
+[[bin]]
+name = "anodize-recover"
+required-features = ["recover-bin"]
+
 [dev-dependencies]

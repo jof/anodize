@@ -486,4 +486,50 @@ mod tests {
         let r = reconstruct(&[shares[0].clone(), shares[1].clone()], 2).unwrap();
         assert_eq!(r, secret);
     }
+
+    /// End-to-end recovery flow: mirrors what anodize-recover does.
+    /// Generate PIN → split → wordlist encode → build commitments/hash →
+    /// wordlist decode → verify commitments → reconstruct → verify hash.
+    #[test]
+    fn end_to_end_recovery_flow() {
+        let names = ["Alice", "Bob", "Carol"];
+        let threshold = 2u8;
+        let total = 3u8;
+
+        // Generate random 32-byte PIN (same as ceremony_ops).
+        let mut pin_bytes = [0u8; 32];
+        getrandom::getrandom(&mut pin_bytes).unwrap();
+
+        // Split into shares.
+        let shares = split(&pin_bytes, threshold, total).unwrap();
+
+        // Build commitments and pin_verify_hash (same as STATE.JSON).
+        let commitments: Vec<[u8; 32]> = shares
+            .iter()
+            .zip(names.iter())
+            .map(|(s, n)| s.commitment(n))
+            .collect();
+        let expected_pin_hash = pin_verify_hash(&pin_bytes);
+
+        // Encode shares to wordlists (simulating paper transcription).
+        let wordlists: Vec<String> = shares.iter().map(|s| s.to_words()).collect();
+
+        // Recovery: decode wordlists back, verify commitments, reconstruct.
+        let mut recovered_shares = Vec::new();
+        for (i, words) in wordlists.iter().enumerate().take(threshold as usize) {
+            let share = Share::from_words(words, 32).unwrap();
+            assert_eq!(share.index, shares[i].index);
+            verify_commitment(&share, names[i], &commitments[i]).unwrap();
+            recovered_shares.push(share);
+        }
+
+        let recovered = reconstruct(&recovered_shares, threshold).unwrap();
+        assert_eq!(recovered, pin_bytes);
+        assert_eq!(pin_verify_hash(&recovered), expected_pin_hash);
+
+        // The hex-encoded PIN is what yubihsm-shell receives.
+        let pin_hex = hex::encode(&recovered);
+        assert_eq!(pin_hex.len(), 64);
+        assert_eq!(pin_hex, hex::encode(&pin_bytes));
+    }
 }
