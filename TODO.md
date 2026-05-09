@@ -31,41 +31,63 @@ Add a command to enumerate USB devices that could be discs (e.g. USB mass-storag
 devices, optical drives). Useful for operator discovery before ceremony start.
 The `lint --list-usb` help text references this but it doesn't exist yet.
 
-## CSR signature verification: flexible algorithm support
+## CSR signature verification: remaining algorithm support
 
-`verify_csr_signature()` in `anodize-ca/src/lib.rs` currently hard-codes two
-combinations: P-256/SHA-256 and P-384/SHA-384. It assumes the signature algorithm
-OID implies a specific curve—e.g. `ecdsa-with-SHA256` → P-256—so a CSR that pairs
-a P-384 key with a SHA-256 signature (perfectly valid, and what OpenSSL produces by
-default for `ecparam -name secp384r1`) is rejected as corrupt.
+ECDSA (curve, hash) decoupling is done — `verify_csr_signature()` now parses the
+curve from SPKI and the hash from the signature algorithm OID independently, using
+`PrehashVerifier` for all combinations. Covered matrix:
 
-The fix should decouple curve detection from the hash algorithm OID:
+| Curve | Hash    | OID (sigAlg)          | Status |
+|-------|---------|-----------------------|--------|
+| P-256 | SHA-256 | 1.2.840.10045.4.3.2   | ✅     |
+| P-256 | SHA-384 | 1.2.840.10045.4.3.3   | ✅     |
+| P-256 | SHA-512 | 1.2.840.10045.4.3.4   | ✅     |
+| P-384 | SHA-256 | 1.2.840.10045.4.3.2   | ✅     |
+| P-384 | SHA-384 | 1.2.840.10045.4.3.3   | ✅     |
+| P-384 | SHA-512 | 1.2.840.10045.4.3.4   | ✅     |
 
-1. **Parse the SPKI to determine the actual curve** (from the algorithm parameters
-   OID inside SubjectPublicKeyInfo), independent of the signature algorithm.
-2. **Match the signature hash from the outer algorithm OID** (SHA-256, SHA-384,
-   SHA-512).
-3. **Verify using the correct (curve, hash) pair.** This gives a matrix of
-   supported combinations rather than a 1:1 mapping.
+Still missing — needed when accepting CSRs from other PKI stacks:
 
-Target combinations to support:
+- **RSA PKCS#1 v1.5** — the standard RSA signature scheme used by the vast
+  majority of enterprise and legacy PKI deployments. Needs three OIDs:
 
-| Curve   | Hash    | OID (sigAlg)              | Status   |
-|---------|---------|---------------------------|----------|
-| P-256   | SHA-256 | 1.2.840.10045.4.3.2       | ✅ works |
-| P-256   | SHA-384 | 1.2.840.10045.4.3.3       | missing  |
-| P-384   | SHA-256 | 1.2.840.10045.4.3.2       | ❌ broken|
-| P-384   | SHA-384 | 1.2.840.10045.4.3.3       | ✅ works |
-| P-384   | SHA-512 | 1.2.840.10045.4.3.4       | missing  |
-| Ed25519 | —       | 1.3.101.112               | missing  |
-| Ed448   | —       | 1.3.101.113               | missing  |
-| RSA-PSS | SHA-256 | 1.2.840.113549.1.1.10     | missing  |
-| RSA-PSS | SHA-384 | 1.2.840.113549.1.1.10     | missing  |
+  | Key    | Hash    | OID (sigAlg)          |
+  |--------|---------|-----------------------|
+  | RSA    | SHA-256 | 1.2.840.113549.1.1.11 |
+  | RSA    | SHA-384 | 1.2.840.113549.1.1.12 |
+  | RSA    | SHA-512 | 1.2.840.113549.1.1.13 |
 
-EdDSA and RSA-PSS are lower priority but worth supporting since subordinate CAs
-from other PKI stacks may use them. The `spki` and `signature` crates already
-provide the building blocks; the main work is restructuring the match to dispatch
-on (curve, hash) rather than assuming OID ↔ curve.
+  The `rsa` crate (`pkcs1v15::VerifyingKey`) provides verification. The SPKI
+  algorithm OID is `rsaEncryption` (1.2.840.113549.1.1.1) with NULL parameters.
+  `spki_curve()` needs to be generalised to a `spki_key_type()` that returns an
+  enum covering EC curves and RSA, then dispatch verification accordingly.
+
+- **Ed25519** (OID 1.3.101.112) — lower priority but increasingly common in
+  newer PKI stacks. No hash parameter; signature is over raw TBS. The `ed25519`
+  crate provides a verifier.
+
+## Broader key algorithm support
+
+The CA currently only generates and operates with P-384 ECDSA keys (via HSM).
+Subordinate CAs and end-entity certificates from other PKI stacks may use
+different key types. Support should be added incrementally:
+
+### Classic RSA
+
+Many enterprise and legacy PKI deployments use RSA-2048 or RSA-4096 keys.
+Accepting RSA CSRs (PKCS#1 v1.5 signatures) and issuing certificates for RSA
+public keys is needed for interop with these environments. The `rsa` crate
+provides the building blocks. This does **not** require the root CA key itself
+to be RSA — only that `sign_intermediate_csr` can accept and embed RSA SPKIs.
+
+### Post-quantum cryptography (PQC)
+
+NIST PQC standards (ML-DSA / Dilithium, SLH-DSA / SPHINCS+) are being
+standardised and will eventually be required for certificate chains. Hybrid
+certificates (e.g. P-384 + ML-DSA-65 via composite signatures) are the likely
+transition path. No Rust crate ecosystem is mature enough today, but the
+architecture should anticipate pluggable signature verification so PQC
+algorithms can be added without restructuring `verify_csr_signature` again.
 
 ## cdemu: verify multi-session append after CLOSE SESSION
 
