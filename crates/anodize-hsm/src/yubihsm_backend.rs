@@ -425,6 +425,35 @@ impl Hsm for YubiHsmSession {
             .map_err(|e| HsmError::BackendError(format!("set_log_index: {e}")))?;
         Ok(())
     }
+
+    fn change_pin(&mut self, _old_pin: &SecretString, new_pin: &SecretString) -> Result<()> {
+        // The yubihsm crate doesn't expose ChangeAuthenticationKey (0x6c).
+        // Delete + re-put on the live session achieves the same result.
+        // The session remains authenticated after deleting the auth key.
+        self.client
+            .delete_object(
+                ANODIZE_AUTH_KEY_ID,
+                yubihsm::object::Type::AuthenticationKey,
+            )
+            .map_err(|e| HsmError::BackendError(format!("delete auth key: {e}")))?;
+
+        let new_key =
+            yubihsm::authentication::Key::derive_from_password(new_pin.expose_secret().as_bytes());
+        self.client
+            .put_authentication_key(
+                ANODIZE_AUTH_KEY_ID,
+                yubihsm::object::Label::from_bytes(b"anodize-auth")
+                    .map_err(|e| HsmError::BackendError(format!("label: {e}")))?,
+                yubihsm::Domain::all(),
+                yubihsm::Capability::all(),
+                yubihsm::Capability::all(),
+                yubihsm::authentication::Algorithm::default(),
+                new_key,
+            )
+            .map_err(|e| HsmError::BackendError(format!("put_authentication_key: {e}")))?;
+
+        Ok(())
+    }
 }
 
 // ── YubiHsmBackupImpl ──────────────────────────────────────────────────────────

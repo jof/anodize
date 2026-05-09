@@ -190,6 +190,69 @@ fn p384_via_actor() {
     println!("HsmActor P-384 keygen+sign+verify: OK");
 }
 
+// ── change_pin tests ─────────────────────────────────────────────────────────
+
+/// Change PIN on a SoftHSM token, then verify the new PIN works.
+#[test]
+fn change_pin_softhsm() {
+    let (module, _conf) = match softhsm_env() {
+        Some(v) => v,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE or SOFTHSM2_CONF not set");
+            return;
+        }
+    };
+
+    init_test_token("anodize-chpin");
+
+    let mut hsm = Pkcs11Hsm::new(&module, "anodize-chpin").expect("open session");
+
+    let old_pin = secrecy::SecretString::new("1234".to_string());
+    let new_pin = secrecy::SecretString::new("5678".to_string());
+
+    hsm.login(&old_pin).expect("login with old pin");
+    hsm.change_pin(&old_pin, &new_pin)
+        .expect("change_pin failed");
+    hsm.logout().expect("logout");
+
+    // Re-login with the new PIN must succeed.
+    hsm.login(&new_pin).expect("login with new pin");
+    hsm.logout().expect("logout after new pin");
+
+    println!("change_pin (SoftHSM): OK");
+}
+
+/// Change PIN through the HsmActor boundary.
+#[test]
+fn change_pin_via_actor() {
+    let (module, _conf) = match softhsm_env() {
+        Some(v) => v,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE or SOFTHSM2_CONF not set");
+            return;
+        }
+    };
+
+    init_test_token("anodize-chpin-actor");
+
+    let hsm = Pkcs11Hsm::new(&module, "anodize-chpin-actor").expect("open session");
+    let mut actor = HsmActor::spawn(Box::new(hsm));
+
+    let old_pin = secrecy::SecretString::new("1234".to_string());
+    let new_pin = secrecy::SecretString::new("5678".to_string());
+
+    actor.login(&old_pin).expect("actor login");
+    actor
+        .change_pin(&old_pin, &new_pin)
+        .expect("actor change_pin");
+    actor.logout().expect("actor logout");
+
+    actor.login(&new_pin).expect("actor login with new pin");
+    actor.logout().expect("actor logout after new pin");
+
+    println!("change_pin via HsmActor: OK");
+}
+
 // ── HsmInventory tests ───────────────────────────────────────────────────────
 
 /// Compile-time check: HsmInventory is object-safe and Send.

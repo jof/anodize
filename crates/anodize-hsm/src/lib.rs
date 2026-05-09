@@ -119,6 +119,9 @@ pub trait Hsm: Send {
             "audit log not supported by this backend".into(),
         ))
     }
+
+    /// Change the authentication PIN/key from `old_pin` to `new_pin`.
+    fn change_pin(&mut self, old_pin: &SecretString, new_pin: &SecretString) -> Result<()>;
 }
 
 /// Pluggable HSM backend — covers the full lifecycle: discover devices,
@@ -332,6 +335,11 @@ enum HsmRequest {
         up_to_seq: u16,
         tx: std::sync::mpsc::SyncSender<Result<()>>,
     },
+    ChangePin {
+        old_pin: SecretString,
+        new_pin: SecretString,
+        tx: std::sync::mpsc::SyncSender<Result<()>>,
+    },
 }
 
 fn actor_loop(mut hsm: Box<dyn Hsm>, rx: std::sync::mpsc::Receiver<HsmRequest>) {
@@ -368,6 +376,13 @@ fn actor_loop(mut hsm: Box<dyn Hsm>, rx: std::sync::mpsc::Receiver<HsmRequest>) 
             }
             HsmRequest::DrainAuditLog { up_to_seq, tx } => {
                 let _ = tx.send(hsm.drain_audit_log(up_to_seq));
+            }
+            HsmRequest::ChangePin {
+                old_pin,
+                new_pin,
+                tx,
+            } => {
+                let _ = tx.send(hsm.change_pin(&old_pin, &new_pin));
             }
         }
     }
@@ -459,5 +474,13 @@ impl Hsm for HsmActor {
 
     fn drain_audit_log(&self, up_to_seq: u16) -> Result<()> {
         self.call(|tx| HsmRequest::DrainAuditLog { up_to_seq, tx })
+    }
+
+    fn change_pin(&mut self, old_pin: &SecretString, new_pin: &SecretString) -> Result<()> {
+        self.call(|tx| HsmRequest::ChangePin {
+            old_pin: old_pin.clone(),
+            new_pin: new_pin.clone(),
+            tx,
+        })
     }
 }

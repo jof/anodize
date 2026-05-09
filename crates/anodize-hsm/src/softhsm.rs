@@ -591,6 +591,13 @@ impl Hsm for Pkcs11Hsm {
             .filter_map(|&s| token_info_from_slot(&self.ctx, s))
             .collect())
     }
+
+    fn change_pin(&mut self, old_pin: &SecretString, new_pin: &SecretString) -> Result<()> {
+        let old_auth = AuthPin::new(old_pin.expose_secret().to_string());
+        let new_auth = AuthPin::new(new_pin.expose_secret().to_string());
+        self.session().set_pin(&old_auth, &new_auth)?;
+        Ok(())
+    }
 }
 
 // ── HsmInventory ─────────────────────────────────────────────────────────────
