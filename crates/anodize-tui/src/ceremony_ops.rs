@@ -1771,6 +1771,21 @@ impl App {
             if !self.data.revocation_list.is_empty() {
                 state.revocation_list = self.data.revocation_list.clone();
             }
+
+            // Record last HSM audit log sequence number for continuity anchoring.
+            if let Some(ref actor) = self.hw.actor {
+                match actor.get_audit_log() {
+                    Ok(snapshot) => {
+                        if let Some(last) = snapshot.entries.last() {
+                            state.last_hsm_log_seq = Some(last.item as u64);
+                            tracing::info!(seq = last.item, "recorded last_hsm_log_seq");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("could not read HSM audit log: {e}");
+                    }
+                }
+            }
         }
     }
 
