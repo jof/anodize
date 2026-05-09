@@ -806,6 +806,8 @@ impl App {
                 if self.data.revoke_phase == 0 && !self.data.revoke_serial_buf.is_empty() {
                     self.data.revoke_phase = 1;
                     self.set_status("Reason (optional, Enter to skip): e.g. key-compromise");
+                } else if self.data.revoke_phase == 1 {
+                    self.do_add_revocation_entry();
                 }
             }
             Action::RevokeInputCancel => {

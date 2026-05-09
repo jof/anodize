@@ -49,9 +49,13 @@ fn main() {
             println!("\n=== Wrap Round-Trip Test ===\n");
             wrap_roundtrip(&client_a, &client_b, a, b);
         }
+        Some("--reset") => {
+            println!("\n=== Factory Reset All Devices ===\n");
+            factory_reset_all(&serials);
+        }
         Some(other) => {
             eprintln!("Unknown flag: {other}");
-            eprintln!("Usage: yubihsm_enum [--dual|--roundtrip] SERIAL_A SERIAL_B");
+            eprintln!("Usage: yubihsm_enum [--dual|--roundtrip|--reset] SERIAL_A SERIAL_B");
             process::exit(1);
         }
         None => {
@@ -318,6 +322,55 @@ fn cleanup_object(
 ) {
     // Ignore errors (object may not exist).
     let _ = client.delete_object(id, obj_type);
+}
+
+// ── Factory Reset ─────────────────────────────────────────────────────────────
+
+fn factory_reset_all(serials: &[yubihsm::device::SerialNumber]) {
+    for serial in serials {
+        print!("Resetting serial {serial}... ");
+        let cfg = yubihsm::UsbConfig {
+            serial: Some(*serial),
+            ..Default::default()
+        };
+
+        // Try factory-default auth first.
+        let connector = yubihsm::Connector::usb(&cfg);
+        let creds = yubihsm::Credentials::from_password(DEFAULT_AUTH_KEY_ID, DEFAULT_AUTH_PASSWORD);
+        match yubihsm::Client::open(connector, creds, false) {
+            Ok(client) => {
+                // Free audit log entries first (required if force-audit filled the log).
+                match client.get_log_entries() {
+                    Ok(entries) => {
+                        if let Some(last) = entries.entries.last() {
+                            let _ = client.set_log_index(last.item);
+                            println!("freed {} audit log entries... ", entries.entries.len());
+                        }
+                    }
+                    Err(e) => println!("(get_log_entries: {e})"),
+                }
+                match client.reset_device() {
+                    Ok(_) => println!("✓ reset"),
+                    Err(e) => println!("✗ reset failed: {e}"),
+                }
+                // Device needs time to reboot after reset
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                continue;
+            }
+            Err(_) => {}
+        }
+
+        // Factory auth failed — try anodize auth key (ID 2) with no password
+        // (won't work without the real PIN, but try common dev passwords).
+        // If nothing works, the device needs manual reset via yubihsm-shell.
+        println!(
+            "✗ cannot authenticate (device is bootstrapped — needs manual reset or known PIN)"
+        );
+    }
+    println!("\nDone. Re-enumerate to verify:");
+    // Brief delay then re-enumerate
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    enumerate();
 }
 
 // ── CLI helpers ────────────────────────────────────────────────────────────────

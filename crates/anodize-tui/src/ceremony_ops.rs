@@ -2594,6 +2594,82 @@ mod tests {
         );
     }
 
+    // ── Revoke phase regression tests ────────────────────────────────────
+
+    fn revoke_app() -> crate::app::App {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.ceremony.state =
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::RevokeInput);
+        app
+    }
+
+    #[test]
+    fn revoke_next_phase_advances_from_serial_to_reason() {
+        let mut app = revoke_app();
+        app.data.revoke_serial_buf = "12345".into();
+        app.data.revoke_phase = 0;
+
+        app.update(Action::RevokeInputNextPhase);
+
+        assert_eq!(
+            app.data.revoke_phase, 1,
+            "phase should advance to 1 (reason)"
+        );
+    }
+
+    #[test]
+    fn revoke_next_phase_empty_serial_stays_at_phase_0() {
+        let mut app = revoke_app();
+        app.data.revoke_serial_buf.clear();
+        app.data.revoke_phase = 0;
+
+        app.update(Action::RevokeInputNextPhase);
+
+        assert_eq!(app.data.revoke_phase, 0, "empty serial should not advance");
+    }
+
+    #[test]
+    fn revoke_next_phase_from_reason_adds_entry() {
+        let mut app = revoke_app();
+        app.data.revoke_serial_buf = "99999".into();
+        app.data.revoke_reason_buf = "key-compromise".into();
+        app.data.revoke_phase = 1;
+
+        app.update(Action::RevokeInputNextPhase);
+
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::RevokePreview),
+            "phase 1 Enter should transition to RevokePreview"
+        );
+        assert_eq!(app.data.revocation_list.len(), 1);
+        assert_eq!(app.data.revocation_list[0].serial, 99999);
+        assert_eq!(
+            app.data.revocation_list[0].reason.as_deref(),
+            Some("key-compromise")
+        );
+    }
+
+    #[test]
+    fn revoke_next_phase_from_reason_empty_reason_adds_entry() {
+        let mut app = revoke_app();
+        app.data.revoke_serial_buf = "42".into();
+        app.data.revoke_reason_buf.clear();
+        app.data.revoke_phase = 1;
+
+        app.update(Action::RevokeInputNextPhase);
+
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::RevokePreview),
+        );
+        assert_eq!(app.data.revocation_list.len(), 1);
+        assert!(
+            app.data.revocation_list[0].reason.is_none(),
+            "empty reason should be None"
+        );
+    }
+
     #[test]
     fn abort_from_post_commit_error_resets_to_operation_select() {
         let mut app = test_app();

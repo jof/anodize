@@ -373,7 +373,11 @@ fn enumerate_files(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn enumerate_files_recursive(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
-    let entries = std::fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))?;
+    let entries = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("read_dir {}", dir.display())),
+    };
 
     for entry in entries.flatten() {
         let path = entry.path();

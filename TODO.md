@@ -67,6 +67,54 @@ instruction panels all reflect the all-shares requirement.
 The revoke-certificate input dialog should allow the operator to press Escape to
 cancel even while the cursor is in the serial number field.
 
+## TUI: certificate picker for revocation
+
+The revoke flow currently drops the operator into a blank serial-number text field,
+which requires out-of-band knowledge of the target certificate. Replace (or precede)
+this with a selection screen that lists every previously-signed certificate found on
+the audit disc.
+
+### Data source
+
+`prior_sessions` already contains all `.CRT` files. Walk the sessions, parse each
+`.CRT` with `Certificate::from_der`, and collect into a
+`Vec<CertSummary { serial: u64, subject: String, not_after: String, session_dir: String, already_revoked: bool }>`.
+Cross-reference against the current `revocation_list` to mark already-revoked
+entries. `ROOT.CRT` should be included but visually distinguished (root certs are
+almost never revoked in practice).
+
+### UX flow
+
+1. **New phase `RevokeSelect`** inserted before `RevokeInput`. Display a scrollable
+   list similar to the disc inspector's session list:
+   ```
+     #  Serial    Subject                     Expires      Session             Status
+     1  12345678  CN=Intermediate CA 2026,...  2027-06-01   20260508T...record  active
+     2  1         CN=Dev Root CA 2026,...      2036-05-08   20260508T...record  active
+   ```
+   - `[j/k]` or `[↑/↓]` to navigate, `[Enter]` to select, `[Esc]` to cancel.
+   - Already-revoked certs shown grayed out / struck-through with "(revoked)" tag.
+   - Selecting an already-revoked cert shows an inline warning and stays on the list.
+
+2. On `[Enter]`, auto-populate `revoke_serial_buf` with the selected serial and
+   advance to the existing `RevokeInput` phase with the serial field pre-filled and
+   cursor in the reason field (phase 1). The operator can still edit the serial if
+   needed.
+
+3. Add a `[m]` ("manual") keybind on the `RevokeSelect` screen to skip straight to
+   `RevokeInput` with an empty serial field, preserving the current workflow for
+   operators who already know the serial.
+
+### Implementation sketch
+
+- Add `RevokeSelect` variant to `PlanningState`.
+- Add `cert_list: Vec<CertSummary>` and `cert_list_cursor: usize` to `CeremonyData`.
+- `do_load_revocation()` already runs before phase entry — extend it to populate
+  `cert_list` by iterating `prior_sessions`, filtering `.CRT` files, parsing, and
+  cross-referencing `revocation_list`.
+- Render function mirrors `disc_inspector::render_session_list` pattern.
+- Keybindings: `j/k/↑/↓` scroll, `Enter` selects, `m` manual, `Esc` cancels.
+
 ## anodize-shuttle: add `list-usb` top-level command
 
 Add a command to enumerate USB devices that could be discs (e.g. USB mass-storage
