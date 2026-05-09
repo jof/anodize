@@ -700,7 +700,9 @@ impl CeremonyMode {
             }
 
             CeremonyPhase::ClockReconfirm => {
-                let now = time::OffsetDateTime::now_utc();
+                let now = time::OffsetDateTime::now_utc()
+                    .replace_nanosecond(0)
+                    .expect("0ns is always valid");
                 let time_str = now
                     .format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_else(|_| "unknown".into());

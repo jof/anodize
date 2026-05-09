@@ -31,11 +31,6 @@ Add a command to enumerate USB devices that could be discs (e.g. USB mass-storag
 devices, optical drives). Useful for operator discovery before ceremony start.
 The `lint --list-usb` help text references this but it doesn't exist yet.
 
-## TUI: clock re-confirm screen shows nanosecond precision
-
-The clock re-confirm screen displays the timestamp with nanosecond granularity.
-Seconds is sufficient—truncate the display to whole seconds.
-
 ## TUI: signing review should show the resulting certificate structure, not just CSR + profile name
 
 The CSR-signing review screen currently displays the raw CSR fields alongside the
