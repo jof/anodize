@@ -205,7 +205,9 @@ For the SoftHSM backend, the combined `CKM_ECDSA_SHA384` mechanism is tried firs
 | PKCS#11 (SoftHSM) | `cryptoki 0.7` | Maintained, real `dlopen`, production-proven |
 | YubiHSM native | `yubihsm 0.42` | Official Yubico SDK, USB HID via `libusb` |
 | X.509 building | `x509-cert 0.2` + `der 0.7` + `spki 0.7` | More control than `rcgen`. We construct the TbsCertificate and hand bytes to the HSM for signing. `rcgen` wants to own the signing key — we can't allow that. |
-| ECDSA | `p384 0.13` with `ecdsa`, `pkcs8` features | Verification in tests; VerifyingKey from SPKI DER for HsmSigner |
+| ECDSA | `p384 0.13` with `ecdsa`, `pkcs8`, `digest` features | Verification in tests; VerifyingKey from SPKI DER for HsmSigner; PrehashVerifier for CSR verification |
+| RSA | `rsa 0.9` with `sha2` feature | PKCS#1 v1.5 CSR signature verification via `pkcs1v15::VerifyingKey` |
+| Ed25519 | `ed25519-dalek 2` with `pkcs8` feature | Ed25519 CSR signature verification via `VerifyingKey::from_public_key_der` |
 | DER signature | `ecdsa` with `der` feature | `ecdsa::der::Signature<C>` for X.509 builder; `From<ecdsa::Signature<C>>` for P1363→DER |
 | CRL | `x509-cert::crl` | Same RustCrypto family |
 | Config | `serde` + `toml` | Standard |
@@ -250,6 +252,39 @@ Conservative by default. When signing a CSR to produce an intermediate:
   - `CRLDistributionPoints`: from `[ca].cdp_url` in profile
 - All other extensions from the CSR are rejected.
 - Oversized fields, unusual OIDs, and path-length overflow are explicitly tested.
+
+### CSR signature verification
+
+`verify_csr_signature()` identifies the key type from SPKI via `spki_key_type()`
+and the hash algorithm from the outer signature algorithm OID independently. This
+decoupling supports any valid (key type, hash) pairing — e.g. a P-384 key with a
+SHA-256 signature (what OpenSSL produces by default for `ecparam -name secp384r1`)
+is accepted rather than rejected.
+
+Supported matrix:
+
+| Key type          | Hash    | OID (sigAlg)          |
+|-------------------|---------|-----------------------|
+| EC P-256          | SHA-256 | 1.2.840.10045.4.3.2   |
+| EC P-256          | SHA-384 | 1.2.840.10045.4.3.3   |
+| EC P-256          | SHA-512 | 1.2.840.10045.4.3.4   |
+| EC P-384          | SHA-256 | 1.2.840.10045.4.3.2   |
+| EC P-384          | SHA-384 | 1.2.840.10045.4.3.3   |
+| EC P-384          | SHA-512 | 1.2.840.10045.4.3.4   |
+| RSA PKCS#1 v1.5   | SHA-256 | 1.2.840.113549.1.1.11 |
+| RSA PKCS#1 v1.5   | SHA-384 | 1.2.840.113549.1.1.12 |
+| RSA PKCS#1 v1.5   | SHA-512 | 1.2.840.113549.1.1.13 |
+| Ed25519           | —       | 1.3.101.112           |
+
+ECDSA verification uses `PrehashVerifier`: the TBS bytes are hashed with the
+appropriate `sha2` digest in Rust, then the prehash is verified against the DER
+signature using the curve-specific verifying key. RSA uses `rsa::pkcs1v15::VerifyingKey`
+with `Verifier` (hashes internally). Ed25519 uses `ed25519_dalek::VerifyingKey`
+with pure signature verification (no hash parameter).
+
+The `KeyType` enum and `spki_key_type()` dispatch are designed to accommodate
+future key types (e.g. PQC algorithms) without restructuring the verification
+function.
 
 ---
 

@@ -31,36 +31,6 @@ Add a command to enumerate USB devices that could be discs (e.g. USB mass-storag
 devices, optical drives). Useful for operator discovery before ceremony start.
 The `lint --list-usb` help text references this but it doesn't exist yet.
 
-## CSR signature verification — done
-
-`verify_csr_signature()` now identifies the key type from SPKI (`spki_key_type()`)
-and the hash from the signature algorithm OID independently, covering all common
-key/hash combinations:
-
-| Key type          | Hash    | OID (sigAlg)          | Status |
-|-------------------|---------|-----------------------|--------|
-| EC P-256          | SHA-256 | 1.2.840.10045.4.3.2   | ✅     |
-| EC P-256          | SHA-384 | 1.2.840.10045.4.3.3   | ✅     |
-| EC P-256          | SHA-512 | 1.2.840.10045.4.3.4   | ✅     |
-| EC P-384          | SHA-256 | 1.2.840.10045.4.3.2   | ✅     |
-| EC P-384          | SHA-384 | 1.2.840.10045.4.3.3   | ✅     |
-| EC P-384          | SHA-512 | 1.2.840.10045.4.3.4   | ✅     |
-| RSA PKCS#1 v1.5   | SHA-256 | 1.2.840.113549.1.1.11 | ✅     |
-| RSA PKCS#1 v1.5   | SHA-384 | 1.2.840.113549.1.1.12 | ✅     |
-| RSA PKCS#1 v1.5   | SHA-512 | 1.2.840.113549.1.1.13 | ✅     |
-| Ed25519           | —       | 1.3.101.112           | ✅     |
-
-All combinations have integration tests (SoftHSM-backed root CA signs the CSR).
-Unsupported algorithm OID rejection is also tested.
-
-### Future extensions (not yet needed)
-
-- **Post-quantum cryptography (PQC)** — NIST PQC standards (ML-DSA, SLH-DSA)
-  will eventually be required. Hybrid certificates (P-384 + ML-DSA-65 via
-  composite signatures) are the likely transition path. The `KeyType` enum and
-  `spki_key_type()` dispatch are designed to accommodate new key types without
-  restructuring the verification function.
-
 ## TUI: "q" instantly quits — destructive during ceremony
 
 Pressing "q" at most/many points in the TUI instantly exits the application with
