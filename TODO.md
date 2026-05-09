@@ -20,11 +20,6 @@ cleanly. Need to either:
 - Prevent escape/quit during the share validation phase, or
 - Detect and recover from the half-initialized state on next launch.
 
-## TUI: revoke cert input should accept Escape in serial field
-
-The revoke-certificate input dialog should allow the operator to press Escape to
-cancel even while the cursor is in the serial number field.
-
 ## anodize-shuttle: add `list-usb` top-level command
 
 Add a command to enumerate USB devices that could be discs (e.g. USB mass-storage

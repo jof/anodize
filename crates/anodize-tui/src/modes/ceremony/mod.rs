@@ -493,7 +493,7 @@ impl CeremonyMode {
                     format!("  Serial : {}", app.data.revoke_serial_buf),
                     format!("  Reason : {}", app.data.revoke_reason_buf),
                     String::new(),
-                    "  Enter to confirm each field. Esc (on reason) to go back.".into(),
+                    "  Enter to confirm each field. Esc to go back.".into(),
                 ]
             }
 

@@ -2693,6 +2693,38 @@ mod tests {
     }
 
     #[test]
+    fn revoke_cancel_from_serial_returns_to_select() {
+        let mut app = revoke_app();
+        app.data.revoke_phase = 0;
+
+        app.update(Action::RevokeInputCancel);
+
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::RevokeSelect),
+            "Esc in serial field should return to RevokeSelect"
+        );
+    }
+
+    #[test]
+    fn revoke_cancel_from_reason_returns_to_serial() {
+        let mut app = revoke_app();
+        app.data.revoke_phase = 1;
+
+        app.update(Action::RevokeInputCancel);
+
+        assert_eq!(
+            app.data.revoke_phase, 0,
+            "Esc in reason should go back to serial"
+        );
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::RevokeInput),
+            "Should stay in RevokeInput after Esc from reason"
+        );
+    }
+
+    #[test]
     fn revoke_next_phase_advances_from_serial_to_reason() {
         let mut app = revoke_app();
         app.data.revoke_serial_buf = "12345".into();

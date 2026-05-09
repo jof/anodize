@@ -902,8 +902,13 @@ impl App {
                 }
             }
             Action::RevokeInputCancel => {
-                self.data.revoke_phase = 0;
-                self.set_status("Enter certificate serial number (digits). Press Enter.");
+                if self.data.revoke_phase == 0 {
+                    self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokeSelect);
+                    self.set_status("Revocation cancelled.");
+                } else {
+                    self.data.revoke_phase = 0;
+                    self.set_status("Enter certificate serial number (digits). Press Enter.");
+                }
             }
 
             // Clock re-confirm: operator attests clock is correct at signing time
