@@ -152,6 +152,9 @@ pub struct SssContext {
     pub share_input: Option<crate::components::share_input::ShareInput>,
     pub share_reveal: Option<crate::components::share_reveal::ShareReveal>,
     pub custodian_setup: Option<crate::components::custodian_setup::CustodianSetup>,
+    /// Old PIN hex retained during RekeyShares PIN rotation so that
+    /// `change_pin(old, new)` can be called after share verification.
+    pub rekey_old_pin_hex: Option<String>,
 }
 
 impl SssContext {
@@ -163,6 +166,7 @@ impl SssContext {
             share_input: None,
             share_reveal: None,
             custodian_setup: None,
+            rekey_old_pin_hex: None,
         }
     }
 }
@@ -668,10 +672,23 @@ impl App {
                 if let Some(ref mut input) = self.sss.share_input {
                     input.handle_key(key);
                     if input.is_complete() {
-                        self.sss.share_input = None;
-                        self.sss.shares = None;
-                        // All shares verified → burn updated STATE.JSON directly
-                        self.do_start_burn();
+                        // Validate share round-trip and change HSM PIN before burning
+                        match self.do_rekey_change_pin() {
+                            Ok(()) => {
+                                self.sss.share_input = None;
+                                self.sss.shares = None;
+                                self.do_start_burn();
+                            }
+                            Err(e) => {
+                                tracing::error!("RekeyShares: PIN change failed: {e}");
+                                self.sss.share_input = None;
+                                self.sss.shares = None;
+                                self.sss.rekey_old_pin_hex = None;
+                                self.set_status(format!("Re-key failed: {e}"));
+                                self.ceremony.state = CeremonyPhase::OperationSelect;
+                                self.current_op = None;
+                            }
+                        }
                     }
                 }
                 return Action::Noop;
@@ -995,6 +1012,7 @@ impl App {
                 self.sss.share_input = None;
                 self.sss.share_reveal = None;
                 self.sss.custodian_setup = None;
+                self.sss.rekey_old_pin_hex = None;
                 self.current_op = None;
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.set_status("RekeyShares aborted.");

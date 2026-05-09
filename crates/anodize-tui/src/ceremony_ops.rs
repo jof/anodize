@@ -862,16 +862,29 @@ impl App {
             return;
         }
 
-        // Store reconstructed PIN for re-splitting
+        // Login to HSM with old PIN (needed for change_pin later)
+        let old_pin_hex = hex::encode(&pin_bytes);
+        if let Err(e) = self.do_login_with_pin(&old_pin_hex) {
+            self.set_status(format!("HSM login failed: {e}"));
+            self.ceremony.state = CeremonyPhase::OperationSelect;
+            self.current_op = None;
+            return;
+        }
+
+        // Store old PIN for change_pin after share verification
+        self.sss.rekey_old_pin_hex = Some(old_pin_hex);
+        // pin_buf will be overwritten with the NEW PIN during custodian confirmation
         self.pin_buf = hex::encode(&pin_bytes);
         self.sss.custodian_names.clear();
         self.sss.custodian_setup = Some(crate::components::custodian_setup::CustodianSetup::new(
             "Re-key Shares",
         ));
         self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup);
-        self.set_status("PIN verified. Enter new custodian names, then set threshold.");
+        self.set_status(
+            "PIN verified, HSM authenticated. Enter new custodian names, then set threshold.",
+        );
 
-        tracing::info!("RekeyShares: quorum reached, PIN verified, entering custodian setup");
+        tracing::info!("RekeyShares: quorum reached, PIN verified, HSM authenticated, entering custodian setup");
     }
 
     pub(crate) fn do_rekey_confirm_custodians_with_threshold(&mut self, threshold: u8) {
@@ -888,17 +901,15 @@ impl App {
 
         let total = names.len() as u8;
 
-        // PIN length: 32 bytes
-        let pin_bytes = match hex::decode(&self.pin_buf) {
-            Ok(b) => b,
-            Err(e) => {
-                self.set_status(format!("Internal error decoding PIN: {e}"));
-                return;
-            }
-        };
+        // Generate a new random 32-byte PIN (actual PIN rotation)
+        let mut new_pin_bytes = vec![0u8; 32];
+        if let Err(e) = getrandom::getrandom(&mut new_pin_bytes) {
+            self.set_status(format!("CSPRNG failure: {e}"));
+            return;
+        }
 
-        // Re-split with new custodians
-        let shares = match anodize_sss::split(&pin_bytes, threshold, total) {
+        // Split NEW PIN with new custodians
+        let shares = match anodize_sss::split(&new_pin_bytes, threshold, total) {
             Ok(s) => s,
             Err(e) => {
                 self.set_status(format!("SSS split failed: {e}"));
@@ -913,7 +924,10 @@ impl App {
             share_commitments.push(hex::encode(commitment));
         }
 
-        // Update SessionState SSS metadata
+        // Compute new pin_verify_hash for the NEW PIN
+        let new_pin_verify_hash = hex::encode(anodize_sss::pin_verify_hash(&new_pin_bytes));
+
+        // Update SessionState SSS metadata with new PIN hash
         let custodians: Vec<anodize_config::state::Custodian> = names
             .iter()
             .enumerate()
@@ -928,8 +942,11 @@ impl App {
             state.sss.total = total;
             state.sss.custodians = custodians;
             state.sss.share_commitments = share_commitments;
-            // pin_verify_hash stays the same (same PIN)
+            state.sss.pin_verify_hash = new_pin_verify_hash;
         }
+
+        // Store NEW PIN hex in pin_buf (old PIN is in sss.rekey_old_pin_hex)
+        self.pin_buf = hex::encode(&new_pin_bytes);
 
         self.sss.custodian_names = names.clone();
         self.sss.shares = Some(shares.clone());
@@ -948,8 +965,67 @@ impl App {
             threshold,
             total,
             custodians = ?self.sss.custodian_names,
-            "RekeyShares: re-split complete, entering share reveal"
+            "RekeyShares: new PIN generated, shares split, entering share reveal"
         );
+    }
+
+    /// After share verification succeeds, validate the round-trip, change the
+    /// HSM PIN, then proceed to disc burn.  Returns `Err` on failure.
+    pub(crate) fn do_rekey_change_pin(&mut self) -> Result<(), String> {
+        // Reconstruct new PIN from the just-verified shares to confirm round-trip
+        let shares = self
+            .sss
+            .share_input
+            .as_ref()
+            .map(|si| {
+                si.collected
+                    .iter()
+                    .map(|c| c.share.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let threshold = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.threshold)
+            .unwrap_or(2);
+
+        let reconstructed = anodize_sss::reconstruct(&shares, threshold)
+            .map_err(|e| format!("Share round-trip reconstruction failed: {e}"))?;
+
+        let expected_new_pin_hex = &self.pin_buf;
+        let reconstructed_hex = hex::encode(&reconstructed);
+        if reconstructed_hex != *expected_new_pin_hex {
+            return Err(
+                "Share round-trip check FAILED: reconstructed PIN does not match generated PIN."
+                    .into(),
+            );
+        }
+
+        tracing::info!("RekeyShares: share round-trip check passed");
+
+        // Change PIN on the HSM
+        let old_pin_hex = self
+            .sss
+            .rekey_old_pin_hex
+            .take()
+            .ok_or("Internal error: old PIN not available for change_pin")?;
+        let old_pin = SecretString::new(old_pin_hex);
+        let new_pin = SecretString::new(expected_new_pin_hex.clone());
+
+        let actor = self
+            .hw
+            .actor
+            .as_mut()
+            .ok_or("No HSM session for change_pin")?;
+        actor
+            .change_pin(&old_pin, &new_pin)
+            .map_err(|e| format!("HSM change_pin failed: {e}"))?;
+
+        tracing::info!("RekeyShares: HSM PIN changed successfully");
+        Ok(())
     }
 
     // ── Mode 2: Load CSR ──────────────────────────────────────────────────────
@@ -1817,6 +1893,7 @@ impl App {
                         "operation": "rekey-shares",
                         "new_threshold": new_threshold,
                         "new_total": new_total,
+                        "pin_rotated": true,
                     }),
                 ) {
                     self.set_status(format!("Audit log append failed: {e}"));

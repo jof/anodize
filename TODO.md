@@ -25,24 +25,6 @@ second open, confirming the first session was committed and the disc remained
 appendable. Full end-to-end test (two complete session writes in one ceremony run)
 is blocked by the state machine bug above.
 
-## 5. RekeyShares: actual PIN rotation with new random value
-
-The current `RekeyShares` operation only re-splits the **same** PIN to new
-custodians — `pin_verify_hash` stays identical (see `ceremony_ops.rs:931`).
-A colluding set of former custodians could reconstruct the original PIN even
-after losing custodianship.
-
-New behaviour:
-
-1. Reconstruct old PIN from quorum (existing flow).
-2. Generate a new random 32-byte PIN.
-3. Change PIN on the primary HSM via `change_pin()`.
-4. SSS-split new PIN to new custodians.
-5. Update `pin_verify_hash` in `STATE.JSON`.
-6. Write rekey record session to disc.
-
-Depends on: `change_pin` on `Hsm` trait (done).
-
 ## 6. RekeyShares: propagate PIN change to all backup HSMs
 
 After changing the primary HSM's PIN, all backup HSMs must also be updated.
@@ -52,7 +34,7 @@ Requires:
   backup audit events in the disc log, or tracked in `STATE.JSON`).
 - Iterating over all discovered backup HSMs and calling `change_pin()` on each.
 
-Depends on: TODO #5.
+Depends on: PIN rotation (done).
 
 ## 7. RekeyShares: failure recovery for multi-HSM PIN change
 

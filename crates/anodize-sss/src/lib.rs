@@ -537,4 +537,67 @@ mod tests {
         assert_eq!(pin_hex.len(), 64);
         assert_eq!(pin_hex, hex::encode(&pin_bytes));
     }
+
+    /// PIN rotation round-trip: mirrors the RekeyShares flow.
+    /// Old PIN → reconstruct from old shares → generate NEW PIN → split new →
+    /// distribute → verify all new shares → reconstruct new → confirm match →
+    /// verify old and new PINs are distinct.
+    #[test]
+    fn pin_rotation_round_trip() {
+        let old_names = ["Alice", "Bob", "Carol"];
+        let new_names = ["Dave", "Eve", "Frank", "Grace"];
+        let old_threshold = 2u8;
+        let new_threshold = 3u8;
+
+        // ── Step 1: establish old PIN (simulates prior InitRoot) ──
+        let mut old_pin = [0u8; 32];
+        getrandom::getrandom(&mut old_pin).unwrap();
+        let old_shares = split(&old_pin, old_threshold, old_names.len() as u8).unwrap();
+        let old_hash = pin_verify_hash(&old_pin);
+
+        // ── Step 2: reconstruct old PIN from quorum ──
+        let reconstructed_old =
+            reconstruct(&old_shares[..old_threshold as usize], old_threshold).unwrap();
+        assert_eq!(reconstructed_old, old_pin);
+        assert!(verify_pin_hash(&reconstructed_old, &hex::encode(old_hash)));
+
+        // ── Step 3: generate new random PIN ──
+        let mut new_pin = [0u8; 32];
+        getrandom::getrandom(&mut new_pin).unwrap();
+        // New and old PINs must differ (probabilistic, but 2^256 collision is impossible)
+        assert_ne!(old_pin, new_pin);
+
+        // ── Step 4: split new PIN to new custodians ──
+        let new_shares = split(&new_pin, new_threshold, new_names.len() as u8).unwrap();
+        let new_commitments: Vec<[u8; 32]> = new_shares
+            .iter()
+            .zip(new_names.iter())
+            .map(|(s, n)| s.commitment(n))
+            .collect();
+        let new_hash = pin_verify_hash(&new_pin);
+
+        // ── Step 5: verify ALL new shares (simulate share verification phase) ──
+        let wordlists: Vec<String> = new_shares.iter().map(|s| s.to_words()).collect();
+        let mut verified_shares = Vec::new();
+        for (i, words) in wordlists.iter().enumerate() {
+            let share = Share::from_words(words, 32).unwrap();
+            verify_commitment(&share, new_names[i], &new_commitments[i]).unwrap();
+            verified_shares.push(share);
+        }
+
+        // ── Step 6: reconstruct new PIN from verified shares (round-trip check) ──
+        let reconstructed_new =
+            reconstruct(&verified_shares[..new_threshold as usize], new_threshold).unwrap();
+        assert_eq!(reconstructed_new, new_pin, "round-trip check must pass");
+        assert_eq!(
+            hex::encode(pin_verify_hash(&reconstructed_new)),
+            hex::encode(new_hash)
+        );
+
+        // ── Step 7: confirm old PIN hash no longer matches ──
+        assert!(!verify_pin_hash(&reconstructed_new, &hex::encode(old_hash)));
+        assert!(verify_pin_hash(&reconstructed_new, &hex::encode(new_hash)));
+
+        // At this point, change_pin(old, new) would be called on the HSM.
+    }
 }

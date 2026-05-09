@@ -169,6 +169,7 @@ pub trait Hsm: Send {
     fn sign(&self, key: KeyHandle, mech: SignMech, data: &[u8]) -> Result<Vec<u8>>;
     fn public_key_der(&self, key: KeyHandle) -> Result<Vec<u8>>;
     fn list_slot_details(&self) -> Result<Vec<SlotTokenInfo>>;
+    fn change_pin(&mut self, old_pin: &SecretString, new_pin: &SecretString) -> Result<()>;
 }
 ```
 
@@ -236,6 +237,24 @@ The HSM PIN is a 32-byte random value split via Shamir over GF(256) (`anodize-ss
 **Share commitments**: each share has a SHA-256 commitment `H(index || custodian_name || y_bytes)` stored in `STATE.JSON`. At quorum time, the presented share is checked against its commitment before reconstruction proceeds, preventing share-index spoofing.
 
 **PIN verification hash**: `H(pin_bytes)` stored in `STATE.JSON` allows pre-login verification, avoiding wasting HSM retry attempts on reconstructed-PIN mismatches.
+
+### PIN rotation during RekeyShares
+
+`RekeyShares` performs a full PIN rotation — the HSM authentication credential is replaced, not merely re-split among new custodians. The protocol:
+
+1. **Reconstruct old PIN** from a quorum of existing shares (standard Quorum phase).
+2. **Login to HSM** with the reconstructed old PIN.
+3. **Generate new random 32-byte PIN** via the system CSPRNG.
+4. **SSS-split the new PIN** to the new set of custodians.
+5. **Distribute shares** to custodians (ShareReveal phase).
+6. **Verify shares** — every new custodian re-enters their share. The TUI reconstructs the PIN from the entered shares and verifies it matches the generated value (share round-trip check). This ensures no transcription errors before the irreversible HSM PIN change.
+7. **Change PIN on HSM** via `change_pin(old, new)` — only after the round-trip check succeeds.
+8. **Update `pin_verify_hash`** in `STATE.JSON` to reflect the new PIN.
+9. **Write rekey record session** to disc with `pin_rotated: true` in the audit log.
+
+The old PIN is held in memory alongside the new PIN only for the duration of the `change_pin` call, then discarded. If `change_pin` fails, the old PIN remains valid and the operation aborts cleanly — no state is written to disc.
+
+This eliminates the risk that a colluding set of former custodians could reconstruct the original PIN even after losing custodianship.
 
 ---
 
