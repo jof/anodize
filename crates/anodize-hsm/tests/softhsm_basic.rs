@@ -189,3 +189,58 @@ fn p384_via_actor() {
 
     println!("HsmActor P-384 keygen+sign+verify: OK");
 }
+
+// ── HsmInventory tests ───────────────────────────────────────────────────────
+
+/// Compile-time check: HsmInventory is object-safe and Send.
+#[test]
+fn hsm_inventory_is_object_safe_and_send() {
+    fn assert_send<T: Send>() {}
+    assert_send::<Box<dyn anodize_hsm::HsmInventory>>();
+}
+
+/// SoftHSM inventory returns the initialized token with correct fields.
+#[test]
+fn softhsm_inventory_enumerate() {
+    let (_module, _conf) = match softhsm_env() {
+        Some(v) => v,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE or SOFTHSM2_CONF not set");
+            return;
+        }
+    };
+
+    init_test_token("anodize-inv");
+
+    let module = PathBuf::from(env::var("SOFTHSM2_MODULE").unwrap());
+    let backend =
+        anodize_hsm::SoftHsmBackend::with_module(module).expect("SoftHsmBackend::with_module");
+
+    use anodize_hsm::HsmInventory;
+    let devices = backend.enumerate_devices().expect("enumerate_devices");
+
+    assert!(!devices.is_empty(), "expected at least one device");
+
+    let dev = &devices[0];
+    assert!(!dev.serial.is_empty(), "serial should not be empty");
+    assert!(!dev.model.is_empty(), "model should not be empty");
+    assert_eq!(
+        dev.auth_state, "initialized",
+        "token was initialized with a PIN"
+    );
+    // SoftHSM has no audit log
+    assert!(dev.log_used.is_none());
+    assert!(dev.log_total.is_none());
+    // No signing key on a fresh token
+    assert_eq!(dev.has_signing_key, Some(false));
+    // Wrap keys invisible without login
+    assert!(dev.has_wrap_key.is_none());
+
+    println!(
+        "SoftHSM inventory: {} device(s), first = {} / {} / {}",
+        devices.len(),
+        dev.model,
+        dev.serial,
+        dev.auth_state
+    );
+}
