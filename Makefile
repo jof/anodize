@@ -565,7 +565,7 @@ endif
 .FORCE:
 
 clean:
-	rm -rf anodize-prod-amd64.iso anodize-prod-arm64.iso anodize-dev-amd64.iso anodize-dev-arm64.iso anodize-prod-amd64.iso.sha256 fake-shuttle.img dev-disc /tmp/anodize-ovmf-vars.fd
+	rm -rf anodize-prod-amd64.iso anodize-prod-arm64.iso anodize-dev-amd64.iso anodize-dev-arm64.iso anodize-prod-amd64.iso.sha256 fake-shuttle.img anodize-ceremony-dev.bin dev-disc /tmp/anodize-ovmf-vars.fd
 
 # One-time repo setup — configures git to use the committed hooks directory.
 setup:

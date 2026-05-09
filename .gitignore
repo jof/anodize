@@ -10,6 +10,8 @@ result-*
 fake-usb.img
 fake-disc-usb.img
 fake-shuttle.img
+# Nix-built binaries (deploy-dev hot-reload artifact)
+*.bin
 # cdemu dev session disc images (virtio-9p share from QEMU guest)
 dev-disc/
 # Editor swap files
