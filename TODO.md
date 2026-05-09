@@ -24,3 +24,88 @@ SESSION` all succeed. The disc reported `status=Incomplete sessions=1` on the
 second open, confirming the first session was committed and the disc remained
 appendable. Full end-to-end test (two complete session writes in one ceremony run)
 is blocked by the state machine bug above.
+
+## 4. `Hsm` trait: add `change_pin` / `change_auth_key` method
+
+The `Hsm` trait has no PIN-change capability.  Both backends need one:
+
+- **YubiHSM**: `ChangeAuthenticationKey` (command code already listed in the
+  capabilities bitfield at `crates/anodize-hsm/src/yubihsm_backend.rs`).
+- **SoftHSM / PKCS#11**: `C_SetPIN` (already used in the `bootstrap_token`
+  fallback path at `crates/anodize-hsm/src/softhsm.rs:300`).
+
+Proposed addition to `Hsm` (or `HsmBackend`):
+
+```rust
+fn change_pin(&mut self, old_pin: &SecretString, new_pin: &SecretString) -> Result<()>;
+```
+
+No dependencies on other TODO items.
+
+## 5. RekeyShares: actual PIN rotation with new random value
+
+The current `RekeyShares` operation only re-splits the **same** PIN to new
+custodians — `pin_verify_hash` stays identical (see `ceremony_ops.rs:931`).
+A colluding set of former custodians could reconstruct the original PIN even
+after losing custodianship.
+
+New behaviour:
+
+1. Reconstruct old PIN from quorum (existing flow).
+2. Generate a new random 32-byte PIN.
+3. Change PIN on the primary HSM via `change_pin()`.
+4. SSS-split new PIN to new custodians.
+5. Update `pin_verify_hash` in `STATE.JSON`.
+6. Write rekey record session to disc.
+
+Depends on: TODO #4 (`change_pin` on `Hsm` trait).
+
+## 6. RekeyShares: propagate PIN change to all backup HSMs
+
+After changing the primary HSM's PIN, all backup HSMs must also be updated.
+Requires:
+
+- A way to discover which HSMs hold backup copies of the signing key (from
+  backup audit events in the disc log, or tracked in `STATE.JSON`).
+- Iterating over all discovered backup HSMs and calling `change_pin()` on each.
+
+Depends on: TODO #5.
+
+## 7. RekeyShares: failure recovery for multi-HSM PIN change
+
+If PIN change succeeds on HSM A but fails on HSM B, there must be a defined
+recovery path:
+
+- The old PIN is still known (just reconstructed from shares), so rollback on A
+  is possible.
+- Options: (a) roll back A to old PIN on any failure, (b) record partial state
+  and let the operator retry B, (c) both.
+- Must not leave any HSM in an unknown authentication state.
+
+Depends on: TODO #6.
+
+## 8. Dev disc swap automation for MigrateDisc testing
+
+`MigrateDisc` prompts "Insert Blank Target Disc."  In the dev/QEMU environment
+the operator must swap the cdemu BD-R image.  Currently this requires manual SSH
++ gdbus commands.  Add either:
+
+- A `make cdemu-swap-disc` target, or
+- A helper script callable from the debug SSH session
+
+that stops cdemu, moves old ISO files aside, and restarts with a fresh blank
+BD-R image.
+
+No code dependencies; can be done in parallel with the above.
+
+## 9. Full end-to-end ceremony test
+
+Depends on **all** of the above plus the existing "cdemu multi-session append"
+TODO (#3).  Covers the complete ceremony lifecycle:
+
+InitRoot → KeyBackup (pair + backup) → SignCsr → RevokeCert → IssueCrl →
+RekeyShares (with real PIN rotation across all HSMs) → MigrateDisc →
+ValidateDisc.
+
+Test methodology document to be written as a separate plan once prerequisites
+are complete.
