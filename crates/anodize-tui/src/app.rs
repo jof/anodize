@@ -294,6 +294,87 @@ impl App {
             }
         }
 
+        // Disc inspector has its own scroll/navigation — intercept before global scroll
+        if self.mode == Mode::Utilities
+            && self.utilities.screen == crate::modes::utilities::UtilScreen::DiscInspector
+        {
+            use crate::modes::utilities::disc_inspector::KeyAction;
+            let (consumed, deferred) = self.utilities.disc_inspector.handle_key(key);
+            // Deferred populates need data from self.disc / self.data which are
+            // disjoint from self.utilities, so we extract references first.
+            match deferred {
+                KeyAction::Refresh => {
+                    let banner = crate::modes::utilities::disc_inspector::gather_banner_from(
+                        &self.disc, &self.data,
+                    );
+                    let list = crate::modes::utilities::disc_inspector::gather_session_list_from(
+                        &self.disc,
+                    );
+                    let count = self.disc.prior_sessions.len();
+                    let di = &mut self.utilities.disc_inspector;
+                    di.banner_lines = banner;
+                    di.list_lines = list;
+                    di.session_count = count;
+                    di.selected_session = 0;
+                    di.selected_cert = 0;
+                    di.scroll = 0;
+                    di.view = crate::modes::utilities::disc_inspector::InspectorView::SessionList;
+                    di.detail_lines.clear();
+                    di.cert_modal_lines.clear();
+                    di.cert_count = 0;
+                }
+                KeyAction::PopulateDetail => {
+                    let idx = self.utilities.disc_inspector.selected_session;
+                    if idx < self.disc.prior_sessions.len() {
+                        let session = &self.disc.prior_sessions[idx];
+                        let revocations = self
+                            .disc
+                            .session_state
+                            .as_ref()
+                            .map(|s| s.revocation_list.as_slice())
+                            .unwrap_or(&[]);
+                        let (lines, ders) =
+                            crate::modes::utilities::disc_inspector::gather_session_detail_pub(
+                                session,
+                                revocations,
+                            );
+                        let di = &mut self.utilities.disc_inspector;
+                        di.detail_lines = lines;
+                        di.cert_count = ders.len();
+                        di.set_cert_ders(ders);
+                    }
+                    self.utilities.disc_inspector.selected_cert = 0;
+                    self.utilities.disc_inspector.scroll = 0;
+                }
+                KeyAction::PopulateCertModal => {
+                    let revocations = self
+                        .disc
+                        .session_state
+                        .as_ref()
+                        .map(|s| s.revocation_list.as_slice())
+                        .unwrap_or(&[]);
+                    let di = &mut self.utilities.disc_inspector;
+                    if di.selected_cert < di.cert_der_count() {
+                        di.cert_modal_lines =
+                            crate::modes::utilities::disc_inspector::gather_cert_detail_pub(
+                                di.cert_der(di.selected_cert),
+                                revocations,
+                            );
+                    }
+                    di.scroll = 0;
+                }
+                KeyAction::None => {}
+            }
+            if consumed {
+                return Action::Noop;
+            }
+            // Esc not consumed → back to menu
+            if key.code == KeyCode::Esc {
+                self.utilities.screen = crate::modes::utilities::UtilScreen::Menu;
+                return Action::Noop;
+            }
+        }
+
         // Content scrolling (arrow keys when not in text entry)
         if !in_text_entry {
             match key.code {
@@ -791,11 +872,34 @@ impl App {
                     1 => UtilScreen::SystemInfo,
                     2 => UtilScreen::AuditLog,
                     3 => UtilScreen::HsmInventory,
+                    4 => UtilScreen::DiscInspector,
                     _ => UtilScreen::Menu,
                 };
-                let lines = UtilitiesMode::gather_for_screen(screen, self);
-                self.utilities.screen = screen;
-                self.utilities.set_cached_lines(lines);
+                if screen == UtilScreen::DiscInspector {
+                    // Disc inspector has its own state; populate from disjoint fields.
+                    use crate::modes::utilities::disc_inspector::{
+                        gather_banner_from, gather_session_list_from,
+                    };
+                    let banner = gather_banner_from(&self.disc, &self.data);
+                    let list = gather_session_list_from(&self.disc);
+                    let count = self.disc.prior_sessions.len();
+                    self.utilities.screen = screen;
+                    let di = &mut self.utilities.disc_inspector;
+                    di.banner_lines = banner;
+                    di.list_lines = list;
+                    di.session_count = count;
+                    di.selected_session = 0;
+                    di.selected_cert = 0;
+                    di.scroll = 0;
+                    di.view = crate::modes::utilities::disc_inspector::InspectorView::SessionList;
+                    di.detail_lines.clear();
+                    di.cert_modal_lines.clear();
+                    di.cert_count = 0;
+                } else {
+                    let lines = UtilitiesMode::gather_for_screen(screen, self);
+                    self.utilities.screen = screen;
+                    self.utilities.set_cached_lines(lines);
+                }
                 self.content_scroll = 0;
             }
 

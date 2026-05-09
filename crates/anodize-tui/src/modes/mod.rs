@@ -30,6 +30,7 @@ pub fn utility_phases(screen: &utilities::UtilScreen) -> Vec<PhaseStep> {
         ("System", UtilScreen::SystemInfo),
         ("Audit", UtilScreen::AuditLog),
         ("HSM Inventory", UtilScreen::HsmInventory),
+        ("Disc", UtilScreen::DiscInspector),
     ];
     items
         .iter()

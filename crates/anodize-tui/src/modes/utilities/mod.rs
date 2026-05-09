@@ -1,4 +1,5 @@
 pub mod backup;
+pub mod disc_inspector;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -19,15 +20,18 @@ pub enum UtilScreen {
     SystemInfo,
     AuditLog,
     HsmInventory,
+    DiscInspector,
 }
 
-/// Utilities mode component: system info, audit log browser, HSM inventory.
+/// Utilities mode component: system info, audit log browser, HSM inventory, disc inspector.
 pub struct UtilitiesMode {
     pub screen: UtilScreen,
     /// Cached lines for the current sub-screen (populated on entry).
     cached_lines: Vec<String>,
     /// Backup FSM state (persists across re-renders, used by ceremony backup).
     pub backup: backup::BackupState,
+    /// Disc inspector state (persists across re-renders).
+    pub disc_inspector: disc_inspector::DiscInspectorState,
 }
 
 impl UtilitiesMode {
@@ -36,6 +40,7 @@ impl UtilitiesMode {
             screen: UtilScreen::Menu,
             cached_lines: Vec::new(),
             backup: backup::BackupState::new(),
+            disc_inspector: disc_inspector::DiscInspectorState::new(),
         }
     }
 
@@ -47,6 +52,7 @@ impl UtilitiesMode {
             UtilScreen::SystemInfo => Self::gather_system_info(app),
             UtilScreen::AuditLog => Self::gather_audit_log(app),
             UtilScreen::HsmInventory => Self::gather_hsm_inventory(app),
+            UtilScreen::DiscInspector => Vec::new(), // Disc inspector uses its own state
         }
     }
 
@@ -328,6 +334,7 @@ impl UtilitiesMode {
                     "  [1]  System Info",
                     "  [2]  Audit Log Browser",
                     "  [3]  HSM Inventory",
+                    "  [4]  Disc Inspector",
                     "",
                     "  [Esc]  Back",
                 ];
@@ -366,6 +373,9 @@ impl UtilitiesMode {
                     .scroll((app.content_scroll, 0));
                 frame.render_widget(para, area);
             }
+            UtilScreen::DiscInspector => {
+                self.disc_inspector.render(frame, area);
+            }
         }
     }
 }
@@ -377,8 +387,13 @@ impl Component for UtilitiesMode {
                 KeyCode::Char('1') => Action::UtilScreen(1),
                 KeyCode::Char('2') => Action::UtilScreen(2),
                 KeyCode::Char('3') => Action::UtilScreen(3),
+                KeyCode::Char('4') => Action::UtilScreen(4),
                 _ => Action::Noop,
             },
+            UtilScreen::DiscInspector => {
+                // Disc inspector handles its own keys; Esc not consumed = back to menu
+                Action::Noop // actual dispatch happens in App::update via disc_inspector.handle_key
+            }
             // Sub-screens: Esc returns to menu, 'r' refreshes
             _ => match key.code {
                 KeyCode::Esc => {
@@ -390,7 +405,7 @@ impl Component for UtilitiesMode {
                         UtilScreen::SystemInfo => 1,
                         UtilScreen::AuditLog => 2,
                         UtilScreen::HsmInventory => 3,
-                        UtilScreen::Menu => return Action::Noop,
+                        UtilScreen::Menu | UtilScreen::DiscInspector => return Action::Noop,
                     };
                     Action::UtilScreen(screen_idx)
                 }
