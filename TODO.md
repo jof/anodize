@@ -3,16 +3,20 @@
 ## Audit disc migration utility
 
 When a disc approaches its session limit (≤10 sessions remaining), the ceremony warns the
-operator. A future migration flow would let them carry the audit chain to a fresh disc:
+operator. A migration flow would let them continue the audit chain on a fresh disc. The
+data volume for a root CA is tiny, so the new disc carries the full existing audit log
+forward rather than starting a new one:
 
-1. Read all sessions from the nearly-full disc via `read_disc_sessions()`
-2. Write a migration session to the new disc:
-   - `MIGRATION.JSON`: source disc fingerprint, session count, migration timestamp
-   - `AUDIT.LOG`: `audit.disc.migrate` event with `source_disc_fingerprint`
-3. Chain continuity: new disc's audit log genesis = SHA-256(last cert DER from source disc)
-4. Store old disc as immutable archive; continue ceremonies on new disc
+1. Validate the source disc's session chain using the existing disc validation mechanisms
+2. Write the first session of the new disc: content from the source disc's last track,
+   plus a `MIGRATION.JSON` (source disc fingerprint, session count, migration timestamp)
+   and an `audit.disc.migrate` event appended to `AUDIT.LOG`
+3. Store old disc as immutable archive; continue ceremonies on new disc
 
-Separate TUI state or `--migrate-disc` CLI flag. Plan when multi-cert ceremony flow matures.
+The new disc is a byte-level superset of the old one—validators and auditors see a single
+unbroken audit log, not a chain of logs linked by hashes.
+
+Separate TUI state
 
 ## Clock drift guard blocks disc write
 
