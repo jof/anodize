@@ -307,3 +307,68 @@ fn softhsm_inventory_enumerate() {
         dev.auth_state
     );
 }
+
+/// Change PIN on a specific device via HsmBackup::change_pin_on_device.
+#[test]
+fn change_pin_on_device_via_backup() {
+    let (module, _conf) = match softhsm_env() {
+        Some(v) => v,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE or SOFTHSM2_CONF not set");
+            return;
+        }
+    };
+
+    init_test_token("anodize-chpin-backup");
+
+    let backup = anodize_hsm::Pkcs11BackupImpl::new().expect("Pkcs11BackupImpl::new");
+
+    let old_pin = secrecy::SecretString::new("1234".to_string());
+    let new_pin = secrecy::SecretString::new("9999".to_string());
+
+    use anodize_hsm::HsmBackup;
+    backup
+        .change_pin_on_device("anodize-chpin-backup", &old_pin, &new_pin)
+        .expect("change_pin_on_device failed");
+
+    // Verify new PIN works.
+    let mut hsm = Pkcs11Hsm::new(&module, "anodize-chpin-backup").expect("open session");
+    hsm.login(&new_pin)
+        .expect("login with new pin after change_pin_on_device");
+    hsm.logout().expect("logout");
+
+    // Verify old PIN is rejected.
+    let mut hsm2 = Pkcs11Hsm::new(&module, "anodize-chpin-backup").expect("open session");
+    assert!(
+        hsm2.login(&old_pin).is_err(),
+        "old PIN should be rejected after change_pin_on_device"
+    );
+
+    println!("change_pin_on_device (Pkcs11BackupImpl): OK");
+}
+
+/// change_pin_on_device works through dyn HsmBackup (object safety).
+#[test]
+fn change_pin_on_device_dyn_dispatch() {
+    let (_module, _conf) = match softhsm_env() {
+        Some(v) => v,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE or SOFTHSM2_CONF not set");
+            return;
+        }
+    };
+
+    init_test_token("anodize-chpin-dyn");
+
+    let backup: Box<dyn anodize_hsm::HsmBackup> =
+        anodize_hsm::create_backup(anodize_config::HsmBackendKind::Softhsm).expect("create_backup");
+
+    let old_pin = secrecy::SecretString::new("1234".to_string());
+    let new_pin = secrecy::SecretString::new("abcd".to_string());
+
+    backup
+        .change_pin_on_device("anodize-chpin-dyn", &old_pin, &new_pin)
+        .expect("change_pin_on_device via dyn dispatch");
+
+    println!("change_pin_on_device (dyn HsmBackup): OK");
+}

@@ -248,11 +248,12 @@ The HSM PIN is a 32-byte random value split via Shamir over GF(256) (`anodize-ss
 4. **SSS-split the new PIN** to the new set of custodians.
 5. **Distribute shares** to custodians (ShareReveal phase).
 6. **Verify shares** — every new custodian re-enters their share. The TUI reconstructs the PIN from the entered shares and verifies it matches the generated value (share round-trip check). This ensures no transcription errors before the irreversible HSM PIN change.
-7. **Change PIN on HSM** via `change_pin(old, new)` — only after the round-trip check succeeds.
-8. **Update `pin_verify_hash`** in `STATE.JSON` to reflect the new PIN.
-9. **Write rekey record session** to disc with `pin_rotated: true` in the audit log.
+7. **Change PIN on primary HSM** via `change_pin(old, new)` — only after the round-trip check succeeds.
+8. **Propagate PIN to backup HSMs** — enumerate all connected devices via `HsmBackup::enumerate_backup_targets` using the old PIN; for each device that holds a copy of the signing key (and is not the primary), call `change_pin_on_device(old, new)`. The primary HSM is excluded by comparing `BackupTarget.identifier` against `profile.hsm.token_label` (PKCS#11) or by the fact that it no longer accepts the old PIN (YubiHSM). The audit log records which backup devices were updated in `backup_devices_updated`.
+9. **Update `pin_verify_hash`** in `STATE.JSON` to reflect the new PIN.
+10. **Write rekey record session** to disc with `pin_rotated: true` and `backup_devices_updated` in the audit log.
 
-The old PIN is held in memory alongside the new PIN only for the duration of the `change_pin` call, then discarded. If `change_pin` fails, the old PIN remains valid and the operation aborts cleanly — no state is written to disc.
+The old PIN is held in memory alongside the new PIN only for the duration of the `change_pin` calls (primary + backups), then discarded. If `change_pin` fails on the primary, the old PIN remains valid and the operation aborts cleanly. If a backup device fails, the primary has already been changed — the audit log records which backups were updated, and a future ceremony can reconcile any inconsistency (see TODO #7).
 
 This eliminates the risk that a colluding set of former custodians could reconstruct the original PIN even after losing custodianship.
 

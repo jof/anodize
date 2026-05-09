@@ -970,8 +970,9 @@ impl App {
     }
 
     /// After share verification succeeds, validate the round-trip, change the
-    /// HSM PIN, then proceed to disc burn.  Returns `Err` on failure.
-    pub(crate) fn do_rekey_change_pin(&mut self) -> Result<(), String> {
+    /// HSM PIN, then proceed to disc burn.  Returns the old PIN hex on success
+    /// so the caller can pass it to `do_rekey_change_pin_backups`.
+    pub(crate) fn do_rekey_change_pin(&mut self) -> Result<String, String> {
         // Reconstruct new PIN from the just-verified shares to confirm round-trip
         let shares = self
             .sss
@@ -1006,13 +1007,13 @@ impl App {
 
         tracing::info!("RekeyShares: share round-trip check passed");
 
-        // Change PIN on the HSM
+        // Change PIN on the primary HSM
         let old_pin_hex = self
             .sss
             .rekey_old_pin_hex
             .take()
             .ok_or("Internal error: old PIN not available for change_pin")?;
-        let old_pin = SecretString::new(old_pin_hex);
+        let old_pin = SecretString::new(old_pin_hex.clone());
         let new_pin = SecretString::new(expected_new_pin_hex.clone());
 
         let actor = self
@@ -1025,7 +1026,67 @@ impl App {
             .map_err(|e| format!("HSM change_pin failed: {e}"))?;
 
         tracing::info!("RekeyShares: HSM PIN changed successfully");
-        Ok(())
+        Ok(old_pin_hex)
+    }
+
+    /// After the primary HSM PIN change succeeds, propagate the new PIN to all
+    /// backup HSMs that hold a copy of the signing key.
+    ///
+    /// Discovers backup targets using the old PIN.  The primary HSM already has
+    /// the new PIN, so it either fails auth (YubiHSM) or is filtered by
+    /// `token_label` (PKCS#11).  Returns the list of device identifiers that
+    /// were successfully updated.
+    pub(crate) fn do_rekey_change_pin_backups(
+        &mut self,
+        old_pin_hex: &str,
+        new_pin_hex: &str,
+    ) -> Result<Vec<String>, String> {
+        let profile = self.profile.as_ref().ok_or("No profile loaded")?;
+        let primary_id = profile.hsm.token_label.clone();
+        let backend_kind = profile.hsm.backend;
+
+        let backup_impl = anodize_hsm::create_backup(backend_kind)
+            .map_err(|e| format!("Backup backend init: {e}"))?;
+
+        let old_pin = SecretString::new(old_pin_hex.to_string());
+        let targets = backup_impl
+            .enumerate_backup_targets(Some(&old_pin))
+            .map_err(|e| format!("Enumerate backup targets: {e}"))?;
+
+        let new_pin = SecretString::new(new_pin_hex.to_string());
+        let mut changed = Vec::new();
+
+        for target in &targets {
+            // Skip primary HSM and devices without the signing key
+            if !target.has_signing_key || target.identifier == primary_id {
+                continue;
+            }
+            tracing::info!(device = %target.identifier, "RekeyShares: changing PIN on backup HSM");
+            match backup_impl.change_pin_on_device(&target.identifier, &old_pin, &new_pin) {
+                Ok(()) => {
+                    changed.push(target.identifier.clone());
+                    tracing::info!(device = %target.identifier, "RekeyShares: backup PIN changed");
+                }
+                Err(e) => {
+                    // Fail immediately — TODO #7 will add proper recovery.
+                    return Err(format!(
+                        "PIN change failed on backup {}: {e}. \
+                         Primary HSM was already changed; backups may be inconsistent.",
+                        target.identifier
+                    ));
+                }
+            }
+        }
+
+        if !changed.is_empty() {
+            tracing::info!(
+                count = changed.len(),
+                devices = ?changed,
+                "RekeyShares: backup HSM PIN propagation complete"
+            );
+        }
+
+        Ok(changed)
     }
 
     // ── Mode 2: Load CSR ──────────────────────────────────────────────────────
@@ -1887,6 +1948,7 @@ impl App {
                     .as_ref()
                     .map(|s| s.sss.threshold)
                     .unwrap_or(0);
+                let backup_ids = &self.sss.rekey_changed_backup_ids;
                 if let Err(e) = log.append(
                     "sss.rekey",
                     serde_json::json!({
@@ -1894,6 +1956,7 @@ impl App {
                         "new_threshold": new_threshold,
                         "new_total": new_total,
                         "pin_rotated": true,
+                        "backup_devices_updated": backup_ids,
                     }),
                 ) {
                     self.set_status(format!("Audit log append failed: {e}"));

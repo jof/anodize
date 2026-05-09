@@ -919,6 +919,22 @@ impl HsmBackup for Pkcs11BackupImpl {
             public_keys_match: keys_match,
         })
     }
+
+    fn change_pin_on_device(
+        &self,
+        device_id: &str,
+        old_pin: &SecretString,
+        new_pin: &SecretString,
+    ) -> Result<()> {
+        let session = self.open_session(device_id, old_pin)?;
+        let old_auth = AuthPin::new(old_pin.expose_secret().to_string());
+        let new_auth = AuthPin::new(new_pin.expose_secret().to_string());
+        session
+            .set_pin(&old_auth, &new_auth)
+            .map_err(|e| HsmError::BackendError(format!("set_pin on {device_id}: {e}")))?;
+        tracing::info!(device_id, "change_pin_on_device: PIN changed");
+        Ok(())
+    }
 }
 
 // ── DER helpers ──────────────────────────────────────────────────────────────

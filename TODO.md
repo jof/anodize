@@ -25,17 +25,6 @@ second open, confirming the first session was committed and the disc remained
 appendable. Full end-to-end test (two complete session writes in one ceremony run)
 is blocked by the state machine bug above.
 
-## 6. RekeyShares: propagate PIN change to all backup HSMs
-
-After changing the primary HSM's PIN, all backup HSMs must also be updated.
-Requires:
-
-- A way to discover which HSMs hold backup copies of the signing key (from
-  backup audit events in the disc log, or tracked in `STATE.JSON`).
-- Iterating over all discovered backup HSMs and calling `change_pin()` on each.
-
-Depends on: PIN rotation (done).
-
 ## 7. RekeyShares: failure recovery for multi-HSM PIN change
 
 If PIN change succeeds on HSM A but fails on HSM B, there must be a defined
@@ -47,7 +36,7 @@ recovery path:
   and let the operator retry B, (c) both.
 - Must not leave any HSM in an unknown authentication state.
 
-Depends on: TODO #6.
+Depends on: backup PIN propagation (done).
 
 ## 8. Dev disc swap automation for MigrateDisc testing
 

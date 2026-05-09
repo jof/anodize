@@ -771,6 +771,57 @@ impl HsmBackup for YubiHsmBackupImpl {
             public_keys_match: keys_match,
         })
     }
+
+    fn change_pin_on_device(
+        &self,
+        device_id: &str,
+        old_pin: &SecretString,
+        new_pin: &SecretString,
+    ) -> Result<()> {
+        let serial: yubihsm::device::SerialNumber = device_id
+            .parse()
+            .map_err(|e| HsmError::BackendError(format!("invalid serial '{device_id}': {e}")))?;
+        let cfg = yubihsm::UsbConfig {
+            serial: Some(serial),
+            ..Default::default()
+        };
+        let connector = yubihsm::Connector::usb(&cfg);
+        let creds = yubihsm::Credentials::from_password(
+            ANODIZE_AUTH_KEY_ID,
+            old_pin.expose_secret().as_bytes(),
+        );
+        let client = yubihsm::Client::open(connector, creds, true).map_err(|e| {
+            HsmError::BackendError(format!("connect to {device_id} with old PIN: {e}"))
+        })?;
+
+        // Delete + re-put auth key (same logic as YubiHsmSession::change_pin).
+        client
+            .delete_object(
+                ANODIZE_AUTH_KEY_ID,
+                yubihsm::object::Type::AuthenticationKey,
+            )
+            .map_err(|e| HsmError::BackendError(format!("delete auth key on {device_id}: {e}")))?;
+
+        let new_key =
+            yubihsm::authentication::Key::derive_from_password(new_pin.expose_secret().as_bytes());
+        client
+            .put_authentication_key(
+                ANODIZE_AUTH_KEY_ID,
+                yubihsm::object::Label::from_bytes(b"anodize-auth")
+                    .map_err(|e| HsmError::BackendError(format!("label: {e}")))?,
+                yubihsm::Domain::all(),
+                yubihsm::Capability::all(),
+                yubihsm::Capability::all(),
+                yubihsm::authentication::Algorithm::default(),
+                new_key,
+            )
+            .map_err(|e| {
+                HsmError::BackendError(format!("put_authentication_key on {device_id}: {e}"))
+            })?;
+
+        tracing::info!(device_id, "change_pin_on_device: auth key rotated");
+        Ok(())
+    }
 }
 
 // ── HsmInventory ─────────────────────────────────────────────────────────────

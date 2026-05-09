@@ -1,7 +1,7 @@
 pub mod softhsm;
 pub mod yubihsm_backend;
 
-pub use softhsm::{Pkcs11Hsm, Pkcs11Module, SoftHsmBackend};
+pub use softhsm::{Pkcs11BackupImpl, Pkcs11Hsm, Pkcs11Module, SoftHsmBackend};
 pub use yubihsm_backend::YubiHsmBackend;
 
 use anodize_config::HsmBackendKind;
@@ -246,6 +246,16 @@ pub trait HsmBackup: Send {
         pin: &SecretString,
         key_id: &str,
     ) -> Result<BackupResult>;
+
+    /// Change the authentication PIN on a specific device identified by
+    /// `device_id` (serial number for YubiHSM, token label for PKCS#11).
+    /// Used to propagate a PIN change from the primary HSM to backup devices.
+    fn change_pin_on_device(
+        &self,
+        device_id: &str,
+        old_pin: &SecretString,
+        new_pin: &SecretString,
+    ) -> Result<()>;
 }
 
 /// Create the backup implementation for the given backend kind.
