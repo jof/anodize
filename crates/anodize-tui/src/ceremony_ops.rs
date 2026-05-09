@@ -278,6 +278,7 @@ impl App {
                             Some(Operation::RekeyShares) => "Re-key shares",
                             Some(Operation::MigrateDisc) => "Disc migration",
                             Some(Operation::KeyBackup) => "Key backup",
+                            Some(Operation::ValidateDisc) => "Disc validation",
                             None => "session",
                         };
                         self.set_status(format!("{op_label} written to disc: {disc_label}"));
@@ -627,6 +628,9 @@ impl App {
                     Some(crate::components::share_input::ShareInput::new(sss, 32));
                 self.ceremony.state = CeremonyPhase::Planning(PlanningState::BackupQuorum);
                 self.set_status("Enter threshold shares to reconstruct the HSM PIN for backup.");
+            }
+            Operation::ValidateDisc => {
+                self.do_validate_disc();
             }
         }
     }
@@ -2199,6 +2203,11 @@ impl App {
                 })
             }
 
+            Some(Operation::ValidateDisc) => {
+                // ValidateDisc never burns to disc.
+                None
+            }
+
             None => {
                 self.set_status("No operation set");
                 None
@@ -2268,6 +2277,12 @@ impl App {
                 self.set_status("Key backup complete.");
                 return;
             }
+            Some(Operation::ValidateDisc) => {
+                // Validation writes VALIDATE.LOG via its own export path.
+                self.ceremony.state = CeremonyPhase::Done;
+                self.set_status("Validation complete.");
+                return;
+            }
             Some(Operation::MigrateDisc) | None => {
                 self.ceremony.state = CeremonyPhase::Done;
                 self.set_status("Migration complete.");
@@ -2284,6 +2299,193 @@ impl App {
 
         self.ceremony.state = CeremonyPhase::Done;
         self.set_status(format!("Shuttle write complete: {}", shuttle.display()));
+    }
+
+    // ── Disc validation ──────────────────────────────────────────────────────
+
+    pub(crate) fn do_validate_disc(&mut self) {
+        use anodize_audit::validate::{
+            format_report, validate_disc_status, validate_session_continuity, DiscStatus, Finding,
+            SessionSnapshot, StateFields,
+        };
+        use std::collections::BTreeSet;
+
+        let mut findings: Vec<Finding> = Vec::new();
+
+        // Build snapshots from prior sessions.
+        let mut snapshots: Vec<SessionSnapshot> = Vec::new();
+        for (i, sess) in self.disc.prior_sessions.iter().enumerate() {
+            let dirs: BTreeSet<String> = sess.files.iter().map(|f| f.name.clone()).collect();
+            let has_migration = sess
+                .files
+                .iter()
+                .any(|f| f.name.eq_ignore_ascii_case("MIGRATION.JSON"));
+            let state = if let Some(ref s) = self.disc.session_state {
+                StateFields {
+                    root_cert_sha256: s.root_cert_sha256.clone(),
+                    crl_number: s.crl_number,
+                    last_audit_hash: s.last_audit_hash.clone(),
+                    last_hsm_log_seq: s.last_hsm_log_seq,
+                    is_migration: has_migration,
+                }
+            } else {
+                StateFields {
+                    root_cert_sha256: String::new(),
+                    crl_number: 0,
+                    last_audit_hash: String::new(),
+                    last_hsm_log_seq: None,
+                    is_migration: has_migration,
+                }
+            };
+            snapshots.push(SessionSnapshot {
+                index: i,
+                directories: dirs,
+                audit_records: Vec::new(), // populated from staging log below
+                state,
+            });
+        }
+
+        // Disc status check.
+        let disc_status = if self.disc.optical_dev.is_some() {
+            DiscStatus::Incomplete
+        } else {
+            DiscStatus::Blank
+        };
+        findings.extend(validate_disc_status(disc_status));
+
+        // Session continuity.
+        findings.extend(validate_session_continuity(&snapshots));
+
+        // Audit chain check (uses staging audit log if available).
+        let staging_log = std::path::PathBuf::from("/run/anodize/staging/audit.log");
+        if staging_log.exists() {
+            match anodize_audit::verify_log(&staging_log) {
+                Ok(_count) => {
+                    findings.push(Finding {
+                        severity: anodize_audit::validate::Severity::Pass,
+                        check: "audit_chain".into(),
+                        message: "Audit log hash chain verified".into(),
+                    });
+                }
+                Err(e) => {
+                    findings.push(Finding {
+                        severity: anodize_audit::validate::Severity::Error,
+                        check: "audit_chain".into(),
+                        message: format!("Audit log hash chain FAILED: {e}"),
+                    });
+                }
+            }
+        } else if !self.skip_disc {
+            findings.push(Finding {
+                severity: anodize_audit::validate::Severity::Warn,
+                check: "audit_chain".into(),
+                message: "No staging audit log found".into(),
+            });
+        }
+
+        // Check if HSM is available.
+        let has_hsm = self.hw.actor.is_some();
+
+        let report = format_report(&findings);
+        self.data.validate_report_lines = report.lines().map(String::from).collect();
+        self.data.validate_has_hsm = has_hsm;
+        self.data.validate_findings = findings;
+        self.ceremony.state = CeremonyPhase::Planning(PlanningState::ValidateReport);
+        self.set_status("Disc validation complete. Review findings.");
+    }
+
+    pub(crate) fn do_validate_hsm_check(&mut self) {
+        use anodize_audit::validate::{
+            cross_check_hsm_log, format_report, HsmLogEntry, HsmLogSnapshot,
+        };
+
+        let actor = match self.hw.actor.as_ref() {
+            Some(a) => a,
+            None => {
+                self.set_status("No HSM session — run quorum first.");
+                return;
+            }
+        };
+
+        match actor.get_audit_log() {
+            Ok(snapshot) => {
+                let hsm_snapshot = HsmLogSnapshot {
+                    unlogged_boot_events: snapshot.unlogged_boot_events,
+                    unlogged_auth_events: snapshot.unlogged_auth_events,
+                    entries: snapshot
+                        .entries
+                        .iter()
+                        .map(|e| HsmLogEntry {
+                            item: e.item,
+                            command: e.command,
+                            session_key: e.session_key,
+                            target_key: e.target_key,
+                            second_key: e.second_key,
+                            result: e.result,
+                            tick: e.tick,
+                            digest: e.digest,
+                        })
+                        .collect(),
+                };
+
+                // Collect disc audit records for cross-check.
+                let staging_log = std::path::PathBuf::from("/run/anodize/staging/audit.log");
+                let disc_records: Vec<anodize_audit::Record> = if staging_log.exists() {
+                    std::fs::read_to_string(&staging_log)
+                        .unwrap_or_default()
+                        .lines()
+                        .filter_map(|line| serde_json::from_str(line).ok())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+                let last_seq = self
+                    .disc
+                    .session_state
+                    .as_ref()
+                    .and_then(|s| s.last_hsm_log_seq);
+
+                let hsm_findings = cross_check_hsm_log(
+                    &hsm_snapshot,
+                    &disc_records,
+                    0x0002, // ANODIZE_AUTH_KEY_ID
+                    0x0100, // SIGNING_KEY_ID
+                    last_seq,
+                );
+                self.data.validate_findings.extend(hsm_findings);
+
+                let report = format_report(&self.data.validate_findings);
+                self.data.validate_report_lines = report.lines().map(String::from).collect();
+                self.ceremony.state = CeremonyPhase::Planning(PlanningState::ValidateHsmResult);
+                self.set_status("HSM audit log cross-check complete.");
+            }
+            Err(e) => {
+                self.set_status(format!("HSM audit log fetch failed: {e}"));
+            }
+        }
+    }
+
+    pub(crate) fn do_validate_export_report(&mut self) {
+        use anodize_audit::validate::format_report;
+
+        let shuttle = self.shuttle_mount.clone();
+        let validate_log = shuttle.join("VALIDATE.LOG");
+
+        let report = format_report(&self.data.validate_findings);
+
+        match std::fs::write(&validate_log, report.as_bytes()) {
+            Ok(()) => {
+                self.set_status(format!(
+                    "VALIDATE.LOG written to {}",
+                    validate_log.display()
+                ));
+                self.ceremony.state = CeremonyPhase::Done;
+            }
+            Err(e) => {
+                self.set_status(format!("Failed to write VALIDATE.LOG: {e}"));
+            }
+        }
     }
 
     // ── Content rendering (avoids borrow splitting) ──────────────────────────

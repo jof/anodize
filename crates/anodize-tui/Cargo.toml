@@ -18,6 +18,10 @@ path = "src/main.rs"
 name = "anodize-sentinel"
 path = "src/sentinel.rs"
 
+[[bin]]
+name = "anodize-validate"
+path = "src/validate_disc.rs"
+
 [dependencies]
 anodize-hsm    = { path = "../anodize-hsm" }
 anodize-ca     = { path = "../anodize-ca" }

@@ -93,6 +93,10 @@ pub struct CeremonyData {
     pub migrate_sessions: Vec<SessionEntry>,
     pub migrate_chain_ok: bool,
     pub migrate_total_bytes: u64,
+    // Disc validation
+    pub validate_report_lines: Vec<String>,
+    pub validate_has_hsm: bool,
+    pub validate_findings: Vec<anodize_audit::validate::Finding>,
 }
 
 impl CeremonyData {
@@ -113,6 +117,9 @@ impl CeremonyData {
             migrate_sessions: Vec::new(),
             migrate_chain_ok: false,
             migrate_total_bytes: 0,
+            validate_report_lines: Vec::new(),
+            validate_has_hsm: false,
+            validate_findings: Vec::new(),
         }
     }
 }
@@ -911,6 +918,13 @@ impl App {
                         self.utilities.backup.execute(backup_impl.as_ref(), &pin);
                     }
                 }
+            }
+
+            Action::ValidateRunHsmCheck => {
+                self.do_validate_hsm_check();
+            }
+            Action::ValidateExportReport => {
+                self.do_validate_export_report();
             }
 
             Action::ConfirmMigrateTarget => {

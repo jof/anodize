@@ -887,6 +887,164 @@ mod tests {
     }
 
     #[test]
+    fn audit_chain_corrupt_hash() {
+        let mut s0 = make_session(0, &["a"], &["key.generate", "cert.issue"], 0);
+        // Corrupt a record hash in the chain.
+        s0.audit_records[1].entry_hash = "deadbeef".repeat(8);
+        let findings = validate_audit_chain(&[s0]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Error && f.check.contains("chain")));
+    }
+
+    #[test]
+    fn session_continuity_root_cert_change() {
+        let mut s0 = make_session(0, &["a"], &["key.generate"], 0);
+        let mut s1 = make_session(1, &["a", "b"], &["key.generate", "cert.issue"], 0);
+        s0.state.root_cert_sha256 = "a".repeat(64);
+        s1.state.root_cert_sha256 = "b".repeat(64);
+        let findings = validate_session_continuity(&[s0, s1]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Error && f.check.contains("root_cert")));
+    }
+
+    #[test]
+    fn session_continuity_migration_flag() {
+        let mut s0 = make_session(0, &["a"], &["migrate"], 3);
+        s0.state.is_migration = true;
+        let findings = validate_session_continuity(&[s0]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Pass && f.check.contains("migration")));
+    }
+
+    #[test]
+    fn multi_session_with_gap_in_audit_records() {
+        let chain = make_chain(&["key.generate", "cert.issue", "crl.issue"]);
+        let s0 = SessionSnapshot {
+            index: 0,
+            directories: ["a"].iter().map(|s| s.to_string()).collect(),
+            audit_records: chain[..2].to_vec(),
+            state: StateFields {
+                root_cert_sha256: "a".repeat(64),
+                crl_number: 0,
+                last_audit_hash: chain[1].entry_hash.clone(),
+                last_hsm_log_seq: None,
+                is_migration: false,
+            },
+        };
+        // Session 1 starts with a record whose prev_hash doesn't match session 0's
+        // last hash — simulates a gap between sessions.
+        let bad_record = make_record(
+            0,
+            "orphan.event",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        let s1 = SessionSnapshot {
+            index: 1,
+            directories: ["a", "b"].iter().map(|s| s.to_string()).collect(),
+            audit_records: vec![bad_record],
+            state: StateFields {
+                root_cert_sha256: "a".repeat(64),
+                crl_number: 1,
+                last_audit_hash: "x".repeat(64),
+                last_hsm_log_seq: None,
+                is_migration: false,
+            },
+        };
+        let findings = validate_audit_chain(&[s0, s1]);
+        // Should detect the cross-session gap.
+        assert!(findings.iter().any(|f| f.severity == Severity::Error));
+    }
+
+    #[test]
+    fn hsm_unexpected_command() {
+        let snap = HsmLogSnapshot {
+            unlogged_boot_events: 0,
+            unlogged_auth_events: 0,
+            entries: vec![HsmLogEntry {
+                item: 1,
+                command: 0xFE, // unknown command
+                session_key: 2,
+                target_key: 0xffff,
+                second_key: 0xffff,
+                result: 0,
+                tick: 100,
+                digest: [0; 16],
+            }],
+        };
+        let findings = cross_check_hsm_log(&snap, &[], 2, 0x0100, None);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Warn && f.check == "hsm.command_set"));
+    }
+
+    #[test]
+    fn hsm_ring_buffer_wrap() {
+        // Simulate unlogged auth events (ring buffer overflow).
+        let snap = HsmLogSnapshot {
+            unlogged_boot_events: 0,
+            unlogged_auth_events: 3,
+            entries: vec![],
+        };
+        let findings = cross_check_hsm_log(&snap, &[], 2, 0x0100, None);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Error && f.check == "hsm.unlogged_auths"));
+    }
+
+    #[test]
+    fn format_report_summary() {
+        let findings = vec![
+            Finding {
+                severity: Severity::Pass,
+                check: "a".into(),
+                message: "ok".into(),
+            },
+            Finding {
+                severity: Severity::Error,
+                check: "b".into(),
+                message: "fail".into(),
+            },
+        ];
+        let report = format_report(&findings);
+        assert!(report.contains("1 PASS"));
+        assert!(report.contains("1 ERROR"));
+        assert!(report.contains("VALIDATION FAILED"));
+    }
+
+    #[test]
+    fn format_report_all_pass() {
+        let findings = vec![Finding {
+            severity: Severity::Pass,
+            check: "a".into(),
+            message: "ok".into(),
+        }];
+        let report = format_report(&findings);
+        assert!(report.contains("VALIDATION PASSED"));
+        assert!(!report.contains("FAILED"));
+    }
+
+    #[test]
+    fn disc_status_blank_errors() {
+        let f = validate_disc_status(DiscStatus::Blank);
+        assert_eq!(f[0].severity, Severity::Error);
+    }
+
+    #[test]
+    fn disc_status_other_warns() {
+        let f = validate_disc_status(DiscStatus::Other(0x42));
+        assert_eq!(f[0].severity, Severity::Warn);
+    }
+
+    #[test]
+    fn empty_sessions_errors() {
+        let findings = validate_session_continuity(&[]);
+        assert!(findings.iter().any(|f| f.severity == Severity::Error));
+    }
+
+    #[test]
     fn hsm_continuity_gap_detected() {
         let snap = HsmLogSnapshot {
             unlogged_boot_events: 0,

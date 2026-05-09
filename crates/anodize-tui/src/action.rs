@@ -8,6 +8,7 @@ pub enum Operation {
     RekeyShares,
     MigrateDisc,
     KeyBackup,
+    ValidateDisc,
 }
 
 /// All possible actions in the app. Events produce Actions; update() consumes them.
@@ -64,6 +65,9 @@ pub enum Action {
     UtilScreen(u8),
     // HSM backup: execute the confirmed pair/backup operation (ceremony mode)
     BackupExecute,
+    // Disc validation
+    ValidateRunHsmCheck,
+    ValidateExportReport,
 }
 
 /// Top-level application modes, switchable via F1/F2/F3.

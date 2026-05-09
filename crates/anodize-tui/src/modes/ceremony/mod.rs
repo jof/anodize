@@ -36,6 +36,9 @@ pub enum PlanningState {
     // KeyBackup
     BackupQuorum,
     BackupDevices,
+    // ValidateDisc
+    ValidateReport,
+    ValidateHsmResult,
 }
 
 /// Pipeline phase for the ceremony state machine.
@@ -134,7 +137,9 @@ impl CeremonyMode {
             | CeremonyPhase::Planning(PlanningState::RekeyShareVerify)
             | CeremonyPhase::Planning(PlanningState::MigrateConfirm)
             | CeremonyPhase::Planning(PlanningState::WaitMigrateTarget)
-            | CeremonyPhase::Planning(PlanningState::BackupDevices) => 1,
+            | CeremonyPhase::Planning(PlanningState::BackupDevices)
+            | CeremonyPhase::Planning(PlanningState::ValidateReport)
+            | CeremonyPhase::Planning(PlanningState::ValidateHsmResult) => 1,
             // 2 — Commit (write intent WAL to disc)
             CeremonyPhase::Commit | CeremonyPhase::PostCommitError => 2,
             // 3 — Quorum (SSS share collection + PIN reconstruction)
@@ -198,6 +203,10 @@ impl CeremonyMode {
             CeremonyPhase::Planning(PlanningState::BackupDevices) => {
                 "Key Backup \u{2014} Device Selection"
             }
+            CeremonyPhase::Planning(PlanningState::ValidateReport) => "Disc Validation Report",
+            CeremonyPhase::Planning(PlanningState::ValidateHsmResult) => {
+                "HSM Audit Log Cross-Check"
+            }
             CeremonyPhase::Quorum => "Quorum \u{2014} Reconstruct PIN",
             CeremonyPhase::ClockReconfirm => "Clock Re-confirm \u{2014} Verify Before Signing",
             CeremonyPhase::Done => "Ceremony Complete",
@@ -253,6 +262,7 @@ impl CeremonyMode {
                     "  [5]  Re-key shares          (change custodians, keep same PIN)".into(),
                     "  [6]  Migrate disc           (copy all sessions to new disc)".into(),
                     "  [7]  Key backup             (pair HSMs + backup signing key)".into(),
+                    "  [8]  Validate disc           (verify integrity + HSM audit)".into(),
                 ]
             }
 
@@ -474,6 +484,7 @@ impl CeremonyMode {
                     Some(Operation::RekeyShares) => "Re-key shares",
                     Some(Operation::MigrateDisc) => "Disc migration",
                     Some(Operation::KeyBackup) => "Key backup",
+                    Some(Operation::ValidateDisc) => "Disc validation",
                     None => "Session",
                 };
                 let fp = app.data.fingerprint.as_deref().unwrap_or("(none)");
@@ -673,6 +684,30 @@ impl CeremonyMode {
                 app.utilities.backup.lines.clone()
             }
 
+            CeremonyPhase::Planning(PlanningState::ValidateReport)
+            | CeremonyPhase::Planning(PlanningState::ValidateHsmResult) => {
+                let mut lines = Vec::new();
+                lines.push(String::new());
+                for line in &app.data.validate_report_lines {
+                    lines.push(format!("  {line}"));
+                }
+                lines.push(String::new());
+                if matches!(
+                    self.state,
+                    CeremonyPhase::Planning(PlanningState::ValidateReport)
+                ) {
+                    if app.data.validate_has_hsm {
+                        lines.push("  [1]  Run HSM audit log cross-check (requires quorum)".into());
+                    }
+                    lines.push("  [2]  Export VALIDATE.LOG to shuttle".into());
+                    lines.push("  [q]  Done".into());
+                } else {
+                    lines.push("  [2]  Export VALIDATE.LOG to shuttle".into());
+                    lines.push("  [q]  Done".into());
+                }
+                lines
+            }
+
             CeremonyPhase::Done => {
                 vec![
                     String::new(),
@@ -706,6 +741,7 @@ impl Component for CeremonyMode {
                 KeyCode::Char('5') => Action::SelectOperation(Operation::RekeyShares),
                 KeyCode::Char('6') => Action::SelectOperation(Operation::MigrateDisc),
                 KeyCode::Char('7') => Action::SelectOperation(Operation::KeyBackup),
+                KeyCode::Char('8') => Action::SelectOperation(Operation::ValidateDisc),
                 _ => Action::Noop,
             },
 
@@ -817,6 +853,17 @@ impl Component for CeremonyMode {
                 // The backup FSM handles its own key dispatch in app.rs.
                 Action::Noop
             }
+
+            CeremonyPhase::Planning(PlanningState::ValidateReport) => match key.code {
+                KeyCode::Char('1') => Action::ValidateRunHsmCheck,
+                KeyCode::Char('2') => Action::ValidateExportReport,
+                _ => Action::Noop,
+            },
+
+            CeremonyPhase::Planning(PlanningState::ValidateHsmResult) => match key.code {
+                KeyCode::Char('2') => Action::ValidateExportReport,
+                _ => Action::Noop,
+            },
 
             CeremonyPhase::Quorum => Action::Noop, // handled by ShareInput component
 
