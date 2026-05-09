@@ -9,7 +9,6 @@
 //!
 //! Exit code 0 = PASS, 1 = WARN, 2 = ERROR.
 
-use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::process;
 
@@ -21,6 +20,7 @@ use anodize_audit::validate::{
     DiscStatus, Finding, SessionSnapshot, Severity, StateFields,
 };
 use anodize_config::state::SessionState;
+use sha2::{Digest, Sha256};
 
 #[derive(Parser)]
 #[command(name = "anodize-validate", about = "Offline disc validation")]
@@ -64,17 +64,23 @@ fn main() -> Result<()> {
             .to_string_lossy()
             .into_owned();
 
-        // Collect file names as "directories" (the validate API uses this term).
-        let mut file_names: BTreeSet<String> = BTreeSet::new();
+        // Collect file names and SHA-256 content hashes.
+        let mut file_hashes: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
         if let Ok(entries) = std::fs::read_dir(dir) {
             for e in entries.flatten() {
                 if let Some(name) = e.file_name().to_str() {
-                    file_names.insert(name.to_uppercase());
+                    let upper = name.to_uppercase();
+                    if let Ok(content) = std::fs::read(e.path()) {
+                        let hash = format!("{:x}", Sha256::digest(&content));
+                        file_hashes.insert(upper, hash);
+                    } else {
+                        file_hashes.insert(upper, String::new());
+                    }
                 }
             }
         }
 
-        let has_migration = file_names.contains("MIGRATION.JSON");
+        let has_migration = file_hashes.contains_key("MIGRATION.JSON");
 
         // Parse STATE.JSON if present.
         let state_path = dir.join("STATE.JSON");
@@ -147,7 +153,7 @@ fn main() -> Result<()> {
 
         snapshots.push(SessionSnapshot {
             index: i,
-            directories: file_names,
+            file_hashes,
             audit_records,
             state,
         });

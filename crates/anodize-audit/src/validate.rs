@@ -3,7 +3,7 @@
 //! Pure functions that take parsed session data and return findings.
 //! No HSM dependency — HSM cross-checks live in [`cross_check_hsm_log`].
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::{compute_entry_hash, Record};
@@ -49,8 +49,8 @@ impl fmt::Display for Finding {
 pub struct SessionSnapshot {
     /// 0-indexed session number on disc.
     pub index: usize,
-    /// Directory names present in this session's ISO image.
-    pub directories: BTreeSet<String>,
+    /// File names → SHA-256 content hashes for this session's directory.
+    pub file_hashes: BTreeMap<String, String>,
     /// Parsed audit log records from this session's `AUDIT.LOG`.
     pub audit_records: Vec<Record>,
     /// Fields extracted from this session's `STATE.JSON`.
@@ -211,34 +211,54 @@ pub fn validate_session_continuity(sessions: &[SessionSnapshot]) -> Vec<Finding>
         let curr = &sessions[i];
         let check = format!("session.continuity[{}→{}]", i - 1, i);
 
-        // Every directory from the prior session must exist in the current session.
-        let missing: Vec<_> = prev
-            .directories
-            .difference(&curr.directories)
-            .cloned()
-            .collect();
-        if missing.is_empty() {
+        // Every file from the prior session must exist in the current session
+        // with identical content.
+        let mut missing: Vec<String> = Vec::new();
+        let mut changed: Vec<String> = Vec::new();
+        for (name, prev_hash) in &prev.file_hashes {
+            match curr.file_hashes.get(name) {
+                None => missing.push(name.clone()),
+                Some(curr_hash) if curr_hash != prev_hash => changed.push(name.clone()),
+                _ => {}
+            }
+        }
+
+        if missing.is_empty() && changed.is_empty() {
             findings.push(Finding {
                 severity: Severity::Pass,
                 check: check.clone(),
                 message: format!(
-                    "Session {i} is a superset of session {} ({} dirs → {} dirs)",
+                    "Session {i} is a superset of session {} ({} files → {} files, content verified)",
                     i - 1,
-                    prev.directories.len(),
-                    curr.directories.len()
+                    prev.file_hashes.len(),
+                    curr.file_hashes.len()
                 ),
             });
         } else {
-            findings.push(Finding {
-                severity: Severity::Error,
-                check: check.clone(),
-                message: format!(
-                    "Session {i} is missing {} directories from session {}: {:?}",
-                    missing.len(),
-                    i - 1,
-                    missing
-                ),
-            });
+            if !missing.is_empty() {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    check: check.clone(),
+                    message: format!(
+                        "Session {i} is missing {} file(s) from session {}: {:?}",
+                        missing.len(),
+                        i - 1,
+                        missing
+                    ),
+                });
+            }
+            if !changed.is_empty() {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    check: check.clone(),
+                    message: format!(
+                        "Session {i} has {} file(s) with changed content vs session {}: {:?}",
+                        changed.len(),
+                        i - 1,
+                        changed
+                    ),
+                });
+            }
         }
 
         // root_cert_sha256 must not change across sessions.
@@ -667,15 +687,29 @@ mod tests {
         records
     }
 
-    fn make_session(index: usize, dirs: &[&str], events: &[&str], crl: u64) -> SessionSnapshot {
+    /// Build a test session. `files` maps name → content (hashed via SHA-256).
+    fn make_session_with_files(
+        index: usize,
+        files: &[(&str, &str)],
+        events: &[&str],
+        crl: u64,
+    ) -> SessionSnapshot {
+        use sha2::{Digest, Sha256};
         let records = make_chain(events);
         let last_hash = records
             .last()
             .map(|r| r.entry_hash.clone())
             .unwrap_or_default();
+        let file_hashes = files
+            .iter()
+            .map(|(name, content)| {
+                let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+                (name.to_string(), hash)
+            })
+            .collect();
         SessionSnapshot {
             index,
-            directories: dirs.iter().map(|s| s.to_string()).collect(),
+            file_hashes,
             audit_records: records,
             state: StateFields {
                 root_cert_sha256: "a".repeat(64),
@@ -685,6 +719,12 @@ mod tests {
                 is_migration: false,
             },
         }
+    }
+
+    /// Convenience: build a session with dummy file content (each name hashes uniquely).
+    fn make_session(index: usize, dirs: &[&str], events: &[&str], crl: u64) -> SessionSnapshot {
+        let files: Vec<(&str, &str)> = dirs.iter().map(|d| (*d, *d)).collect();
+        make_session_with_files(index, &files, events, crl)
     }
 
     #[test]
@@ -703,10 +743,20 @@ mod tests {
 
     #[test]
     fn session_continuity_superset() {
-        let s0 = make_session(0, &["20260101T000000-intent"], &["key.generate"], 0);
-        let s1 = make_session(
+        let s0 = make_session_with_files(
+            0,
+            &[("AUDIT.LOG", "log-v1")],
+            &["key.generate"],
+            0,
+        );
+        let s1 = make_session_with_files(
             1,
-            &["20260101T000000-intent", "20260101T000001-record"],
+            &[
+                ("AUDIT.LOG", "log-v1"),
+                ("STATE.JSON", "state-v1"),
+                ("ROOT.CRT", "cert-data"),
+                ("ROOT.CRL", "crl-data"),
+            ],
             &["key.generate", "cert.issue"],
             0,
         );
@@ -718,18 +768,51 @@ mod tests {
     }
 
     #[test]
-    fn session_continuity_missing_dir() {
-        let s0 = make_session(0, &["dir-a", "dir-b"], &["key.generate"], 0);
-        // Session 1 is missing "dir-a".
-        let s1 = make_session(1, &["dir-b", "dir-c"], &["key.generate", "cert.issue"], 0);
+    fn session_continuity_missing_file() {
+        let s0 = make_session_with_files(
+            0,
+            &[("AUDIT.LOG", "log"), ("STATE.JSON", "state")],
+            &["key.generate"],
+            0,
+        );
+        // Session 1 is missing STATE.JSON.
+        let s1 = make_session_with_files(
+            1,
+            &[("AUDIT.LOG", "log"), ("ROOT.CRT", "cert")],
+            &["key.generate", "cert.issue"],
+            0,
+        );
         let findings = validate_session_continuity(&[s0, s1]);
-        assert!(findings.iter().any(|f| f.severity == Severity::Error));
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Error && f.message.contains("missing")));
+    }
+
+    #[test]
+    fn session_continuity_changed_content() {
+        let s0 = make_session_with_files(
+            0,
+            &[("ROOT.CRT", "original-cert")],
+            &["key.generate"],
+            0,
+        );
+        // Session 1 has ROOT.CRT but with different content.
+        let s1 = make_session_with_files(
+            1,
+            &[("ROOT.CRT", "tampered-cert"), ("STATE.JSON", "state")],
+            &["key.generate", "cert.issue"],
+            0,
+        );
+        let findings = validate_session_continuity(&[s0, s1]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Error && f.message.contains("changed content")));
     }
 
     #[test]
     fn session_continuity_crl_regression() {
-        let s0 = make_session(0, &["a"], &["key.generate"], 5);
-        let s1 = make_session(1, &["a", "b"], &["key.generate", "crl.issue"], 3);
+        let s0 = make_session_with_files(0, &[("a", "x")], &["key.generate"], 5);
+        let s1 = make_session_with_files(1, &[("a", "x"), ("b", "y")], &["key.generate", "crl.issue"], 3);
         let findings = validate_session_continuity(&[s0, s1]);
         assert!(findings
             .iter()
@@ -762,7 +845,7 @@ mod tests {
         let chain = make_chain(&["key.generate", "cert.issue", "crl.issue"]);
         let s0 = SessionSnapshot {
             index: 0,
-            directories: ["a"].iter().map(|s| s.to_string()).collect(),
+            file_hashes: [("a".to_string(), "h1".to_string())].into_iter().collect(),
             audit_records: chain[..2].to_vec(),
             state: StateFields {
                 root_cert_sha256: "a".repeat(64),
@@ -774,7 +857,7 @@ mod tests {
         };
         let s1 = SessionSnapshot {
             index: 1,
-            directories: ["a", "b"].iter().map(|s| s.to_string()).collect(),
+            file_hashes: [("a".to_string(), "h1".to_string()), ("b".to_string(), "h2".to_string())].into_iter().collect(),
             audit_records: chain.clone(),
             state: StateFields {
                 root_cert_sha256: "a".repeat(64),
@@ -899,8 +982,8 @@ mod tests {
 
     #[test]
     fn session_continuity_root_cert_change() {
-        let mut s0 = make_session(0, &["a"], &["key.generate"], 0);
-        let mut s1 = make_session(1, &["a", "b"], &["key.generate", "cert.issue"], 0);
+        let mut s0 = make_session_with_files(0, &[("a", "x")], &["key.generate"], 0);
+        let mut s1 = make_session_with_files(1, &[("a", "x"), ("b", "y")], &["key.generate", "cert.issue"], 0);
         s0.state.root_cert_sha256 = "a".repeat(64);
         s1.state.root_cert_sha256 = "b".repeat(64);
         let findings = validate_session_continuity(&[s0, s1]);
@@ -911,7 +994,7 @@ mod tests {
 
     #[test]
     fn session_continuity_migration_flag() {
-        let mut s0 = make_session(0, &["a"], &["migrate"], 3);
+        let mut s0 = make_session_with_files(0, &[("a", "x")], &["migrate"], 3);
         s0.state.is_migration = true;
         let findings = validate_session_continuity(&[s0]);
         assert!(findings
@@ -924,7 +1007,7 @@ mod tests {
         let chain = make_chain(&["key.generate", "cert.issue", "crl.issue"]);
         let s0 = SessionSnapshot {
             index: 0,
-            directories: ["a"].iter().map(|s| s.to_string()).collect(),
+            file_hashes: [("a".to_string(), "h1".to_string())].into_iter().collect(),
             audit_records: chain[..2].to_vec(),
             state: StateFields {
                 root_cert_sha256: "a".repeat(64),
@@ -943,7 +1026,7 @@ mod tests {
         );
         let s1 = SessionSnapshot {
             index: 1,
-            directories: ["a", "b"].iter().map(|s| s.to_string()).collect(),
+            file_hashes: [("a".to_string(), "h1".to_string()), ("b".to_string(), "h2".to_string())].into_iter().collect(),
             audit_records: vec![bad_record],
             state: StateFields {
                 root_cert_sha256: "a".repeat(64),

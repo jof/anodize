@@ -2308,18 +2308,25 @@ impl App {
             format_report, validate_disc_status, validate_session_continuity, DiscStatus, Finding,
             SessionSnapshot, StateFields,
         };
-        use std::collections::BTreeSet;
+        use sha2::{Digest, Sha256};
+        use std::collections::BTreeMap;
 
         let mut findings: Vec<Finding> = Vec::new();
 
         // Build snapshots from prior sessions.
         let mut snapshots: Vec<SessionSnapshot> = Vec::new();
         for (i, sess) in self.disc.prior_sessions.iter().enumerate() {
-            let dirs: BTreeSet<String> = sess.files.iter().map(|f| f.name.clone()).collect();
-            let has_migration = sess
+            let file_hashes: BTreeMap<String, String> = sess
                 .files
                 .iter()
-                .any(|f| f.name.eq_ignore_ascii_case("MIGRATION.JSON"));
+                .map(|f| {
+                    let hash = format!("{:x}", Sha256::digest(&f.data));
+                    (f.name.clone(), hash)
+                })
+                .collect();
+            let has_migration = file_hashes
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("MIGRATION.JSON"));
             let state = if let Some(ref s) = self.disc.session_state {
                 StateFields {
                     root_cert_sha256: s.root_cert_sha256.clone(),
@@ -2339,7 +2346,7 @@ impl App {
             };
             snapshots.push(SessionSnapshot {
                 index: i,
-                directories: dirs,
+                file_hashes,
                 audit_records: Vec::new(), // populated from staging log below
                 state,
             });
