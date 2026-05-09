@@ -666,13 +666,19 @@ impl CeremonyMode {
                 } else {
                     "FAIL \u{2718}"
                 };
+                let fp_str = app
+                    .data
+                    .migrate_source_fingerprint
+                    .as_deref()
+                    .unwrap_or("(none)");
                 let mb = app.data.migrate_total_bytes / (1024 * 1024);
                 vec![
                     String::new(),
                     format!("  Sessions  : {}", app.disc.prior_sessions.len()),
                     format!("  Audit chain: {chain_str}"),
+                    format!("  Source hash: {fp_str}"),
                     format!(
-                        "  Total data: {} MiB ({} bytes)",
+                        "  Last session: {} MiB ({} bytes)",
                         mb, app.data.migrate_total_bytes
                     ),
                     String::new(),

@@ -106,6 +106,7 @@ pub struct CeremonyData {
     pub migrate_sessions: Vec<SessionEntry>,
     pub migrate_chain_ok: bool,
     pub migrate_total_bytes: u64,
+    pub migrate_source_fingerprint: Option<String>,
     // Compiled certificate preview (CSR + profile → final cert structure)
     pub cert_preview_lines: Vec<String>,
     // Disc validation
@@ -134,6 +135,7 @@ impl CeremonyData {
             migrate_sessions: Vec::new(),
             migrate_chain_ok: false,
             migrate_total_bytes: 0,
+            migrate_source_fingerprint: None,
             cert_preview_lines: Vec::new(),
             validate_report_lines: Vec::new(),
             validate_has_hsm: false,

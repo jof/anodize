@@ -1080,23 +1080,29 @@ impl App {
     // ── Mode 5: Migrate confirm ──────────────────────────────────────────────
 
     fn do_migrate_confirm(&mut self) {
+        // Compute size of last session only (that's what gets copied)
         let total_bytes: u64 = self
             .disc
             .prior_sessions
-            .iter()
-            .flat_map(|s| s.files.iter())
-            .map(|f| f.data.len() as u64)
-            .sum();
+            .last()
+            .map(|s| s.files.iter().map(|f| f.data.len() as u64).sum())
+            .unwrap_or(0);
         self.data.migrate_total_bytes = total_bytes;
 
-        const RAM_WARN_THRESHOLD: u64 = 512 * 1024 * 1024;
-        if total_bytes > RAM_WARN_THRESHOLD {
-            self.set_status(format!(
-                "WARNING: disc data ({} MiB) exceeds 512 MiB RAM threshold. \
-                 Proceed only if you have sufficient free memory.",
-                total_bytes / (1024 * 1024)
-            ));
-        }
+        // Derive source disc fingerprint from last entry_hash in AUDIT.LOG
+        self.data.migrate_source_fingerprint = self
+            .disc
+            .prior_sessions
+            .last()
+            .and_then(|s| s.files.iter().find(|f| f.name == "AUDIT.LOG"))
+            .and_then(|f| {
+                f.data
+                    .split(|&b| b == b'\n')
+                    .rev()
+                    .find(|line| !line.is_empty())
+                    .and_then(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+                    .and_then(|v| v.get("entry_hash")?.as_str().map(String::from))
+            });
 
         self.data.migrate_chain_ok = verify_audit_chain(&self.disc.prior_sessions);
         self.ceremony.state = CeremonyPhase::Planning(PlanningState::MigrateConfirm);
@@ -1283,8 +1289,7 @@ impl App {
         };
 
         let cdp_url = self.profile.as_ref().and_then(|p| p.ca.cdp_url.as_deref());
-        let existing_serials =
-            collect_serial_numbers_from_sessions(&self.disc.prior_sessions);
+        let existing_serials = collect_serial_numbers_from_sessions(&self.disc.prior_sessions);
 
         let cert = match sign_intermediate_csr(
             &signer,
@@ -1691,9 +1696,7 @@ impl App {
             None => return,
         };
 
-        let all_sessions = if self.current_op == Some(Operation::MigrateDisc) {
-            self.data.migrate_sessions.clone()
-        } else {
+        let all_sessions = {
             let mut sessions = self.disc.prior_sessions.clone();
             sessions.push(new_session);
             sessions
@@ -2117,11 +2120,109 @@ impl App {
                 })
             }
 
-            Some(Operation::MigrateDisc) => Some(SessionEntry {
-                dir_name,
-                timestamp: ts,
-                files: vec![],
-            }),
+            Some(Operation::MigrateDisc) => {
+                // Copy files from the source disc's last session (the accumulated
+                // state), append a migration audit event, and add MIGRATION.JSON.
+                let source_files = match self.data.migrate_sessions.last() {
+                    Some(s) => s.files.clone(),
+                    None => {
+                        self.set_status("No sessions on source disc to migrate");
+                        return None;
+                    }
+                };
+                let session_count = self.data.migrate_sessions.len();
+                let source_fp = self
+                    .data
+                    .migrate_source_fingerprint
+                    .clone()
+                    .unwrap_or_default();
+
+                // Separate AUDIT.LOG from other files
+                let mut files: Vec<IsoFile> = Vec::new();
+                let mut source_audit: Option<Vec<u8>> = None;
+                for f in &source_files {
+                    if f.name == "AUDIT.LOG" {
+                        source_audit = Some(f.data.clone());
+                    } else {
+                        files.push(f.clone());
+                    }
+                }
+
+                let source_audit = match source_audit {
+                    Some(data) => data,
+                    None => {
+                        self.set_status(
+                            "Source disc's last session has no AUDIT.LOG — cannot migrate",
+                        );
+                        return None;
+                    }
+                };
+
+                // Write source audit log to staging, reopen, and append migration event
+                let log_path = staging.join("audit.log");
+                if let Err(e) = std::fs::write(&log_path, &source_audit) {
+                    self.set_status(format!("Cannot write staging audit log: {e}"));
+                    return None;
+                }
+                let mut log = match AuditLog::open(&log_path) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        self.set_status(format!("Audit log reopen failed: {e}"));
+                        return None;
+                    }
+                };
+                if let Err(e) = log.append(
+                    "audit.disc.migrate",
+                    serde_json::json!({
+                        "source_disc_fingerprint": source_fp,
+                        "source_session_count": session_count,
+                    }),
+                ) {
+                    self.set_status(format!("Audit log append failed: {e}"));
+                    return None;
+                }
+                drop(log);
+
+                let audit_bytes = match std::fs::read(&log_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.set_status(format!("Cannot read audit log: {e}"));
+                        return None;
+                    }
+                };
+                self.update_session_state_for_record(&audit_bytes);
+                files.push(IsoFile {
+                    name: "AUDIT.LOG".into(),
+                    data: audit_bytes,
+                });
+
+                // Add MIGRATION.JSON marker
+                let migration_meta = serde_json::json!({
+                    "source_disc_fingerprint": source_fp,
+                    "source_session_count": session_count,
+                    "migration_timestamp": ts
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                });
+                files.push(IsoFile {
+                    name: "MIGRATION.JSON".into(),
+                    data: serde_json::to_vec_pretty(&migration_meta).unwrap_or_default(),
+                });
+
+                // Update STATE.JSON
+                if let Some(state_file) = self.build_state_json_file() {
+                    // Remove old STATE.JSON if carried from source
+                    files.retain(|f| f.name != anodize_config::state::STATE_FILENAME);
+                    files.push(state_file);
+                }
+
+                Some(SessionEntry {
+                    dir_name,
+                    timestamp: ts,
+                    files,
+                })
+            }
 
             Some(Operation::KeyBackup) => {
                 let log_path = staging.join("audit.log");
@@ -2671,5 +2772,125 @@ mod tests {
             "InitRootAbort should reset to OperationSelect"
         );
         assert!(app.current_op.is_none());
+    }
+
+    // ── Migrate disc tests ──────────────────────────────────────────────
+
+    /// Build a valid AUDIT.LOG bytes with one entry whose entry_hash we can predict.
+    fn make_audit_log_bytes() -> (Vec<u8>, String) {
+        let path =
+            std::env::temp_dir().join(format!("anodize-test-audit-{}.log", std::process::id()));
+        let genesis = [0u8; 32];
+        let mut log = anodize_audit::AuditLog::create(&path, &genesis).expect("create audit log");
+        let record = log
+            .append("cert.root.issue", serde_json::json!({"test": true}))
+            .expect("append");
+        let bytes = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        (bytes, record.entry_hash)
+    }
+
+    fn migrate_app_with_sessions(session_count: usize) -> crate::app::App {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.current_op = Some(Operation::MigrateDisc);
+
+        let (audit_bytes, _hash) = make_audit_log_bytes();
+        for i in 0..session_count {
+            app.disc
+                .prior_sessions
+                .push(crate::media::iso9660::SessionEntry {
+                    dir_name: format!("session-{i:02}"),
+                    timestamp: std::time::SystemTime::now(),
+                    files: vec![
+                        crate::media::iso9660::IsoFile {
+                            name: "ROOT.CRT".into(),
+                            data: vec![0xDE, 0xAD],
+                        },
+                        crate::media::iso9660::IsoFile {
+                            name: "AUDIT.LOG".into(),
+                            data: audit_bytes.clone(),
+                        },
+                    ],
+                });
+        }
+        app
+    }
+
+    #[test]
+    fn migrate_confirm_sets_state_and_fingerprint() {
+        let mut app = migrate_app_with_sessions(3);
+        let (_audit_bytes, expected_hash) = make_audit_log_bytes();
+
+        app.do_migrate_confirm();
+
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::MigrateConfirm),
+        );
+        assert!(app.data.migrate_chain_ok);
+        assert_eq!(
+            app.data.migrate_source_fingerprint.as_deref(),
+            Some(expected_hash.as_str()),
+        );
+    }
+
+    #[test]
+    fn migrate_confirm_bytes_from_last_session_only() {
+        let mut app = migrate_app_with_sessions(3);
+        // Last session has 2 files: ROOT.CRT (2 bytes) + AUDIT.LOG (variable)
+        let expected: u64 = app
+            .disc
+            .prior_sessions
+            .last()
+            .unwrap()
+            .files
+            .iter()
+            .map(|f| f.data.len() as u64)
+            .sum();
+
+        app.do_migrate_confirm();
+
+        assert_eq!(app.data.migrate_total_bytes, expected);
+        // Sanity: should be less than 3x (since all sessions have same data)
+        let all_bytes: u64 = app
+            .disc
+            .prior_sessions
+            .iter()
+            .flat_map(|s| s.files.iter())
+            .map(|f| f.data.len() as u64)
+            .sum();
+        assert!(
+            app.data.migrate_total_bytes < all_bytes,
+            "should only count last session, not all"
+        );
+    }
+
+    #[test]
+    fn confirm_migrate_action_moves_sessions_and_clears_disc() {
+        let mut app = migrate_app_with_sessions(3);
+        app.do_migrate_confirm();
+
+        app.update(Action::ConfirmMigrate);
+
+        assert_eq!(app.data.migrate_sessions.len(), 3);
+        assert!(app.disc.prior_sessions.is_empty());
+        assert!(app.disc.optical_dev.is_none());
+        assert!(app.disc.sessions_remaining.is_none());
+        assert!(app.ceremony.is_waiting_migrate_target());
+    }
+
+    #[test]
+    fn migrate_confirm_empty_disc_still_sets_state() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.current_op = Some(Operation::MigrateDisc);
+
+        app.do_migrate_confirm();
+
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::MigrateConfirm),
+        );
+        assert_eq!(app.data.migrate_total_bytes, 0);
+        assert!(app.data.migrate_source_fingerprint.is_none());
     }
 }

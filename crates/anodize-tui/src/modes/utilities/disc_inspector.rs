@@ -679,7 +679,6 @@ fn format_time(t: &x509_cert::time::Time) -> String {
     format!("{t}")
 }
 
-
 fn oid_name(oid: der::asn1::ObjectIdentifier) -> &'static str {
     match oid.to_string().as_str() {
         "1.2.840.10045.3.1.7" => "P-256 (secp256r1)",
@@ -787,6 +786,7 @@ mod tests {
             migrate_sessions: vec![],
             migrate_chain_ok: false,
             migrate_total_bytes: 0,
+            migrate_source_fingerprint: None,
             cert_preview_lines: Vec::new(),
             validate_report_lines: Vec::new(),
             validate_has_hsm: false,

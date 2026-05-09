@@ -446,7 +446,10 @@ fn generate_serial(existing: &[SerialNumber]) -> Result<SerialNumber, CaError> {
         // Ensure at least one non-zero byte so the integer isn't zero.
         bytes[0] |= 0x01;
         let candidate = SerialNumber::new(&bytes).map_err(|e| CaError::Der(e.to_string()))?;
-        if !existing.iter().any(|s| s.as_bytes() == candidate.as_bytes()) {
+        if !existing
+            .iter()
+            .any(|s| s.as_bytes() == candidate.as_bytes())
+        {
             return Ok(candidate);
         }
     }

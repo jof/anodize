@@ -207,7 +207,8 @@ fn csr_with_extra_extension_rejected() {
         .expect("build CSR");
     let csr_der = csr.to_der().expect("encode CSR DER");
 
-    let result = sign_intermediate_csr(&root_signer, &root_cert, &csr_der, Some(0), 1825, None, &[]);
+    let result =
+        sign_intermediate_csr(&root_signer, &root_cert, &csr_der, Some(0), 1825, None, &[]);
     assert!(
         matches!(result, Err(CaError::CsrExtensionRejected(_))),
         "expected CsrExtensionRejected, got: {:?}",
@@ -370,8 +371,9 @@ fn sign_csr_p256_sha256_accepted() {
     // p256::ecdsa::SigningKey doesn't implement, so we build the CSR at DER level.
     let csr_der = build_p256_csr_der("CN=P256 Intermediate,O=Test Org,C=US");
 
-    let int_cert = sign_intermediate_csr(&root_signer, &root_cert, &csr_der, Some(0), 1825, None, &[])
-        .expect("sign P-256 CSR");
+    let int_cert =
+        sign_intermediate_csr(&root_signer, &root_cert, &csr_der, Some(0), 1825, None, &[])
+            .expect("sign P-256 CSR");
 
     let int_der = int_cert.to_der().expect("encode intermediate cert DER");
     let decoded =
