@@ -31,18 +31,6 @@ Add a command to enumerate USB devices that could be discs (e.g. USB mass-storag
 devices, optical drives). Useful for operator discovery before ceremony start.
 The `lint --list-usb` help text references this but it doesn't exist yet.
 
-## TUI: signing review should show the resulting certificate structure, not just CSR + profile name
-
-The CSR-signing review screen currently displays the raw CSR fields alongside the
-certificate profile name. This gives reviewers insufficient information to
-understand what the final signed certificate will actually contain. The review
-screen should instead present the *compiled* certificate document structure—i.e.
-the result of applying the selected profile to the CSR—so that custodians can
-verify the exact extensions, key usages, validity period, issuer chain, and any
-profile-injected fields before authorizing the signature. Showing the certificate
-as it will be signed (rather than its two inputs separately) eliminates guesswork
-and makes the approval decision meaningful.
-
 ## Unify certificate serial number generation and prevent reuse
 
 Serial number generation in `anodize-ca/src/lib.rs` uses two unrelated codepaths:
