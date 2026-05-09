@@ -25,23 +25,6 @@ second open, confirming the first session was committed and the disc remained
 appendable. Full end-to-end test (two complete session writes in one ceremony run)
 is blocked by the state machine bug above.
 
-## 4. `Hsm` trait: add `change_pin` / `change_auth_key` method
-
-The `Hsm` trait has no PIN-change capability.  Both backends need one:
-
-- **YubiHSM**: `ChangeAuthenticationKey` (command code already listed in the
-  capabilities bitfield at `crates/anodize-hsm/src/yubihsm_backend.rs`).
-- **SoftHSM / PKCS#11**: `C_SetPIN` (already used in the `bootstrap_token`
-  fallback path at `crates/anodize-hsm/src/softhsm.rs:300`).
-
-Proposed addition to `Hsm` (or `HsmBackend`):
-
-```rust
-fn change_pin(&mut self, old_pin: &SecretString, new_pin: &SecretString) -> Result<()>;
-```
-
-No dependencies on other TODO items.
-
 ## 5. RekeyShares: actual PIN rotation with new random value
 
 The current `RekeyShares` operation only re-splits the **same** PIN to new
@@ -58,7 +41,7 @@ New behaviour:
 5. Update `pin_verify_hash` in `STATE.JSON`.
 6. Write rekey record session to disc.
 
-Depends on: TODO #4 (`change_pin` on `Hsm` trait).
+Depends on: `change_pin` on `Hsm` trait (done).
 
 ## 6. RekeyShares: propagate PIN change to all backup HSMs
 
