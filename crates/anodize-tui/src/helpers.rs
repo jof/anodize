@@ -1,8 +1,11 @@
 use std::time::SystemTime;
 
 use anodize_ca::CaError;
+use der::Decode;
 use sha2::{Digest, Sha256};
+use x509_cert::certificate::Certificate;
 
+use crate::app::CertSummary;
 use crate::media::SessionEntry;
 
 // ── Noise PIN masking ─────────────────────────────────────────────────────────
@@ -161,6 +164,135 @@ pub fn parse_rfc3339_to_system_time(s: &str) -> Option<SystemTime> {
         Some(SystemTime::UNIX_EPOCH + std::time::Duration::new(unix_secs as u64, nanos))
     } else {
         None
+    }
+}
+
+/// Walk all disc sessions, parse .CRT files, and build a list of cert summaries
+/// for the revocation picker. Cross-references against the revocation list to
+/// mark already-revoked entries.
+pub fn gather_cert_list_from_sessions(
+    sessions: &[SessionEntry],
+    revocation_list: &[anodize_config::RevocationEntry],
+) -> Vec<CertSummary> {
+    let revoked_serials: std::collections::HashSet<u64> =
+        revocation_list.iter().map(|r| r.serial).collect();
+
+    let mut certs = Vec::new();
+    for session in sessions {
+        for file in &session.files {
+            if !file.name.ends_with(".CRT") {
+                continue;
+            }
+            let is_root = file.name == "ROOT.CRT";
+            match Certificate::from_der(&file.data) {
+                Ok(cert) => {
+                    let subject = cert.tbs_certificate.subject.to_string();
+                    let not_after = format!("{}", cert.tbs_certificate.validity.not_after);
+                    let serial = serial_to_u64(&cert.tbs_certificate.serial_number);
+                    certs.push(CertSummary {
+                        serial,
+                        subject,
+                        not_after,
+                        session_dir: session.dir_name.clone(),
+                        is_root,
+                        already_revoked: revoked_serials.contains(&serial),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        file = %file.name,
+                        session = %session.dir_name,
+                        error = %e,
+                        "Failed to parse certificate for revocation picker"
+                    );
+                }
+            }
+        }
+    }
+    certs
+}
+
+/// Convert an X.509 SerialNumber to u64. Returns 0 if it doesn't fit.
+fn serial_to_u64(sn: &x509_cert::serial_number::SerialNumber) -> u64 {
+    let bytes = sn.as_bytes();
+    if bytes.len() > 8 {
+        return 0;
+    }
+    let mut val = 0u64;
+    for &b in bytes {
+        val = (val << 8) | (b as u64);
+    }
+    val
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::iso9660::IsoFile;
+
+    fn make_session(name: &str, files: Vec<IsoFile>) -> SessionEntry {
+        SessionEntry {
+            dir_name: name.to_string(),
+            timestamp: SystemTime::now(),
+            files,
+        }
+    }
+
+    #[test]
+    fn serial_to_u64_single_byte() {
+        let sn = x509_cert::serial_number::SerialNumber::new(&[0x2A]).unwrap();
+        assert_eq!(serial_to_u64(&sn), 42);
+    }
+
+    #[test]
+    fn serial_to_u64_multi_byte() {
+        let sn = x509_cert::serial_number::SerialNumber::new(&[0x01, 0x00]).unwrap();
+        assert_eq!(serial_to_u64(&sn), 256);
+    }
+
+    #[test]
+    fn serial_to_u64_max_8_bytes() {
+        let sn = x509_cert::serial_number::SerialNumber::new(&[0x01, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(serial_to_u64(&sn), 1u64 << 56);
+    }
+
+    #[test]
+    fn serial_to_u64_overflow_returns_zero() {
+        // 9 bytes won't fit in u64
+        let sn = x509_cert::serial_number::SerialNumber::new(&[1, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
+        assert_eq!(serial_to_u64(&sn), 0);
+    }
+
+    #[test]
+    fn gather_empty_sessions() {
+        let result = gather_cert_list_from_sessions(&[], &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn gather_skips_non_crt_files() {
+        let sessions = vec![make_session(
+            "20260508T120000-record",
+            vec![IsoFile {
+                name: "AUDIT.LOG".into(),
+                data: b"not a cert".to_vec(),
+            }],
+        )];
+        let result = gather_cert_list_from_sessions(&sessions, &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn gather_skips_invalid_crt() {
+        let sessions = vec![make_session(
+            "20260508T120000-record",
+            vec![IsoFile {
+                name: "ROOT.CRT".into(),
+                data: b"not valid DER".to_vec(),
+            }],
+        )];
+        let result = gather_cert_list_from_sessions(&sessions, &[]);
+        assert!(result.is_empty());
     }
 }
 

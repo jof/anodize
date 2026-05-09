@@ -21,6 +21,7 @@ pub enum PlanningState {
     LoadCsr,
     CsrPreview,
     // RevokeCert
+    RevokeSelect,
     RevokeInput,
     RevokePreview,
     // IssueCrl
@@ -126,6 +127,7 @@ impl CeremonyMode {
             CeremonyPhase::Planning(PlanningState::KeyAction)
             | CeremonyPhase::Planning(PlanningState::LoadCsr)
             | CeremonyPhase::Planning(PlanningState::CsrPreview)
+            | CeremonyPhase::Planning(PlanningState::RevokeSelect)
             | CeremonyPhase::Planning(PlanningState::RevokeInput)
             | CeremonyPhase::Planning(PlanningState::RevokePreview)
             | CeremonyPhase::Planning(PlanningState::CrlPreview)
@@ -168,6 +170,9 @@ impl CeremonyMode {
             CeremonyPhase::Planning(PlanningState::LoadCsr) => "Select Certificate Profile",
             CeremonyPhase::Planning(PlanningState::CsrPreview) => {
                 "CSR Review \u{2014} VERIFY BEFORE SIGNING"
+            }
+            CeremonyPhase::Planning(PlanningState::RevokeSelect) => {
+                "Revoke Certificate \u{2014} Select Certificate"
             }
             CeremonyPhase::Planning(PlanningState::RevokeInput) => "Revoke Certificate",
             CeremonyPhase::Planning(PlanningState::RevokePreview) => {
@@ -400,6 +405,58 @@ impl CeremonyMode {
                 lines.push(String::new());
                 lines.push("  [1]  Proceed to disc write".into());
                 lines.push("  [q]  Abort".into());
+                lines
+            }
+
+            CeremonyPhase::Planning(PlanningState::RevokeSelect) => {
+                let certs = &app.data.cert_list;
+                let cursor = app.data.cert_list_cursor;
+                let rev_count = app.data.revocation_list.len();
+                let mut lines = vec![
+                    String::new(),
+                    format!(
+                        "  {} certificate(s) on disc, {} revoked.",
+                        certs.len(),
+                        rev_count
+                    ),
+                    String::new(),
+                    "  Select a certificate to revoke:".into(),
+                    String::new(),
+                    format!(
+                        "  {:<3} {:<12} {:<40} {:<14} {}",
+                        "#", "Serial", "Subject", "Expires", "Status"
+                    ),
+                ];
+                for (i, c) in certs.iter().enumerate() {
+                    let marker = if i == cursor { ">" } else { " " };
+                    let status = if c.already_revoked {
+                        "(revoked)"
+                    } else if c.is_root {
+                        "root"
+                    } else {
+                        "active"
+                    };
+                    let subject = if c.subject.len() > 38 {
+                        format!("{}...", &c.subject[..35])
+                    } else {
+                        c.subject.clone()
+                    };
+                    lines.push(format!(
+                        " {marker}{:<3} {:<12} {:<40} {:<14} {}",
+                        i + 1,
+                        c.serial,
+                        subject,
+                        c.not_after,
+                        status
+                    ));
+                }
+                if certs.is_empty() {
+                    lines.push("  (No certificates found on disc.)".into());
+                }
+                lines.push(String::new());
+                lines.push(
+                    "  [j/k] navigate  [Enter] select  [m] manual serial  [Esc] cancel".into(),
+                );
                 lines
             }
 
@@ -793,6 +850,15 @@ impl Component for CeremonyMode {
                     Action::Noop
                 }
             }
+
+            CeremonyPhase::Planning(PlanningState::RevokeSelect) => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => Action::RevokeSelectUp,
+                KeyCode::Down | KeyCode::Char('j') => Action::RevokeSelectDown,
+                KeyCode::Enter => Action::RevokeSelectConfirm,
+                KeyCode::Char('m') => Action::RevokeSelectManual,
+                KeyCode::Esc => Action::RevokeSelectCancel,
+                _ => Action::Noop,
+            },
 
             CeremonyPhase::Planning(PlanningState::RevokeInput) => match key.code {
                 KeyCode::Char(c) => Action::RevokeInputChar(c),

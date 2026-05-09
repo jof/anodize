@@ -41,6 +41,12 @@ pub enum Action {
     DoStartBurn,
     BurnComplete,
     DoWriteShuttle,
+    // Revocation cert picker
+    RevokeSelectUp,
+    RevokeSelectDown,
+    RevokeSelectConfirm,
+    RevokeSelectManual,
+    RevokeSelectCancel,
     // Revocation input
     RevokeInputChar(char),
     RevokeInputBackspace,

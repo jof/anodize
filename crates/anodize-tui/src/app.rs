@@ -76,6 +76,17 @@ impl DiscContext {
     }
 }
 
+/// Summary of a certificate found on disc, for the revocation picker.
+#[derive(Debug, Clone)]
+pub struct CertSummary {
+    pub serial: u64,
+    pub subject: String,
+    pub not_after: String,
+    pub session_dir: String,
+    pub is_root: bool,
+    pub already_revoked: bool,
+}
+
 /// Certificate / CRL / CSR / revocation / migration artefacts.
 pub struct CeremonyData {
     pub cert_der: Option<Vec<u8>>,
@@ -90,6 +101,8 @@ pub struct CeremonyData {
     pub revoke_serial_buf: String,
     pub revoke_reason_buf: String,
     pub revoke_phase: u8, // 0=serial entry, 1=reason entry
+    pub cert_list: Vec<CertSummary>,
+    pub cert_list_cursor: usize,
     pub migrate_sessions: Vec<SessionEntry>,
     pub migrate_chain_ok: bool,
     pub migrate_total_bytes: u64,
@@ -114,6 +127,8 @@ impl CeremonyData {
             revoke_serial_buf: String::new(),
             revoke_reason_buf: String::new(),
             revoke_phase: 0,
+            cert_list: Vec::new(),
+            cert_list_cursor: 0,
             migrate_sessions: Vec::new(),
             migrate_chain_ok: false,
             migrate_total_bytes: 0,
@@ -784,7 +799,53 @@ impl App {
                 );
             }
 
-            // Revocation
+            // Revocation cert picker
+            Action::RevokeSelectUp => {
+                if self.data.cert_list_cursor > 0 {
+                    self.data.cert_list_cursor -= 1;
+                }
+            }
+            Action::RevokeSelectDown => {
+                if !self.data.cert_list.is_empty()
+                    && self.data.cert_list_cursor < self.data.cert_list.len() - 1
+                {
+                    self.data.cert_list_cursor += 1;
+                }
+            }
+            Action::RevokeSelectConfirm => {
+                if let Some(cert) = self.data.cert_list.get(self.data.cert_list_cursor) {
+                    if cert.already_revoked {
+                        self.set_status(format!(
+                            "Certificate serial {} is already revoked.",
+                            cert.serial
+                        ));
+                    } else {
+                        self.data.revoke_serial_buf = cert.serial.to_string();
+                        self.data.revoke_reason_buf.clear();
+                        self.data.revoke_phase = 1;
+                        self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokeInput);
+                        self.set_status(
+                            "Serial pre-filled. Enter reason (optional, Enter to skip).",
+                        );
+                    }
+                }
+            }
+            Action::RevokeSelectManual => {
+                self.data.revoke_serial_buf.clear();
+                self.data.revoke_reason_buf.clear();
+                self.data.revoke_phase = 0;
+                self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokeInput);
+                self.set_status(
+                    "Enter certificate serial number (digits). Press Enter to continue.",
+                );
+            }
+            Action::RevokeSelectCancel => {
+                self.current_op = None;
+                self.ceremony.state = CeremonyPhase::OperationSelect;
+                self.set_status("Revocation cancelled.");
+            }
+
+            // Revocation input
             Action::RevokeInputChar(c) => {
                 if self.data.revoke_phase == 0 && c.is_ascii_digit() {
                     self.data.revoke_serial_buf.push(c);

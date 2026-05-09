@@ -583,12 +583,12 @@ impl App {
             }
             Operation::RevokeCert => {
                 self.do_load_revocation();
-                if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RevokeInput) {
+                if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RevokeSelect) {
                     self.data.revoke_phase = 0;
                     self.data.revoke_serial_buf.clear();
                     self.data.revoke_reason_buf.clear();
                     self.set_status(
-                        "Enter certificate serial number (digits). Press Enter to continue.",
+                        "Select a certificate to revoke, or press [m] for manual serial entry.",
                     );
                 }
             }
@@ -1081,9 +1081,14 @@ impl App {
         self.data.revocation_list = load_revocation_from_sessions(&self.disc.prior_sessions);
         self.data.crl_number = Some(next_crl_number_from_sessions(&self.disc.prior_sessions));
 
+        // Build cert list for the revocation picker
+        self.data.cert_list =
+            gather_cert_list_from_sessions(&self.disc.prior_sessions, &self.data.revocation_list);
+        self.data.cert_list_cursor = 0;
+
         match self.current_op {
             Some(Operation::RevokeCert) => {
-                self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokeInput);
+                self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokeSelect);
             }
             Some(Operation::IssueCrl) => {
                 self.ceremony.state = CeremonyPhase::Planning(PlanningState::CrlPreview);

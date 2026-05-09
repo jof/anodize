@@ -793,6 +793,8 @@ mod tests {
             revoke_serial_buf: String::new(),
             revoke_reason_buf: String::new(),
             revoke_phase: 0,
+            cert_list: Vec::new(),
+            cert_list_cursor: 0,
             migrate_sessions: vec![],
             migrate_chain_ok: false,
             migrate_total_bytes: 0,
