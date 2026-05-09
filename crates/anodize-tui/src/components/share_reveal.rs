@@ -2,8 +2,9 @@
 //!
 //! Displays one share at a time as a numbered word grid for custodian
 //! transcription. Screen-clear protocol: the share is hidden by default
-//! and only shown on explicit toggle, ensuring only the intended custodian
-//! sees the sensitive data.
+//! and only shown on explicit one-way reveal (pressing S latches the share
+//! visible; it cannot be re-hidden). This ensures unambiguous proof that
+//! each custodian has seen their share.
 
 use anodize_sss::Share;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -29,8 +30,10 @@ pub struct ShareReveal {
     pub shares: Vec<NamedShare>,
     /// Index into `shares` of the currently displayed share (or past the end if done).
     pub current: usize,
-    /// Whether the current share's words are visible (toggled by operator).
+    /// Whether the current share's words are visible.
     pub visible: bool,
+    /// Per-share flag: true once that share has been revealed (one-way latch).
+    pub revealed: Vec<bool>,
     /// Vertical scroll offset for the content area.
     pub scroll_offset: u16,
 }
@@ -50,10 +53,12 @@ impl ShareReveal {
                 }
             })
             .collect();
+        let count = named.len();
         Self {
             shares: named,
             current: 0,
             visible: false,
+            revealed: vec![false; count],
             scroll_offset: 0,
         }
     }
@@ -69,8 +74,9 @@ impl ShareReveal {
             return true;
         }
         match key.code {
-            KeyCode::Char('s') | KeyCode::Char('S') => {
-                self.visible = !self.visible;
+            KeyCode::Char('s') | KeyCode::Char('S') if !self.visible => {
+                self.visible = true;
+                self.revealed[self.current] = true;
                 self.scroll_offset = 0;
                 false
             }
@@ -136,13 +142,29 @@ impl ShareReveal {
                     ),
                 ]));
             } else if i == self.current && !self.all_revealed() {
-                lines.push(Line::from(vec![
-                    Span::styled("  ▸ ", Style::default().fg(Color::Yellow)),
-                    Span::styled(
-                        format!("Share #{} — {}", ns.index, ns.custodian_name),
+                let (marker, style) = if self.revealed[i] {
+                    (
+                        "  ⚠ ",
+                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    (
+                        "  ▸ ",
                         Style::default()
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
+                    )
+                };
+                let suffix = if self.revealed[i] {
+                    " — REVEALED"
+                } else {
+                    ""
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(marker, style),
+                    Span::styled(
+                        format!("Share #{} — {}{}", ns.index, ns.custodian_name, suffix),
+                        style,
                     ),
                 ]));
             } else {
@@ -239,7 +261,7 @@ impl ShareReveal {
         let hint = if self.all_revealed() {
             "  [Enter] Continue"
         } else if self.visible {
-            "  [Enter] Confirm transcription   [S] Hide share   [j/k] Scroll"
+            "  [Enter] Confirm transcription   [j/k] Scroll"
         } else {
             "  [S] Reveal share"
         };
@@ -249,5 +271,95 @@ impl ShareReveal {
         ];
         let footer = Paragraph::new(footer_lines);
         frame.render_widget(footer, footer_area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn test_shares() -> (Vec<Share>, Vec<String>) {
+        let shares = vec![
+            Share {
+                index: 1,
+                data: vec![0u8; 4],
+                checksum: 0,
+            },
+            Share {
+                index: 2,
+                data: vec![1u8; 4],
+                checksum: 0,
+            },
+        ];
+        let names = vec!["Alice".into(), "Bob".into()];
+        (shares, names)
+    }
+
+    #[test]
+    fn s_key_reveals_once_and_cannot_hide() {
+        let (shares, names) = test_shares();
+        let mut sr = ShareReveal::new(shares, &names);
+
+        assert!(!sr.visible);
+        assert!(!sr.revealed[0]);
+
+        // First S press: reveal
+        sr.handle_key(key(KeyCode::Char('s')));
+        assert!(sr.visible);
+        assert!(sr.revealed[0]);
+
+        // Second S press: should be ignored (one-way latch)
+        sr.handle_key(key(KeyCode::Char('s')));
+        assert!(sr.visible, "S must not hide a revealed share");
+        assert!(sr.revealed[0]);
+    }
+
+    #[test]
+    fn enter_advances_to_next_share() {
+        let (shares, names) = test_shares();
+        let mut sr = ShareReveal::new(shares, &names);
+
+        // Reveal share 0
+        sr.handle_key(key(KeyCode::Char('S')));
+        assert_eq!(sr.current, 0);
+
+        // Confirm transcription
+        let done = sr.handle_key(key(KeyCode::Enter));
+        assert!(!done);
+        assert_eq!(sr.current, 1);
+        assert!(!sr.visible, "visible resets for next share");
+        assert!(!sr.revealed[1], "next share not yet revealed");
+    }
+
+    #[test]
+    fn enter_ignored_when_not_revealed() {
+        let (shares, names) = test_shares();
+        let mut sr = ShareReveal::new(shares, &names);
+
+        // Enter without revealing should do nothing
+        sr.handle_key(key(KeyCode::Enter));
+        assert_eq!(sr.current, 0);
+    }
+
+    #[test]
+    fn all_revealed_after_both_confirmed() {
+        let (shares, names) = test_shares();
+        let mut sr = ShareReveal::new(shares, &names);
+
+        // Share 0: reveal + confirm
+        sr.handle_key(key(KeyCode::Char('s')));
+        sr.handle_key(key(KeyCode::Enter));
+
+        // Share 1: reveal + confirm
+        sr.handle_key(key(KeyCode::Char('s')));
+        let done = sr.handle_key(key(KeyCode::Enter));
+
+        assert!(done);
+        assert!(sr.all_revealed());
     }
 }

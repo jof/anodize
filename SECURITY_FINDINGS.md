@@ -200,7 +200,17 @@ The `--skip-disc` CLI flag causes the ceremony to write ISO images to `/run/anod
 
 ---
 
-### FIND-11 — `confirmed_time` is used for session directory names but not for certificate timestamps
+### FIND-11 — ~~Share reveal toggle allowed re-hiding sensitive material~~ (RESOLVED)
+
+**File:** `crates/anodize-tui/src/components/share_reveal.rs`
+
+The `[S]` key in the share reveal UI toggled `self.visible = !self.visible`, allowing a custodian to hide a share after it had been revealed. This created ambiguity about whether a given share was actually seen by the intended custodian, undermining the screen-clear protocol. The footer also advertised `[S] Hide share` while the share was visible.
+
+**Fix:** The `[S]` key is now a one-way latch — it can only reveal, never hide. A per-share `revealed` flag tracks whether each share has been exposed, and the progress indicator shows `⚠ REVEALED` in red for the current share once it has been displayed. The footer no longer offers a hide option.
+
+---
+
+### FIND-12 — `confirmed_time` is used for session directory names but not for certificate timestamps
 
 **File:** [crates/anodize-tui/src/main.rs:1260](crates/anodize-tui/src/main.rs#L1260), [main.rs:1530](crates/anodize-tui/src/main.rs#L1530); [crates/anodize-ca/src/lib.rs:143](crates/anodize-ca/src/lib.rs#L143)
 

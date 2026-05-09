@@ -532,7 +532,8 @@ impl CeremonyMode {
                     "  The share reveal component is active.".into(),
                     String::new(),
                     "  Hand the device to each custodian in turn.".into(),
-                    "  Press [S] to show/hide the share, [Enter] to confirm transcription.".into(),
+                    "  Press [S] to reveal the share (one-way), [Enter] to confirm transcription."
+                        .into(),
                 ]
             }
 
@@ -581,7 +582,8 @@ impl CeremonyMode {
                     "  New shares are being distributed to custodians.".into(),
                     String::new(),
                     "  Hand the device to each custodian in turn.".into(),
-                    "  Press [S] to show/hide the share, [Enter] to confirm transcription.".into(),
+                    "  Press [S] to reveal the share (one-way), [Enter] to confirm transcription."
+                        .into(),
                 ]
             }
 
