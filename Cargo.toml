@@ -36,6 +36,10 @@ zeroize        = { version = "1", features = ["derive"] }
 # ECDSA verification (tests + anodize-ca)
 p256           = { version = "0.13", features = ["ecdsa", "pkcs8", "digest"] }
 p384           = { version = "0.13", features = ["ecdsa", "pkcs8", "digest"] }
+# RSA verification
+rsa            = { version = "0.9", features = ["sha2"] }
+# Ed25519 verification
+ed25519-dalek  = { version = "2", features = ["pkcs8"] }
 # Time (date arithmetic for validity periods)
 time           = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 # Error handling
