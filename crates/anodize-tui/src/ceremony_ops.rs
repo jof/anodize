@@ -1303,6 +1303,8 @@ impl App {
         };
 
         let cdp_url = self.profile.as_ref().and_then(|p| p.ca.cdp_url.as_deref());
+        let existing_serials =
+            collect_serial_numbers_from_sessions(&self.disc.prior_sessions);
 
         let cert = match sign_intermediate_csr(
             &signer,
@@ -1311,6 +1313,7 @@ impl App {
             path_len,
             validity_days,
             cdp_url,
+            &existing_serials,
         ) {
             Ok(c) => c,
             Err(anodize_ca::CaError::CsrSignatureInvalid) => {

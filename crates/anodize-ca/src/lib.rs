@@ -63,6 +63,8 @@ pub enum CaError {
     CsrExtensionRejected(String),
     #[error("DER error: {0}")]
     Der(String),
+    #[error("serial number collision after {0} attempts — possible CSPRNG failure")]
+    SerialCollision(u8),
 }
 
 impl CaError {
@@ -174,7 +176,7 @@ pub fn build_root_cert<H: Hsm>(
     let validity = Validity::from_now(Duration::from_secs(u64::from(validity_days) * 86400))
         .map_err(|e| CaError::Der(e.to_string()))?;
 
-    let serial = random_serial()?;
+    let serial = generate_serial(&[])?;
     let builder = CertificateBuilder::new(Profile::Root, serial, validity, subject, spki, signer)?;
 
     Ok(builder.build::<DerSignature>()?)
@@ -235,6 +237,7 @@ pub fn sign_intermediate_csr<H: Hsm>(
     path_len: Option<u8>,
     validity_days: u32,
     cdp_url: Option<&str>,
+    existing_serials: &[SerialNumber],
 ) -> Result<Certificate, CaError> {
     use std::time::Duration;
 
@@ -259,12 +262,7 @@ pub fn sign_intermediate_csr<H: Hsm>(
     }
 
     let issuer = root_cert.tbs_certificate.subject.clone();
-    let serial = SerialNumber::from(
-        SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64,
-    );
+    let serial = generate_serial(existing_serials)?;
     let validity = Validity::from_now(Duration::from_secs(u64::from(validity_days) * 86400))
         .map_err(|e| CaError::Der(e.to_string()))?;
 
@@ -433,15 +431,26 @@ fn build_crl_extensions(
     Ok(vec![crl_num_ext, akid_ext])
 }
 
-fn random_serial() -> Result<SerialNumber, CaError> {
-    let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|e| CaError::Der(e.to_string()))?;
-    // RFC 5280 serial numbers are positive ASN.1 integers; clear the high bit to
-    // keep the encoding non-negative without a leading 0x00 padding byte.
-    bytes[0] &= 0x7f;
-    // Ensure at least one non-zero byte so the integer isn't zero.
-    bytes[0] |= 0x01;
-    SerialNumber::new(&bytes).map_err(|e| CaError::Der(e.to_string()))
+/// Generate a 128-bit random serial number that does not collide with any
+/// previously-issued serial.  `existing` may be empty for the root cert.
+/// Retries up to 8 times; returns `SerialCollision` on exhaustion (indicates
+/// possible CSPRNG failure — astronomically unlikely under normal operation).
+fn generate_serial(existing: &[SerialNumber]) -> Result<SerialNumber, CaError> {
+    const MAX_ATTEMPTS: u8 = 8;
+    for _ in 0..MAX_ATTEMPTS {
+        let mut bytes = [0u8; 16];
+        getrandom::getrandom(&mut bytes).map_err(|e| CaError::Der(e.to_string()))?;
+        // RFC 5280 serial numbers are positive ASN.1 integers; clear the high bit to
+        // keep the encoding non-negative without a leading 0x00 padding byte.
+        bytes[0] &= 0x7f;
+        // Ensure at least one non-zero byte so the integer isn't zero.
+        bytes[0] |= 0x01;
+        let candidate = SerialNumber::new(&bytes).map_err(|e| CaError::Der(e.to_string()))?;
+        if !existing.iter().any(|s| s.as_bytes() == candidate.as_bytes()) {
+            return Ok(candidate);
+        }
+    }
+    Err(CaError::SerialCollision(MAX_ATTEMPTS))
 }
 
 fn parse_dn(cn: &str, org: &str, country: &str) -> Result<x509_cert::name::Name, CaError> {

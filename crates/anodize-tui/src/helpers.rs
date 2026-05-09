@@ -155,6 +155,25 @@ pub fn parse_rfc3339_to_system_time(s: &str) -> Option<SystemTime> {
     }
 }
 
+/// Collect all certificate serial numbers from disc sessions for collision
+/// checking during serial number generation.
+pub fn collect_serial_numbers_from_sessions(
+    sessions: &[SessionEntry],
+) -> Vec<x509_cert::serial_number::SerialNumber> {
+    let mut serials = Vec::new();
+    for session in sessions {
+        for file in &session.files {
+            if !file.name.ends_with(".CRT") {
+                continue;
+            }
+            if let Ok(cert) = Certificate::from_der(&file.data) {
+                serials.push(cert.tbs_certificate.serial_number);
+            }
+        }
+    }
+    serials
+}
+
 /// Walk all disc sessions, parse .CRT files, and build a list of cert summaries
 /// for the revocation picker. Cross-references against the revocation list to
 /// mark already-revoked entries.
