@@ -175,7 +175,17 @@ impl CeremonyMode {
             CeremonyPhase::PostCommitError => "Post-Commit Error",
             CeremonyPhase::Execute => "Certificate Preview \u{2014} VERIFY FINGERPRINT",
             CeremonyPhase::BurningDisc => "Writing Session\u{2026}",
-            CeremonyPhase::DiscDone => "Disc Session Written",
+            CeremonyPhase::DiscDone => match app.current_op {
+                Some(Operation::InitRoot) => "Root Init Written",
+                Some(Operation::SignCsr) => "Certificate Written",
+                Some(Operation::RevokeCert) => "Revocation Record Written",
+                Some(Operation::IssueCrl) => "CRL Refresh Written",
+                Some(Operation::RekeyShares) => "Re-key Shares Written",
+                Some(Operation::MigrateDisc) => "Disc Migration Written",
+                Some(Operation::KeyBackup) => "Key Backup Written",
+                Some(Operation::ValidateDisc) => "Disc Validation Written",
+                None => "Disc Session Written",
+            },
             CeremonyPhase::Planning(PlanningState::LoadCsr) => "Select Certificate Profile",
             CeremonyPhase::Planning(PlanningState::CsrPreview) => {
                 "Certificate Review \u{2014} VERIFY BEFORE SIGNING"

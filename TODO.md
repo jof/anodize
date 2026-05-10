@@ -97,9 +97,3 @@ Post-rekey smoke-check implemented: after `change_pin` succeeds on all HSMs,
 it.  If the old PIN still works, the ceremony aborts with a CRITICAL error
 before writing to disc.
 
-### Cosmetic: "Disc Session Written" title is generic
-
-Every operation shows the same "Disc Session Written" banner.  It would be
-clearer to include the operation name, e.g. "Revocation Record Written" or
-"CRL Refresh Written" — the status line beneath does this already, but the
-banner title is what operators see first.
