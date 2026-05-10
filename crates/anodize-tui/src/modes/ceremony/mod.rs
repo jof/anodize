@@ -309,6 +309,11 @@ impl CeremonyMode {
                     .burn_started
                     .map(|t| t.elapsed().as_secs())
                     .unwrap_or(0);
+                let spin = app
+                    .disc
+                    .burn_started
+                    .map(crate::helpers::spinner_frame)
+                    .unwrap_or(' ');
                 let step = app.disc.burn_step.as_deref().unwrap_or("Preparing…");
                 vec![
                     String::new(),
@@ -316,7 +321,7 @@ impl CeremonyMode {
                     "  HSM signing will begin after disc commit completes.".into(),
                     "  Do not remove the disc or power off.".into(),
                     String::new(),
-                    format!("  [{elapsed:>3}s]  {step}"),
+                    format!("  {spin} [{elapsed:>3}s]  {step}"),
                 ]
             }
 
@@ -556,13 +561,18 @@ impl CeremonyMode {
                     .burn_started
                     .map(|t| t.elapsed().as_secs())
                     .unwrap_or(0);
+                let spin = app
+                    .disc
+                    .burn_started
+                    .map(crate::helpers::spinner_frame)
+                    .unwrap_or(' ');
                 let step = app.disc.burn_step.as_deref().unwrap_or("Preparing\u{2026}");
                 vec![
                     String::new(),
                     "  Writing ISO 9660 session to optical disc\u{2026}".into(),
                     "  Please wait. Do not remove the disc or USB.".into(),
                     String::new(),
-                    format!("  [{elapsed:>3}s]  {step}"),
+                    format!("  {spin} [{elapsed:>3}s]  {step}"),
                 ]
             }
 

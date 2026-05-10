@@ -10,6 +10,17 @@ use x509_cert::request::CertReq;
 use crate::app::CertSummary;
 use crate::media::SessionEntry;
 
+// ── Burn progress spinner ────────────────────────────────────────────────────
+
+const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Return the spinner frame character for the given `Instant` start time.
+/// Cycles through Braille dot frames every 100 ms.
+pub fn spinner_frame(started: std::time::Instant) -> char {
+    let idx = (started.elapsed().as_millis() / 100) as usize % SPINNER_FRAMES.len();
+    SPINNER_FRAMES[idx]
+}
+
 // ── Noise PIN masking ─────────────────────────────────────────────────────────
 
 pub fn noise_display_len() -> usize {
@@ -374,6 +385,26 @@ mod tests {
             timestamp: SystemTime::now(),
             files,
         }
+    }
+
+    #[test]
+    fn spinner_frame_cycles_through_braille() {
+        let started = std::time::Instant::now();
+        let frame = spinner_frame(started);
+        assert!(
+            SPINNER_FRAMES.contains(&frame),
+            "frame '{frame}' should be one of the Braille spinner chars"
+        );
+    }
+
+    #[test]
+    fn spinner_frame_deterministic_at_zero_elapsed() {
+        // Create an Instant and immediately compute the frame — should be first frame
+        // (or very close to it, given minimal elapsed time).
+        let started = std::time::Instant::now();
+        let frame = spinner_frame(started);
+        // The frame index is (elapsed_ms / 100) % 10.  With <100ms elapsed this is 0.
+        assert_eq!(frame, SPINNER_FRAMES[0]);
     }
 
     #[test]
