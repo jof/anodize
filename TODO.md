@@ -27,19 +27,15 @@ is blocked by the state machine bug above.
 
 ## Findings from e2e run (2026-05-10)
 
-### Shuttle copy silently fails after Phase 1
+### ~~Shuttle copy silently fails after Phase 1~~ (DONE)
 
-After InitRoot the shuttle (`/mnt/usb`) correctly received `root.crt`,
-`root.crl`, and `audit.log`.  Every subsequent phase reported "Copy artifacts
-to shuttle" success, but the shuttle contents never changed — no
-`intermediate.crt`, no updated `audit.log`, no updated `root.crl`.
-
-The likely cause is a stale mount / symlink at `/tmp/anodize-shuttle`.  On the
-first ceremony session the shuttle USB is auto-detected and mounted; on later
-sessions the path still exists but the mount may have gone stale (the debug
-user also mounts the same device at `/mnt/usb`).  The shuttle-copy code should
-re-verify the mount is live before writing, and return a visible error when the
-copy actually fails.
+`do_write_shuttle()` now calls `media::verify_shuttle_mount()` before writing
+any artifacts.  The check reads `/proc/mounts` and confirms the shuttle path
+is an active mount — stale directories (left behind by a previous session or
+a concurrent debug mount at a different path) are rejected with a clear error.
+All file writes use `media::write_and_sync()` which fsyncs each file to catch
+silent I/O failures.  Operations that produce no shuttle artifacts (RekeyShares,
+KeyBackup, ValidateDisc, MigrateDisc) skip the mount check entirely.
 
 ### ~~ValidateDisc should be more comprehensive~~ (DONE)
 

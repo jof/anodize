@@ -2597,50 +2597,8 @@ impl App {
         let shuttle = self.shuttle_mount.clone();
         let staging_log = PathBuf::from("/run/anodize/staging/audit.log");
 
-        match self.current_op.clone() {
-            Some(Operation::InitRoot) => {
-                if let Some(cert_der) = &self.data.cert_der {
-                    if let Err(e) = std::fs::write(shuttle.join("root.crt"), cert_der) {
-                        self.set_status(format!("Shuttle write failed (root.crt): {e}"));
-                        return;
-                    }
-                }
-                if let Some(crl_der) = &self.data.crl_der {
-                    if let Err(e) = std::fs::write(shuttle.join("root.crl"), crl_der) {
-                        self.set_status(format!("Shuttle write failed (root.crl): {e}"));
-                        return;
-                    }
-                }
-            }
-            Some(Operation::SignCsr) => {
-                if let Some(cert_der) = &self.data.cert_der {
-                    if let Err(e) = std::fs::write(shuttle.join("intermediate.crt"), cert_der) {
-                        self.set_status(format!("Shuttle write failed (intermediate.crt): {e}"));
-                        return;
-                    }
-                }
-            }
-            Some(Operation::RevokeCert) => {
-                let revoked_toml = serialize_revocation_list(&self.data.revocation_list);
-                if let Err(e) = std::fs::write(shuttle.join("revoked.toml"), &revoked_toml) {
-                    self.set_status(format!("Shuttle write failed (revoked.toml): {e}"));
-                    return;
-                }
-                if let Some(crl_der) = &self.data.crl_der {
-                    if let Err(e) = std::fs::write(shuttle.join("root.crl"), crl_der) {
-                        self.set_status(format!("Shuttle write failed (root.crl): {e}"));
-                        return;
-                    }
-                }
-            }
-            Some(Operation::IssueCrl) => {
-                if let Some(crl_der) = &self.data.crl_der {
-                    if let Err(e) = std::fs::write(shuttle.join("root.crl"), crl_der) {
-                        self.set_status(format!("Shuttle write failed (root.crl): {e}"));
-                        return;
-                    }
-                }
-            }
+        // Operations that produce no shuttle artifacts — skip mount check entirely.
+        match self.current_op {
             Some(Operation::RekeyShares) => {
                 // No shuttle artifacts for re-key
                 self.ceremony.state = CeremonyPhase::Done;
@@ -2664,13 +2622,83 @@ impl App {
                 self.set_status("Migration complete.");
                 return;
             }
+            _ => {}
         }
 
-        // Copy audit log to shuttle for all artifact-producing operations
-        let shuttle_log = shuttle.join("audit.log");
-        if let Err(e) = std::fs::copy(&staging_log, &shuttle_log) {
-            self.set_status(format!("Audit log copy to shuttle failed: {e}"));
+        // Verify the shuttle USB is still mounted before writing.
+        if let Err(e) = media::verify_shuttle_mount(&shuttle) {
+            tracing::error!("Shuttle mount check failed: {e:#}");
+            self.set_status(format!(
+                "Shuttle mount is stale: {e:#} — re-insert shuttle USB and retry."
+            ));
             return;
+        }
+
+        match self.current_op.clone() {
+            Some(Operation::InitRoot) => {
+                if let Some(cert_der) = &self.data.cert_der {
+                    if let Err(e) = media::write_and_sync(&shuttle.join("root.crt"), cert_der) {
+                        self.set_status(format!("Shuttle write failed (root.crt): {e:#}"));
+                        return;
+                    }
+                }
+                if let Some(crl_der) = &self.data.crl_der {
+                    if let Err(e) = media::write_and_sync(&shuttle.join("root.crl"), crl_der) {
+                        self.set_status(format!("Shuttle write failed (root.crl): {e:#}"));
+                        return;
+                    }
+                }
+            }
+            Some(Operation::SignCsr) => {
+                if let Some(cert_der) = &self.data.cert_der {
+                    if let Err(e) =
+                        media::write_and_sync(&shuttle.join("intermediate.crt"), cert_der)
+                    {
+                        self.set_status(format!("Shuttle write failed (intermediate.crt): {e:#}"));
+                        return;
+                    }
+                }
+            }
+            Some(Operation::RevokeCert) => {
+                let revoked_toml = serialize_revocation_list(&self.data.revocation_list);
+                if let Err(e) =
+                    media::write_and_sync(&shuttle.join("revoked.toml"), revoked_toml.as_bytes())
+                {
+                    self.set_status(format!("Shuttle write failed (revoked.toml): {e:#}"));
+                    return;
+                }
+                if let Some(crl_der) = &self.data.crl_der {
+                    if let Err(e) = media::write_and_sync(&shuttle.join("root.crl"), crl_der) {
+                        self.set_status(format!("Shuttle write failed (root.crl): {e:#}"));
+                        return;
+                    }
+                }
+            }
+            Some(Operation::IssueCrl) => {
+                if let Some(crl_der) = &self.data.crl_der {
+                    if let Err(e) = media::write_and_sync(&shuttle.join("root.crl"), crl_der) {
+                        self.set_status(format!("Shuttle write failed (root.crl): {e:#}"));
+                        return;
+                    }
+                }
+            }
+            // No-artifact operations already returned above.
+            _ => unreachable!(),
+        }
+
+        // Copy audit log to shuttle for all artifact-producing operations.
+        // Read + write_and_sync instead of fs::copy so we get fsync.
+        match std::fs::read(&staging_log) {
+            Ok(log_bytes) => {
+                if let Err(e) = media::write_and_sync(&shuttle.join("audit.log"), &log_bytes) {
+                    self.set_status(format!("Audit log copy to shuttle failed: {e:#}"));
+                    return;
+                }
+            }
+            Err(e) => {
+                self.set_status(format!("Audit log read failed: {e}"));
+                return;
+            }
         }
 
         self.ceremony.state = CeremonyPhase::Done;
@@ -3580,5 +3608,81 @@ mod tests {
             "CeremonyCancel should clear pending_burn_reconfirm"
         );
         assert_eq!(app.ceremony.state, CeremonyPhase::OperationSelect);
+    }
+
+    // ── Shuttle write tests ──────────────────────────────────────────────
+
+    #[test]
+    fn shuttle_write_skips_mount_check_for_no_artifact_ops() {
+        for op in [
+            Operation::RekeyShares,
+            Operation::KeyBackup,
+            Operation::ValidateDisc,
+            Operation::MigrateDisc,
+        ] {
+            let mut app =
+                crate::app::App::new(PathBuf::from("/tmp/nonexistent-shuttle-path"), true);
+            app.current_op = Some(op.clone());
+            app.ceremony.state = CeremonyPhase::DiscDone;
+
+            app.do_write_shuttle();
+
+            assert_eq!(
+                app.ceremony.state,
+                CeremonyPhase::Done,
+                "{op:?} should complete without mount check"
+            );
+        }
+    }
+
+    #[test]
+    fn shuttle_write_fails_on_stale_mount() {
+        // Create a temp dir that exists but is not a mount point.
+        let dir = std::env::temp_dir().join("anodize-test-stale-shuttle");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut app = crate::app::App::new(dir.clone(), true);
+        app.current_op = Some(Operation::InitRoot);
+        app.data.cert_der = Some(vec![0xDE, 0xAD]);
+        app.ceremony.state = CeremonyPhase::DiscDone;
+
+        app.do_write_shuttle();
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // State should NOT advance to Done — the mount check should reject.
+        assert_ne!(
+            app.ceremony.state,
+            CeremonyPhase::Done,
+            "stale mount should block shuttle write"
+        );
+        assert!(
+            app.status.contains("stale")
+                || app.status.contains("not an active mount")
+                || app.status.contains("cannot read"),
+            "status should mention stale mount, got: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn shuttle_write_fails_on_nonexistent_path() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/anodize-test-nonexistent-42"), true);
+        app.current_op = Some(Operation::SignCsr);
+        app.data.cert_der = Some(vec![0xCA, 0xFE]);
+        app.ceremony.state = CeremonyPhase::DiscDone;
+
+        app.do_write_shuttle();
+
+        assert_ne!(
+            app.ceremony.state,
+            CeremonyPhase::Done,
+            "nonexistent path should block shuttle write"
+        );
+        assert!(
+            app.status.contains("stale") || app.status.contains("does not exist"),
+            "status should mention missing path, got: {}",
+            app.status
+        );
     }
 }
