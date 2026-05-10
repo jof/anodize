@@ -223,10 +223,7 @@ pub fn gather_cert_list_from_sessions(
 
 /// Convert an X.509 SerialNumber to an uppercase hex string.
 pub fn serial_to_hex(sn: &x509_cert::serial_number::SerialNumber) -> String {
-    sn.as_bytes()
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect()
+    sn.as_bytes().iter().map(|b| format!("{b:02X}")).collect()
 }
 
 /// Decode an uppercase hex serial string back to raw bytes.
@@ -394,9 +391,10 @@ mod tests {
     #[test]
     fn serial_to_hex_16_bytes() {
         let sn = x509_cert::serial_number::SerialNumber::new(&[
-            0x01, 0xAB, 0x23, 0xCD, 0x45, 0xEF, 0x67, 0x89,
-            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
-        ]).unwrap();
+            0x01, 0xAB, 0x23, 0xCD, 0x45, 0xEF, 0x67, 0x89, 0x01, 0x23, 0x45, 0x67, 0x89, 0xAB,
+            0xCD, 0xEF,
+        ])
+        .unwrap();
         assert_eq!(serial_to_hex(&sn), "01AB23CD45EF67890123456789ABCDEF");
     }
 

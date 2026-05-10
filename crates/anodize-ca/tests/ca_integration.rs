@@ -246,7 +246,11 @@ fn issue_crl_encodes_revoked_serials() {
     let now = SystemTime::now();
     let next_update = now + std::time::Duration::from_secs(30 * 24 * 3600);
     let revoked = vec![
-        (SerialNumber::from(42u64), now, Some(anodize_ca::CrlReason::KeyCompromise)),
+        (
+            SerialNumber::from(42u64),
+            now,
+            Some(anodize_ca::CrlReason::KeyCompromise),
+        ),
         (SerialNumber::from(99u64), now, None),
     ];
 
