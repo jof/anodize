@@ -300,9 +300,7 @@ cat /mnt/usb/audit.log | jq 'select(.event == "sss.rekey")'
 2. Boot through setup screens.
 3. OperationSelect: press `6` (Migrate disc).
 4. MigrateConfirm: verify session count + chain status, press `1`.
-5. Write confirmation: press Enter.
-6. Wait for disc burn (copies all sessions).
-7. Prompt: "Insert Blank Target Disc."
+5. Prompt: "Insert Blank Target Disc."
 
    **From the host** (separate terminal), swap the cdemu disc:
 
@@ -314,9 +312,9 @@ cat /mnt/usb/audit.log | jq 'select(.event == "sss.rekey")'
    make cdemu-swap-disc-local
    ```
 
-8. Press `1` to confirm new disc is inserted.
-9. Wait for migration write to new disc.
-10. Done: Ctrl+C.
+6. Press `1` to confirm new disc is inserted.
+7. Wait for migration write to new disc.
+8. Done: Ctrl+C.
 
 ### Verification
 
