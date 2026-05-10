@@ -62,14 +62,12 @@ The validation report now covers:
   mutable AUDIT.LOG/STATE.JSON); adjacent-pair comparison gives full
   transitivity across all sessions.
 
-### Share word count mismatch in UI ("34" vs "36")
+### ~~Share word count mismatch in UI ("34" vs "36")~~ (DONE)
 
-Share Distribution says "Total: 9 groups, **36 words**" but Share Input
-prompts for "Word 1/**34**".  The 2-word discrepancy is the identifier prefix
-(`acid`/`aged` first word), but this is never explained to the operator.
-Either:
-- Display "Word 1/36" and auto-fill the prefix, or
-- Add a hint: "The first word identifies the share. Enter words 2–35:".
+Share Distribution computed total words as `groups × 4`, overcounting when the
+last group had fewer than 4 words (e.g. 34 words = 8×4 + 2 = 9 groups, but
+`9×4 = 36`).  Fixed `NamedShare::total_words()` to count actual words across
+groups.  Share Input's `expected_words` was already correct (`secret_len + 2`).
 
 ### No progress indicator during disc writes
 
