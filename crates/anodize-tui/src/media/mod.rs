@@ -209,6 +209,61 @@ pub fn find_profile_usb(
     Ok(None)
 }
 
+// ── Shuttle mount verification ─────────────────────────────────────────────────
+
+/// Verify that `mountpoint` is an active mount (listed in `/proc/mounts`).
+///
+/// Returns `Ok(())` if the mountpoint appears in `/proc/mounts`, or `Err` with a
+/// human-readable message if the mount is stale or missing.  This catches the
+/// case where a previous ceremony session mounted the shuttle USB but a later
+/// session (or a concurrent debug mount at a different path) left the original
+/// mountpoint as a plain directory that silently swallows writes.
+pub fn verify_shuttle_mount(mountpoint: &Path) -> Result<()> {
+    if !mountpoint.exists() {
+        anyhow::bail!("shuttle mountpoint {} does not exist", mountpoint.display());
+    }
+
+    let mounts = std::fs::read_to_string("/proc/mounts")
+        .context("cannot read /proc/mounts to verify shuttle mount")?;
+
+    let target = mountpoint
+        .canonicalize()
+        .unwrap_or_else(|_| mountpoint.to_path_buf());
+    let target_str = target.to_string_lossy();
+
+    for line in mounts.lines() {
+        // /proc/mounts format: device mountpoint fstype options dump pass
+        let mut fields = line.split_whitespace();
+        let _dev = fields.next();
+        if let Some(mp) = fields.next() {
+            if mp == target_str.as_ref() {
+                return Ok(());
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "shuttle path {} is not an active mount — USB may have been \
+         unmounted or remounted elsewhere. Re-insert the shuttle USB.",
+        mountpoint.display()
+    );
+}
+
+/// Write `data` to `path`, then fsync the file to ensure the data actually
+/// reached the underlying device.  Returns a descriptive error on failure
+/// instead of silently succeeding on a stale mount.
+pub fn write_and_sync(path: &Path, data: &[u8]) -> Result<()> {
+    use std::io::Write;
+
+    let mut f =
+        std::fs::File::create(path).with_context(|| format!("create {}", path.display()))?;
+    f.write_all(data)
+        .with_context(|| format!("write {}", path.display()))?;
+    f.sync_all()
+        .with_context(|| format!("fsync {}", path.display()))?;
+    Ok(())
+}
+
 // ── Optical disc discovery ────────────────────────────────────────────────────
 
 /// Scan /sys/block/sr* for optical drives and return their /dev paths.
@@ -556,4 +611,56 @@ pub fn session_dir_name(ts: SystemTime) -> String {
         odt.second(),
         odt.nanosecond(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_shuttle_mount_rejects_nonexistent_path() {
+        let result = verify_shuttle_mount(Path::new("/tmp/anodize-no-such-dir-42"));
+        assert!(result.is_err());
+        let msg = format!("{:#}", result.unwrap_err());
+        assert!(
+            msg.contains("does not exist"),
+            "expected 'does not exist', got: {msg}"
+        );
+    }
+
+    #[test]
+    fn verify_shuttle_mount_rejects_plain_directory() {
+        let dir = std::env::temp_dir().join("anodize-test-verify-mount");
+        let _ = std::fs::create_dir_all(&dir);
+        let result = verify_shuttle_mount(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        // On macOS: /proc/mounts doesn't exist → Err("cannot read /proc/mounts")
+        // On Linux: dir exists but is not a mount → Err("not an active mount")
+        assert!(
+            result.is_err(),
+            "plain directory should not pass mount check"
+        );
+    }
+
+    #[test]
+    fn write_and_sync_roundtrips() {
+        let dir = std::env::temp_dir().join("anodize-test-write-sync");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("test.bin");
+        let data = b"hello shuttle";
+
+        let result = write_and_sync(&path, data);
+        assert!(result.is_ok(), "write_and_sync failed: {result:?}");
+
+        let read_back = std::fs::read(&path).unwrap();
+        assert_eq!(read_back, data);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_and_sync_fails_on_bad_path() {
+        let result = write_and_sync(Path::new("/no/such/dir/file.bin"), b"data");
+        assert!(result.is_err());
+    }
 }
