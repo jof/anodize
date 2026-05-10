@@ -443,7 +443,7 @@ pub fn reason_str_to_crl_reason(s: &str) -> CrlReason {
 pub fn issue_crl<H: Hsm>(
     signer: &P384HsmSigner<H>,
     root_cert: &Certificate,
-    revoked: &[(u64, SystemTime, Option<CrlReason>)],
+    revoked: &[(SerialNumber, SystemTime, Option<CrlReason>)],
     next_update: SystemTime,
     crl_number: u64,
 ) -> Result<Vec<u8>, CaError> {
@@ -476,7 +476,7 @@ pub fn issue_crl<H: Hsm>(
                     None => None,
                 };
                 Ok(RevokedCert {
-                    serial_number: SerialNumber::from(*serial),
+                    serial_number: serial.clone(),
                     revocation_date: Time::try_from(*rev_time)
                         .map_err(|e| CaError::Der(e.to_string()))?,
                     crl_entry_extensions,

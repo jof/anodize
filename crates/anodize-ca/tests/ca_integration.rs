@@ -3,6 +3,7 @@ use std::{env, fs, path::PathBuf, process::Command, time::SystemTime};
 use anodize_ca::{build_root_cert, issue_crl, sign_intermediate_csr, CaError, P384HsmSigner};
 use anodize_hsm::{Hsm, HsmActor, KeySpec, Pkcs11Hsm};
 use der::{Decode, Encode};
+use x509_cert::serial_number::SerialNumber;
 
 fn softhsm_env() -> Option<PathBuf> {
     let module = env::var("SOFTHSM2_MODULE").ok()?;
@@ -245,8 +246,8 @@ fn issue_crl_encodes_revoked_serials() {
     let now = SystemTime::now();
     let next_update = now + std::time::Duration::from_secs(30 * 24 * 3600);
     let revoked = vec![
-        (42u64, now, Some(anodize_ca::CrlReason::KeyCompromise)),
-        (99u64, now, None),
+        (SerialNumber::from(42u64), now, Some(anodize_ca::CrlReason::KeyCompromise)),
+        (SerialNumber::from(99u64), now, None),
     ];
 
     let crl_der = issue_crl(&root_signer, &root_cert, &revoked, next_update, 1).expect("issue CRL");
