@@ -41,24 +41,26 @@ user also mounts the same device at `/mnt/usb`).  The shuttle-copy code should
 re-verify the mount is live before writing, and return a visible error when the
 copy actually fails.
 
-### ValidateDisc should be more comprehensive
+### ~~ValidateDisc should be more comprehensive~~ (DONE)
 
-The validation report checked only 4 items:
+The validation report now covers:
 
-    disc.finalization, session.count, session.migration, audit_chain
+    disc.finalization, session.count, session.migration, audit_chain,
+    session.continuity (superset + immutability), state.root_cert_hash,
+    state.crl_number, state.custodians, state.hsm_log_seq,
+    cert.root_self_signed, cert.intermediate_chain, cert.crl_signature, cert.crl_number
 
-Missing checks that would add confidence:
-
-- **Certificate signature verification** — verify root cert self-signature and
-  any intermediate cert signatures chain to root.
-- **STATE.JSON consistency** — `root_cert_sha256` matches the actual cert on
-  disc, custodian list matches latest rekey event, CRL number matches latest
-  CRL.
-- **HSM audit log reconciliation** — compare the on-disc audit log against the
-  HSM's internal monotonic counter (docs mention this but it was not tested).
-- **Cross-session file immutability** — confirm that files written in session N
-  are byte-identical when read back through session N+k (guards against
-  growisofs or cdemu silently corrupting earlier sessions).
+- ~~**Certificate signature verification**~~ — ROOT.CRT self-signature,
+  INTERMEDIATE.CRT chain to root, ROOT.CRL signature and CRL number extraction.
+- ~~**STATE.JSON consistency**~~ — `root_cert_sha256` matches ROOT.CRT on disc,
+  custodian list changes require rekey event, CRL number ≥ CRL events,
+  `last_hsm_log_seq` monotonicity across sessions.
+- ~~**HSM audit log reconciliation**~~ — `cross_check_hsm_log` was already
+  wired; `last_hsm_log_seq` monotonicity now also checked in state consistency.
+- ~~**Cross-session file immutability**~~ — `validate_session_continuity`
+  already checks adjacent-session pairs for missing or changed files (exempting
+  mutable AUDIT.LOG/STATE.JSON); adjacent-pair comparison gives full
+  transitivity across all sessions.
 
 ### Share word count mismatch in UI ("34" vs "36")
 
