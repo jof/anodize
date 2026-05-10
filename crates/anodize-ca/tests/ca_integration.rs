@@ -1129,3 +1129,111 @@ fn build_ed25519_csr_der(subject_str: &str) -> Vec<u8> {
 
 // Required for Name::from_str in tests
 use std::str::FromStr;
+
+// ── Offline verification tests ──────────────────────────────────────────
+
+#[test]
+fn verify_root_self_signed_pass() {
+    let module = match softhsm_env() {
+        Some(m) => m,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE not set");
+            return;
+        }
+    };
+
+    init_test_token("ca-verify-root");
+    let hsm = Pkcs11Hsm::new(&module, "ca-verify-root").expect("open session");
+    let mut actor = HsmActor::spawn(Box::new(hsm));
+    let pin = secrecy::SecretString::new("1234".to_string());
+    actor.login(&pin).expect("login");
+    let key = actor
+        .generate_keypair("root-key", KeySpec::EcdsaP384)
+        .expect("keygen");
+    let signer = P384HsmSigner::new(actor, key).expect("signer");
+
+    let cert = build_root_cert(&signer, "Verify Root CA", "Test Org", "US", 365).unwrap();
+    anodize_ca::verify_root_cert_self_signed(&cert).expect("root self-sig should verify");
+}
+
+#[test]
+fn verify_intermediate_chains_to_root() {
+    let module = match softhsm_env() {
+        Some(m) => m,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE not set");
+            return;
+        }
+    };
+
+    init_test_token("ca-verify-chain");
+    let hsm = Pkcs11Hsm::new(&module, "ca-verify-chain").expect("open session");
+    let mut actor = HsmActor::spawn(Box::new(hsm));
+    let pin = secrecy::SecretString::new("1234".to_string());
+    actor.login(&pin).expect("login");
+
+    let root_key = actor
+        .generate_keypair("root-key", KeySpec::EcdsaP384)
+        .expect("root keygen");
+    let int_key = actor
+        .generate_keypair("int-key", KeySpec::EcdsaP384)
+        .expect("int keygen");
+
+    let int_actor = actor.clone();
+    let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
+    let int_signer = P384HsmSigner::new(int_actor, int_key).expect("int signer");
+
+    let root_cert = build_root_cert(&root_signer, "Root CA", "Test Org", "US", 365).unwrap();
+
+    use x509_cert::builder::{Builder, RequestBuilder};
+    let subject = x509_cert::name::Name::from_str("CN=Int CA,O=Test Org,C=US").unwrap();
+    let csr = RequestBuilder::new(subject, &int_signer)
+        .expect("req builder")
+        .build::<p384::ecdsa::DerSignature>()
+        .expect("build CSR");
+    let csr_der = csr.to_der().expect("encode CSR");
+
+    let int_cert =
+        sign_intermediate_csr(&root_signer, &root_cert, &csr_der, Some(0), 365, None, &[])
+            .expect("sign intermediate");
+
+    anodize_ca::verify_cert_issued_by(&int_cert, &root_cert)
+        .expect("intermediate should chain to root");
+
+    // Verify self-signed check fails on the intermediate (it's not self-signed).
+    assert!(
+        anodize_ca::verify_root_cert_self_signed(&int_cert).is_err(),
+        "intermediate should NOT pass self-signed check"
+    );
+}
+
+#[test]
+fn verify_crl_signature_and_number() {
+    let module = match softhsm_env() {
+        Some(m) => m,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE not set");
+            return;
+        }
+    };
+
+    init_test_token("ca-verify-crl");
+    let hsm = Pkcs11Hsm::new(&module, "ca-verify-crl").expect("open session");
+    let mut actor = HsmActor::spawn(Box::new(hsm));
+    let pin = secrecy::SecretString::new("1234".to_string());
+    actor.login(&pin).expect("login");
+    let key = actor
+        .generate_keypair("root-key", KeySpec::EcdsaP384)
+        .expect("keygen");
+    let signer = P384HsmSigner::new(actor, key).expect("signer");
+
+    let root_cert = build_root_cert(&signer, "CRL Root CA", "Test Org", "US", 365).unwrap();
+
+    let next_update = SystemTime::now() + std::time::Duration::from_secs(86400 * 365);
+    let crl_der = issue_crl(&signer, &root_cert, &[], next_update, 42).expect("issue CRL");
+
+    anodize_ca::verify_crl_issued_by(&crl_der, &root_cert).expect("CRL sig should verify");
+
+    let crl_number = anodize_ca::extract_crl_number(&crl_der).expect("extract CRL number");
+    assert_eq!(crl_number, Some(42), "CRL number should be 42");
+}

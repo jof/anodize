@@ -586,6 +586,176 @@ fn parse_dn(cn: &str, org: &str, country: &str) -> Result<x509_cert::name::Name,
         .map_err(|e| CaError::Der(e.to_string()))
 }
 
+// ── Offline verification helpers (used by anodize-validate) ─────────────
+
+/// Verify the signature on a DER-encoded signed object (certificate or CRL)
+/// against a given public key.
+///
+/// `tbs_bytes` is the DER-encoded TBS portion, `sig_bytes` the raw signature
+/// octets, and `spki_der` the DER-encoded SubjectPublicKeyInfo of the signer.
+fn verify_signature_over_tbs(
+    tbs_bytes: &[u8],
+    sig_bytes: &[u8],
+    spki_der: &[u8],
+    sig_alg_oid: ObjectIdentifier,
+) -> Result<(), CaError> {
+    use sha2::Digest;
+
+    let hash = match sig_alg_oid {
+        ECDSA_WITH_SHA256_OID | SHA256_WITH_RSA_OID => SigHash::Sha256,
+        ECDSA_WITH_SHA384_OID | SHA384_WITH_RSA_OID => SigHash::Sha384,
+        ECDSA_WITH_SHA512_OID | SHA512_WITH_RSA_OID => SigHash::Sha512,
+        ED25519_OID => SigHash::None,
+        other => return Err(CaError::CsrAlgorithmUnsupported(other.to_string())),
+    };
+    let key_type = spki_key_type(spki_der)?;
+
+    match key_type {
+        KeyType::EcP256 | KeyType::EcP384 => {
+            let prehash: Vec<u8> = match hash {
+                SigHash::Sha256 => sha2::Sha256::digest(tbs_bytes).to_vec(),
+                SigHash::Sha384 => sha2::Sha384::digest(tbs_bytes).to_vec(),
+                SigHash::Sha512 => sha2::Sha512::digest(tbs_bytes).to_vec(),
+                SigHash::None => {
+                    return Err(CaError::CsrAlgorithmUnsupported(
+                        "ECDSA requires a hash algorithm".into(),
+                    ))
+                }
+            };
+            match key_type {
+                KeyType::EcP256 => {
+                    use p256::ecdsa::signature::hazmat::PrehashVerifier;
+                    let vk = p256::ecdsa::VerifyingKey::from_public_key_der(spki_der)
+                        .map_err(|_| CaError::CsrSignatureInvalid)?;
+                    let sig = p256::ecdsa::Signature::from_der(sig_bytes)
+                        .map_err(|_| CaError::CsrSignatureInvalid)?;
+                    vk.verify_prehash(&prehash, &sig)
+                        .map_err(|_| CaError::CsrSignatureInvalid)?;
+                }
+                KeyType::EcP384 => {
+                    use p384::ecdsa::signature::hazmat::PrehashVerifier;
+                    let vk = p384::ecdsa::VerifyingKey::from_public_key_der(spki_der)
+                        .map_err(|_| CaError::CsrSignatureInvalid)?;
+                    let sig = p384::ecdsa::Signature::from_der(sig_bytes)
+                        .map_err(|_| CaError::CsrSignatureInvalid)?;
+                    vk.verify_prehash(&prehash, &sig)
+                        .map_err(|_| CaError::CsrSignatureInvalid)?;
+                }
+                _ => unreachable!(),
+            }
+        }
+        KeyType::Rsa => {
+            use rsa::pkcs1v15::{Signature, VerifyingKey};
+            use rsa::signature::Verifier;
+            let pub_key = rsa::RsaPublicKey::from_public_key_der(spki_der)
+                .map_err(|_| CaError::CsrSignatureInvalid)?;
+            let sig = Signature::try_from(sig_bytes).map_err(|_| CaError::CsrSignatureInvalid)?;
+            match hash {
+                SigHash::Sha256 => {
+                    let vk = VerifyingKey::<sha2::Sha256>::new(pub_key);
+                    vk.verify(tbs_bytes, &sig)
+                        .map_err(|_| CaError::CsrSignatureInvalid)?;
+                }
+                SigHash::Sha384 => {
+                    let vk = VerifyingKey::<sha2::Sha384>::new(pub_key);
+                    vk.verify(tbs_bytes, &sig)
+                        .map_err(|_| CaError::CsrSignatureInvalid)?;
+                }
+                SigHash::Sha512 => {
+                    let vk = VerifyingKey::<sha2::Sha512>::new(pub_key);
+                    vk.verify(tbs_bytes, &sig)
+                        .map_err(|_| CaError::CsrSignatureInvalid)?;
+                }
+                SigHash::None => {
+                    return Err(CaError::CsrAlgorithmUnsupported(
+                        "RSA requires a hash algorithm".into(),
+                    ))
+                }
+            }
+        }
+        KeyType::Ed25519 => {
+            use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+            let vk = VerifyingKey::from_public_key_der(spki_der)
+                .map_err(|_| CaError::CsrSignatureInvalid)?;
+            let sig = Signature::from_slice(sig_bytes).map_err(|_| CaError::CsrSignatureInvalid)?;
+            vk.verify(tbs_bytes, &sig)
+                .map_err(|_| CaError::CsrSignatureInvalid)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify that a root certificate is validly self-signed.
+pub fn verify_root_cert_self_signed(cert: &Certificate) -> Result<(), CaError> {
+    let tbs_bytes = cert.tbs_certificate.to_der()?;
+    let sig_bytes = cert
+        .signature
+        .as_bytes()
+        .ok_or(CaError::CsrSignatureInvalid)?;
+    let spki_der = cert.tbs_certificate.subject_public_key_info.to_der()?;
+    verify_signature_over_tbs(
+        &tbs_bytes,
+        sig_bytes,
+        &spki_der,
+        cert.signature_algorithm.oid,
+    )
+}
+
+/// Verify that `cert` was signed by `issuer`.
+pub fn verify_cert_issued_by(cert: &Certificate, issuer: &Certificate) -> Result<(), CaError> {
+    let tbs_bytes = cert.tbs_certificate.to_der()?;
+    let sig_bytes = cert
+        .signature
+        .as_bytes()
+        .ok_or(CaError::CsrSignatureInvalid)?;
+    let spki_der = issuer.tbs_certificate.subject_public_key_info.to_der()?;
+    verify_signature_over_tbs(
+        &tbs_bytes,
+        sig_bytes,
+        &spki_der,
+        cert.signature_algorithm.oid,
+    )
+}
+
+/// Verify that a DER-encoded CRL was signed by `issuer`.
+pub fn verify_crl_issued_by(crl_der: &[u8], issuer: &Certificate) -> Result<(), CaError> {
+    let crl = CertificateList::from_der(crl_der).map_err(|e| CaError::Der(e.to_string()))?;
+    let tbs_bytes = crl.tbs_cert_list.to_der()?;
+    let sig_bytes = crl
+        .signature
+        .as_bytes()
+        .ok_or(CaError::CsrSignatureInvalid)?;
+    let spki_der = issuer.tbs_certificate.subject_public_key_info.to_der()?;
+    verify_signature_over_tbs(
+        &tbs_bytes,
+        sig_bytes,
+        &spki_der,
+        crl.signature_algorithm.oid,
+    )
+}
+
+/// Extract the CRL number from a DER-encoded CRL, if present.
+pub fn extract_crl_number(crl_der: &[u8]) -> Result<Option<u64>, CaError> {
+    let crl = CertificateList::from_der(crl_der).map_err(|e| CaError::Der(e.to_string()))?;
+    if let Some(exts) = &crl.tbs_cert_list.crl_extensions {
+        for ext in exts {
+            if ext.extn_id == CrlNumber::OID {
+                let crl_num = CrlNumber::from_der(ext.extn_value.as_bytes())
+                    .map_err(|e| CaError::Der(e.to_string()))?;
+                // CrlNumber wraps a Uint; convert to u64.
+                let bytes = crl_num.0.as_bytes();
+                let mut val = 0u64;
+                for &b in bytes {
+                    val = val.checked_shl(8).unwrap_or(0) | u64::from(b);
+                }
+                return Ok(Some(val));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn build_cdp(url: &str) -> Result<CrlDistributionPoints, CaError> {
     let uri = Ia5String::new(url).map_err(|e| CaError::Der(e.to_string()))?;
     let dp = DistributionPoint {
