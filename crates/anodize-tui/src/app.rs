@@ -1,5 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 use std::time::{Duration, SystemTime};
 
 use anodize_config::state::SessionState;
@@ -21,7 +22,7 @@ use crate::components::mode_bar::ModeBar;
 use crate::components::phase_bar::PhaseBar;
 use crate::components::status_bar::{HwState, StatusBar};
 use crate::components::Component;
-use crate::media::SessionEntry;
+use crate::media::{BurnProgress, SessionEntry};
 use crate::modes;
 use crate::modes::ceremony::CeremonyMode;
 use crate::modes::ceremony::{CeremonyPhase, PlanningState};
@@ -53,7 +54,9 @@ impl HwContext {
 pub struct DiscContext {
     pub optical_dev: Option<PathBuf>,
     pub prior_sessions: Vec<SessionEntry>,
-    pub burn_rx: Option<Receiver<Result<()>>>,
+    pub burn_rx: Option<Receiver<BurnProgress>>,
+    pub burn_step: Option<String>,
+    pub burn_started: Option<Instant>,
     pub sessions_remaining: Option<u16>,
     pub intent_session_dir_name: Option<String>,
     pub pending_key_action: Option<u8>, // 1=generate, 2=find-existing
@@ -67,6 +70,8 @@ impl DiscContext {
             optical_dev: None,
             prior_sessions: Vec::new(),
             burn_rx: None,
+            burn_step: None,
+            burn_started: None,
             sessions_remaining: None,
             intent_session_dir_name: None,
             pending_key_action: None,
@@ -699,6 +704,19 @@ impl App {
                                         return Action::Noop;
                                     }
                                 }
+                                // Verify old PIN is rejected before burning
+                                if let Err(e) = self.do_rekey_verify_old_pin_rejected(&old_pin_hex)
+                                {
+                                    tracing::error!(
+                                        "RekeyShares: old-PIN rejection check failed: {e}"
+                                    );
+                                    self.sss.share_input = None;
+                                    self.sss.shares = None;
+                                    self.set_status(format!("Re-key failed: {e}"));
+                                    self.ceremony.state = CeremonyPhase::OperationSelect;
+                                    self.current_op = None;
+                                    return Action::Noop;
+                                }
                                 self.sss.share_input = None;
                                 self.sss.shares = None;
                                 self.do_start_burn();
@@ -937,9 +955,7 @@ impl App {
                 self.data.revoke_reason_buf.clear();
                 self.data.revoke_phase = 0;
                 self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokeInput);
-                self.set_status(
-                    "Enter certificate serial number (hex). Press Enter to continue.",
-                );
+                self.set_status("Enter certificate serial number (hex). Press Enter to continue.");
             }
             Action::RevokeSelectCancel => {
                 self.current_op = None;

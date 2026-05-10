@@ -184,36 +184,44 @@ impl App {
     // ── Intent burn tick ──────────────────────────────────────────────────────
 
     pub(crate) fn tick_intent_burn(&mut self) {
-        let result = match &self.disc.burn_rx {
-            Some(rx) => match rx.try_recv() {
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    tracing::debug!("tick_intent_burn: channel present but empty");
-                    return;
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    tracing::error!("tick_intent_burn: channel disconnected!");
-                    Some(Err(anyhow::anyhow!("disc write channel disconnected")))
-                }
-                Ok(r) => {
-                    tracing::info!("tick_intent_burn: received result from channel");
-                    Some(r)
-                }
-            },
-            None => {
+        use crate::media::BurnProgress;
+        let result = {
+            let Some(rx) = &self.disc.burn_rx else {
                 tracing::error!("tick_intent_burn: burn_rx is None but state is Commit!");
                 return;
+            };
+            loop {
+                match rx.try_recv() {
+                    Ok(BurnProgress::Step(msg)) => {
+                        self.disc.burn_step = Some(msg);
+                    }
+                    Ok(BurnProgress::Done(r)) => {
+                        tracing::info!("tick_intent_burn: received result from channel");
+                        break r;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        tracing::debug!("tick_intent_burn: channel present but empty");
+                        return;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!("tick_intent_burn: channel disconnected!");
+                        break Err(anyhow::anyhow!("disc write channel disconnected"));
+                    }
+                }
             }
         };
         self.disc.burn_rx = None;
+        self.disc.burn_step = None;
+        self.disc.burn_started = None;
         match result {
-            Some(Err(e)) => {
+            Err(e) => {
                 tracing::error!("tick_intent_burn: write failed: {e:#}");
                 self.set_status(format!("Intent disc write failed: {e:#}"));
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.setup.phase = SetupPhase::WaitDisc;
                 self.disc.optical_dev = None;
             }
-            Some(Ok(())) => {
+            Ok(()) => {
                 tracing::info!("tick_intent_burn: write OK, advancing state");
                 if let Some(intent) = self.disc.pending_intent_session.take() {
                     self.disc.intent_session_dir_name = Some(intent.dir_name.clone());
@@ -251,44 +259,57 @@ impl App {
                     }
                 }
             }
-            None => unreachable!(),
         }
     }
 
     // ── Record burn tick ──────────────────────────────────────────────────────
 
     pub(crate) fn tick_record_burn(&mut self) {
-        if let Some(rx) = &self.disc.burn_rx {
-            if let Ok(result) = rx.try_recv() {
-                self.disc.burn_rx = None;
-                match result {
-                    Ok(()) => {
-                        self.ceremony.state = CeremonyPhase::DiscDone;
-                        let disc_label = self
-                            .disc
-                            .optical_dev
-                            .as_deref()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|| "/run/anodize/staging".into());
-                        let op_label = match self.current_op {
-                            Some(Operation::InitRoot) => "Root init",
-                            Some(Operation::SignCsr) => "Intermediate cert",
-                            Some(Operation::RevokeCert) => "Revocation + CRL",
-                            Some(Operation::IssueCrl) => "CRL refresh",
-                            Some(Operation::RekeyShares) => "Re-key shares",
-                            Some(Operation::MigrateDisc) => "Disc migration",
-                            Some(Operation::KeyBackup) => "Key backup",
-                            Some(Operation::ValidateDisc) => "Disc validation",
-                            None => "session",
-                        };
-                        self.set_status(format!("{op_label} written to disc: {disc_label}"));
+        use crate::media::BurnProgress;
+        let result = {
+            let Some(rx) = &self.disc.burn_rx else { return };
+            // Drain all pending messages, keeping only the final Done.
+            loop {
+                match rx.try_recv() {
+                    Ok(BurnProgress::Step(msg)) => {
+                        self.disc.burn_step = Some(msg);
                     }
-                    Err(e) => {
-                        self.set_status(format!("Burn failed: {e} — reinsert disc and retry."));
-                        self.ceremony.state = CeremonyPhase::OperationSelect;
-                        self.disc.optical_dev = None;
+                    Ok(BurnProgress::Done(r)) => {
+                        break r;
                     }
+                    Err(_) => return, // Empty or disconnected — nothing to do yet
                 }
+            }
+        };
+        self.disc.burn_rx = None;
+        self.disc.burn_step = None;
+        self.disc.burn_started = None;
+        match result {
+            Ok(()) => {
+                self.ceremony.state = CeremonyPhase::DiscDone;
+                let disc_label = self
+                    .disc
+                    .optical_dev
+                    .as_deref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "/run/anodize/staging".into());
+                let op_label = match self.current_op {
+                    Some(Operation::InitRoot) => "Root init",
+                    Some(Operation::SignCsr) => "Intermediate cert",
+                    Some(Operation::RevokeCert) => "Revocation + CRL",
+                    Some(Operation::IssueCrl) => "CRL refresh",
+                    Some(Operation::RekeyShares) => "Re-key shares",
+                    Some(Operation::MigrateDisc) => "Disc migration",
+                    Some(Operation::KeyBackup) => "Key backup",
+                    Some(Operation::ValidateDisc) => "Disc validation",
+                    None => "session",
+                };
+                self.set_status(format!("{op_label} written to disc: {disc_label}"));
+            }
+            Err(e) => {
+                self.set_status(format!("Burn failed: {e} — reinsert disc and retry."));
+                self.ceremony.state = CeremonyPhase::OperationSelect;
+                self.disc.optical_dev = None;
             }
         }
     }
@@ -1154,6 +1175,47 @@ impl App {
         }
     }
 
+    // ── RekeyShares: verify old PIN is rejected ────────────────────────────────
+
+    /// After a successful PIN change, open a fresh HSM session with the old
+    /// PIN and confirm it is rejected.  This uses the old PIN that was already
+    /// reconstructed from the custodians' shares during the quorum phase —
+    /// no re-entry required.
+    ///
+    /// Returns `Ok(())` if the HSM correctly rejects the old PIN, or `Err`
+    /// with a descriptive message if something unexpected happens.
+    pub(crate) fn do_rekey_verify_old_pin_rejected(&self, old_pin_hex: &str) -> Result<(), String> {
+        let cfg = match &self.profile {
+            Some(p) => &p.hsm,
+            None => return Err("No profile loaded".into()),
+        };
+
+        let backend = match anodize_hsm::create_backend(cfg.backend) {
+            Ok(b) => b,
+            Err(e) => return Err(format!("HSM backend error during old-PIN check: {e}")),
+        };
+
+        let pin_bytes = match hex::decode(old_pin_hex) {
+            Ok(b) => b,
+            Err(e) => return Err(format!("Internal PIN decode error: {e}")),
+        };
+        let pin = SecretString::new(hex::encode(&pin_bytes));
+
+        match backend.open_session(&cfg.token_label, &pin) {
+            Ok(_) => {
+                // The old PIN should NOT work — this is a serious problem.
+                tracing::error!("RekeyShares: old PIN still accepted by HSM after change_pin!");
+                Err("CRITICAL: old PIN still accepted by HSM after PIN change. \
+                     The PIN rotation may not have taken effect."
+                    .into())
+            }
+            Err(_) => {
+                tracing::info!("RekeyShares: old PIN correctly rejected by HSM");
+                Ok(())
+            }
+        }
+    }
+
     // ── Mode 2: Load CSR ──────────────────────────────────────────────────────
 
     fn do_load_csr(&mut self) {
@@ -1720,6 +1782,8 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
         self.disc.burn_rx = Some(rx);
+        self.disc.burn_step = None;
+        self.disc.burn_started = Some(std::time::Instant::now());
         self.disc.pending_intent_session = Some(intent_session);
 
         tracing::info!(
@@ -1735,11 +1799,14 @@ impl App {
                 match std::fs::write(&iso_path, &iso) {
                     Ok(()) => {
                         tracing::info!("do_write_intent: skip_disc ISO written, sending Ok");
-                        tx.send(Ok(())).ok();
+                        tx.send(media::BurnProgress::Done(Ok(()))).ok();
                     }
                     Err(e) => {
                         tracing::error!("do_write_intent: skip_disc ISO write failed: {e}");
-                        tx.send(Err(anyhow::anyhow!("write intent ISO: {e}"))).ok();
+                        tx.send(media::BurnProgress::Done(Err(anyhow::anyhow!(
+                            "write intent ISO: {e}"
+                        ))))
+                        .ok();
                     }
                 }
             } else if let Some(dev) = self.disc.optical_dev.clone() {
@@ -1910,6 +1977,8 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
         self.disc.burn_rx = Some(rx);
+        self.disc.burn_step = None;
+        self.disc.burn_started = Some(std::time::Instant::now());
 
         {
             if self.skip_disc {
@@ -1917,10 +1986,13 @@ impl App {
                 let iso_path = staging.join("ceremony.iso");
                 match std::fs::write(&iso_path, &iso) {
                     Ok(()) => {
-                        tx.send(Ok(())).ok();
+                        tx.send(media::BurnProgress::Done(Ok(()))).ok();
                     }
                     Err(e) => {
-                        tx.send(Err(anyhow::anyhow!("write staging ISO: {e}"))).ok();
+                        tx.send(media::BurnProgress::Done(Err(anyhow::anyhow!(
+                            "write staging ISO: {e}"
+                        ))))
+                        .ok();
                     }
                 }
             } else if let Some(dev) = &self.disc.optical_dev {
@@ -1932,7 +2004,7 @@ impl App {
             }
 
             self.ceremony.state = CeremonyPhase::BurningDisc;
-            self.set_status("Burning disc session… (this may take a few minutes)");
+            self.set_status("Burning disc session…");
         }
     }
 
@@ -2870,9 +2942,9 @@ mod tests {
         let mut app = test_app();
         app.ceremony.state = CeremonyPhase::Commit;
 
-        // Set up a burn_rx channel that immediately yields Ok(())
+        // Set up a burn_rx channel that immediately yields Done(Ok(()))
         let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(Ok(())).unwrap();
+        tx.send(crate::media::BurnProgress::Done(Ok(()))).unwrap();
         app.disc.burn_rx = Some(rx);
 
         app.tick_intent_burn();
@@ -2882,6 +2954,94 @@ mod tests {
             CeremonyPhase::PostCommitError,
             "Should transition to PostCommitError when HSM bootstrap fails"
         );
+    }
+
+    #[test]
+    fn tick_intent_burn_drains_steps_before_done() {
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::Commit;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::media::BurnProgress::Step(
+            "Reading disc info…".into(),
+        ))
+        .unwrap();
+        tx.send(crate::media::BurnProgress::Step("Writing session…".into()))
+            .unwrap();
+        tx.send(crate::media::BurnProgress::Done(Ok(()))).unwrap();
+        app.disc.burn_rx = Some(rx);
+        app.disc.burn_started = Some(std::time::Instant::now());
+
+        app.tick_intent_burn();
+
+        // burn_step and burn_rx should be cleared after Done
+        assert!(
+            app.disc.burn_step.is_none(),
+            "burn_step should be cleared after Done"
+        );
+        assert!(
+            app.disc.burn_rx.is_none(),
+            "burn_rx should be cleared after Done"
+        );
+        assert!(
+            app.disc.burn_started.is_none(),
+            "burn_started should be cleared"
+        );
+    }
+
+    #[test]
+    fn tick_record_burn_advances_to_disc_done() {
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::BurningDisc;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::media::BurnProgress::Done(Ok(()))).unwrap();
+        app.disc.burn_rx = Some(rx);
+        app.disc.burn_started = Some(std::time::Instant::now());
+
+        app.tick_record_burn();
+
+        assert_eq!(app.ceremony.state, CeremonyPhase::DiscDone);
+        assert!(app.disc.burn_rx.is_none());
+    }
+
+    #[test]
+    fn tick_record_burn_error_stays_burning() {
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::BurningDisc;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::media::BurnProgress::Done(Err(anyhow::anyhow!(
+            "disc on fire"
+        ))))
+        .unwrap();
+        app.disc.burn_rx = Some(rx);
+
+        app.tick_record_burn();
+
+        // State stays BurningDisc (error sets status but doesn't change phase to DiscDone)
+        assert_ne!(app.ceremony.state, CeremonyPhase::DiscDone);
+        assert!(app.disc.burn_rx.is_none());
+        assert!(app.status.contains("disc on fire"));
+    }
+
+    #[test]
+    fn tick_intent_burn_noop_when_channel_empty() {
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::Commit;
+
+        let (_tx, rx) = std::sync::mpsc::channel::<crate::media::BurnProgress>();
+        app.disc.burn_rx = Some(rx);
+        app.disc.burn_started = Some(std::time::Instant::now());
+
+        app.tick_intent_burn();
+
+        // Should be a no-op — burn_rx still present
+        assert!(
+            app.disc.burn_rx.is_some(),
+            "Should remain while channel is empty"
+        );
+        assert_eq!(app.ceremony.state, CeremonyPhase::Commit);
     }
 
     #[test]

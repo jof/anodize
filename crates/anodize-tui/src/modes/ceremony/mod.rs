@@ -303,12 +303,22 @@ impl CeremonyMode {
                 ]
             }
 
-            CeremonyPhase::Commit => vec![
-                String::new(),
-                "  Writing intent session to disc.".into(),
-                "  HSM signing will begin after disc commit completes.".into(),
-                "  Do not remove the disc or power off.".into(),
-            ],
+            CeremonyPhase::Commit => {
+                let elapsed = app
+                    .disc
+                    .burn_started
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0);
+                let step = app.disc.burn_step.as_deref().unwrap_or("Preparing…");
+                vec![
+                    String::new(),
+                    "  Writing intent session to disc.".into(),
+                    "  HSM signing will begin after disc commit completes.".into(),
+                    "  Do not remove the disc or power off.".into(),
+                    String::new(),
+                    format!("  [{elapsed:>3}s]  {step}"),
+                ]
+            }
 
             CeremonyPhase::PostCommitError => {
                 vec![
@@ -540,12 +550,21 @@ impl CeremonyMode {
                 lines
             }
 
-            CeremonyPhase::BurningDisc => vec![
-                String::new(),
-                "  Writing ISO 9660 session to optical disc\u{2026}".into(),
-                String::new(),
-                "  Please wait. Do not remove the disc or USB.".into(),
-            ],
+            CeremonyPhase::BurningDisc => {
+                let elapsed = app
+                    .disc
+                    .burn_started
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0);
+                let step = app.disc.burn_step.as_deref().unwrap_or("Preparing\u{2026}");
+                vec![
+                    String::new(),
+                    "  Writing ISO 9660 session to optical disc\u{2026}".into(),
+                    "  Please wait. Do not remove the disc or USB.".into(),
+                    String::new(),
+                    format!("  [{elapsed:>3}s]  {step}"),
+                ]
+            }
 
             CeremonyPhase::DiscDone => {
                 let op_label = match app.current_op {
