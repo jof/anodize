@@ -69,12 +69,11 @@ last group had fewer than 4 words (e.g. 34 words = 8×4 + 2 = 9 groups, but
 `9×4 = 36`).  Fixed `NamedShare::total_words()` to count actual words across
 groups.  Share Input's `expected_words` was already correct (`secret_len + 2`).
 
-### No progress indicator during disc writes
+### ~~No progress indicator during disc writes~~ DONE
 
-After confirming a disc write, the TUI blocks with no spinner, progress bar,
-or elapsed timer.  On bare-metal this completed quickly (~2 s), but on slower
-media or with large audit logs it could look like a hang.  A simple
-"Writing session… (elapsed Xs)" would eliminate operator anxiety.
+Both `Commit` and `BurningDisc` phases now show an animated Braille spinner,
+elapsed-seconds counter, and real-time step messages from the background
+burn thread (e.g. "WRITE sector 4/8 (128 KiB, LBA 150)…").
 
 ### cdemu-swap-disc.sh brittle PATH handling
 
