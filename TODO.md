@@ -83,15 +83,11 @@ which misses the Nix path.  Fix: search known Nix store paths as a
 second-order fallback, or have the NixOS module drop a wrapper script at
 a well-known location (e.g. `/run/anodize/bin/gdbus`).
 
-### MigrateDisc step ordering wrong in e2e-test-plan.md
+### ~~MigrateDisc step ordering wrong in e2e-test-plan.md~~ (DONE)
 
-The test plan shows step 5 as "Write confirmation: press Enter" before the disc
-swap prompt, but the actual flow is:
-
-    MigrateConfirm → (press 1) → WaitMigrateTarget → (swap disc) → (press 1) → write
-
-The plan should drop the premature "write confirmation" step and clarify that
-the swap happens before the write, not after.
+Removed the premature "Write confirmation: press Enter" and "Wait for disc burn"
+steps from the MigrateDisc section.  The plan now matches the actual flow:
+MigrateConfirm → press 1 → WaitMigrateTarget (swap disc) → press 1 → write.
 
 ### ~~RekeyShares: no verification that old shares are invalidated~~ (DONE)
 
