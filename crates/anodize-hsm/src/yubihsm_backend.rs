@@ -403,7 +403,7 @@ impl Hsm for YubiHsmSession {
                 session_key: e.session_key,
                 target_key: e.target_key,
                 second_key: e.second_key,
-                result: match e.result {
+                result: match e.result.0 {
                     yubihsm::response::Code::Success(_) => 0,
                     _ => 0xff,
                 },
@@ -427,30 +427,27 @@ impl Hsm for YubiHsmSession {
     }
 
     fn change_pin(&mut self, _old_pin: &SecretString, new_pin: &SecretString) -> Result<()> {
-        // The yubihsm crate doesn't expose ChangeAuthenticationKey (0x6c).
-        // Delete + re-put on the live session achieves the same result.
-        // The session remains authenticated after deleting the auth key.
-        self.client
-            .delete_object(
-                ANODIZE_AUTH_KEY_ID,
-                yubihsm::object::Type::AuthenticationKey,
-            )
-            .map_err(|e| HsmError::BackendError(format!("delete auth key: {e}")))?;
+        // Use the atomic ChangeAuthenticationKey command (0x6c, FW ≥ 2.2.0).
+        // This replaces key material in-place without deleting the object,
+        // so it cannot brick the HSM and does not require put-authentication-key
+        // capability — only change-authentication-key.
+
+        // Drain audit log before mutating — force-audit blocks ops when full.
+        if let Ok(log) = self.client.get_log_entries() {
+            if let Some(last) = log.entries.last() {
+                let _ = self.client.set_log_index(last.item);
+            }
+        }
 
         let new_key =
             yubihsm::authentication::Key::derive_from_password(new_pin.expose_secret().as_bytes());
         self.client
-            .put_authentication_key(
+            .change_authentication_key(
                 ANODIZE_AUTH_KEY_ID,
-                yubihsm::object::Label::from_bytes(b"anodize-auth")
-                    .map_err(|e| HsmError::BackendError(format!("label: {e}")))?,
-                yubihsm::Domain::all(),
-                yubihsm::Capability::all(),
-                yubihsm::Capability::all(),
                 yubihsm::authentication::Algorithm::default(),
                 new_key,
             )
-            .map_err(|e| HsmError::BackendError(format!("put_authentication_key: {e}")))?;
+            .map_err(|e| HsmError::BackendError(format!("change_authentication_key: {e}")))?;
 
         Ok(())
     }
@@ -794,29 +791,24 @@ impl HsmBackup for YubiHsmBackupImpl {
             HsmError::BackendError(format!("connect to {device_id} with old PIN: {e}"))
         })?;
 
-        // Delete + re-put auth key (same logic as YubiHsmSession::change_pin).
-        client
-            .delete_object(
-                ANODIZE_AUTH_KEY_ID,
-                yubihsm::object::Type::AuthenticationKey,
-            )
-            .map_err(|e| HsmError::BackendError(format!("delete auth key on {device_id}: {e}")))?;
+        // Drain audit log before mutating — force-audit blocks ops when full.
+        if let Ok(log) = client.get_log_entries() {
+            if let Some(last) = log.entries.last() {
+                let _ = client.set_log_index(last.item);
+            }
+        }
 
+        // Atomic key rotation (same logic as YubiHsmSession::change_pin).
         let new_key =
             yubihsm::authentication::Key::derive_from_password(new_pin.expose_secret().as_bytes());
         client
-            .put_authentication_key(
+            .change_authentication_key(
                 ANODIZE_AUTH_KEY_ID,
-                yubihsm::object::Label::from_bytes(b"anodize-auth")
-                    .map_err(|e| HsmError::BackendError(format!("label: {e}")))?,
-                yubihsm::Domain::all(),
-                yubihsm::Capability::all(),
-                yubihsm::Capability::all(),
                 yubihsm::authentication::Algorithm::default(),
                 new_key,
             )
             .map_err(|e| {
-                HsmError::BackendError(format!("put_authentication_key on {device_id}: {e}"))
+                HsmError::BackendError(format!("change_authentication_key on {device_id}: {e}"))
             })?;
 
         tracing::info!(device_id, "change_pin_on_device: auth key rotated");

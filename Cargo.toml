@@ -13,7 +13,7 @@ resolver = "2"
 [workspace.dependencies]
 # HSM / crypto
 cryptoki       = "0.7"
-yubihsm        = { version = "0.42", features = ["usb"] }
+yubihsm        = { git = "https://github.com/jof/yubihsm.rs.git", branch = "add-change-authentication-key", features = ["usb"] }
 # X.509
 x509-cert      = { version = "0.2", features = ["builder"] }
 der            = "0.7"

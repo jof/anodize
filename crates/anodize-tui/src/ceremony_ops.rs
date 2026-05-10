@@ -1021,6 +1021,15 @@ impl App {
             .actor
             .as_mut()
             .ok_or("No HSM session for change_pin")?;
+
+        // Drain the HSM audit log before change_pin — force-audit mode
+        // blocks all operations once the 62-entry ring buffer is full.
+        if let Ok(snapshot) = actor.get_audit_log() {
+            if let Some(last) = snapshot.entries.last() {
+                let _ = actor.drain_audit_log(last.item);
+            }
+        }
+
         actor
             .change_pin(&old_pin, &new_pin)
             .map_err(|e| format!("HSM change_pin failed: {e}"))?;
@@ -1967,6 +1976,12 @@ impl App {
                         if let Some(last) = snapshot.entries.last() {
                             state.last_hsm_log_seq = Some(last.item as u64);
                             tracing::info!(seq = last.item, "recorded last_hsm_log_seq");
+                            // Drain the audit log so force-audit mode does not
+                            // block subsequent HSM operations once the 62-entry
+                            // ring buffer fills up.
+                            if let Err(e) = actor.drain_audit_log(last.item) {
+                                tracing::warn!(seq = last.item, "drain_audit_log failed: {e}");
+                            }
                         }
                     }
                     Err(e) => {
