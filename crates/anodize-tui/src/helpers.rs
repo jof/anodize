@@ -181,8 +181,8 @@ pub fn gather_cert_list_from_sessions(
     sessions: &[SessionEntry],
     revocation_list: &[anodize_config::RevocationEntry],
 ) -> Vec<CertSummary> {
-    let revoked_serials: std::collections::HashSet<u64> =
-        revocation_list.iter().map(|r| r.serial).collect();
+    let revoked_serials: std::collections::HashSet<&str> =
+        revocation_list.iter().map(|r| r.serial.as_str()).collect();
 
     let mut certs = Vec::new();
     for session in sessions {
@@ -195,14 +195,16 @@ pub fn gather_cert_list_from_sessions(
                 Ok(cert) => {
                     let subject = cert.tbs_certificate.subject.to_string();
                     let not_after = format!("{}", cert.tbs_certificate.validity.not_after);
-                    let serial = serial_to_u64(&cert.tbs_certificate.serial_number);
+                    let serial_bytes = cert.tbs_certificate.serial_number.as_bytes().to_vec();
+                    let serial = serial_to_hex(&cert.tbs_certificate.serial_number);
                     certs.push(CertSummary {
+                        already_revoked: revoked_serials.contains(serial.as_str()),
                         serial,
+                        serial_bytes,
                         subject,
                         not_after,
                         session_dir: session.dir_name.clone(),
                         is_root,
-                        already_revoked: revoked_serials.contains(&serial),
                     });
                 }
                 Err(e) => {
@@ -219,17 +221,24 @@ pub fn gather_cert_list_from_sessions(
     certs
 }
 
-/// Convert an X.509 SerialNumber to u64. Returns 0 if it doesn't fit.
-pub fn serial_to_u64(sn: &x509_cert::serial_number::SerialNumber) -> u64 {
-    let bytes = sn.as_bytes();
-    if bytes.len() > 8 {
-        return 0;
+/// Convert an X.509 SerialNumber to an uppercase hex string.
+pub fn serial_to_hex(sn: &x509_cert::serial_number::SerialNumber) -> String {
+    sn.as_bytes()
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect()
+}
+
+/// Decode an uppercase hex serial string back to raw bytes.
+/// Returns `None` on invalid hex.
+pub fn hex_serial_to_bytes(hex: &str) -> Option<Vec<u8>> {
+    if hex.len() % 2 != 0 {
+        return None;
     }
-    let mut val = 0u64;
-    for &b in bytes {
-        val = (val << 8) | (b as u64);
-    }
-    val
+    (0..hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+        .collect()
 }
 
 // ── Certificate preview (compiled CSR + profile) ─────────────────────────────
@@ -371,28 +380,33 @@ mod tests {
     }
 
     #[test]
-    fn serial_to_u64_single_byte() {
+    fn serial_to_hex_single_byte() {
         let sn = x509_cert::serial_number::SerialNumber::new(&[0x2A]).unwrap();
-        assert_eq!(serial_to_u64(&sn), 42);
+        assert_eq!(serial_to_hex(&sn), "2A");
     }
 
     #[test]
-    fn serial_to_u64_multi_byte() {
+    fn serial_to_hex_multi_byte() {
         let sn = x509_cert::serial_number::SerialNumber::new(&[0x01, 0x00]).unwrap();
-        assert_eq!(serial_to_u64(&sn), 256);
+        assert_eq!(serial_to_hex(&sn), "0100");
     }
 
     #[test]
-    fn serial_to_u64_max_8_bytes() {
-        let sn = x509_cert::serial_number::SerialNumber::new(&[0x01, 0, 0, 0, 0, 0, 0, 0]).unwrap();
-        assert_eq!(serial_to_u64(&sn), 1u64 << 56);
+    fn serial_to_hex_16_bytes() {
+        let sn = x509_cert::serial_number::SerialNumber::new(&[
+            0x01, 0xAB, 0x23, 0xCD, 0x45, 0xEF, 0x67, 0x89,
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
+        ]).unwrap();
+        assert_eq!(serial_to_hex(&sn), "01AB23CD45EF67890123456789ABCDEF");
     }
 
     #[test]
-    fn serial_to_u64_overflow_returns_zero() {
-        // 9 bytes won't fit in u64
-        let sn = x509_cert::serial_number::SerialNumber::new(&[1, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap();
-        assert_eq!(serial_to_u64(&sn), 0);
+    fn hex_serial_round_trip() {
+        let sn = x509_cert::serial_number::SerialNumber::new(&[0x01, 0xAB, 0xFF]).unwrap();
+        let hex = serial_to_hex(&sn);
+        assert_eq!(hex, "01ABFF");
+        let bytes = hex_serial_to_bytes(&hex).unwrap();
+        assert_eq!(bytes, &[0x01, 0xAB, 0xFF]);
     }
 
     #[test]
