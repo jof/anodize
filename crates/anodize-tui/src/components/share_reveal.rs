@@ -20,8 +20,15 @@ use ratatui::{
 pub struct NamedShare {
     pub custodian_name: String,
     pub index: u8,
-    /// Word groups (each is a dash-separated group of 4 words).
+    /// Word groups (each is a dash-separated group of up to 4 words).
     pub word_groups: Vec<String>,
+}
+
+impl NamedShare {
+    /// Total number of words across all groups.
+    pub fn total_words(&self) -> usize {
+        self.word_groups.iter().map(|g| g.split('-').count()).sum()
+    }
 }
 
 /// Interactive share reveal widget — shows one share at a time.
@@ -216,7 +223,7 @@ impl ShareReveal {
                         format!(
                             "{} groups, {} words",
                             ns.word_groups.len(),
-                            ns.word_groups.len() * 4
+                            ns.total_words()
                         ),
                         Style::default().fg(Color::Cyan),
                     ),
@@ -344,6 +351,56 @@ mod tests {
         // Enter without revealing should do nothing
         sr.handle_key(key(KeyCode::Enter));
         assert_eq!(sr.current, 0);
+    }
+
+    #[test]
+    fn total_words_exact_multiple_of_4() {
+        let ns = NamedShare {
+            custodian_name: "Alice".into(),
+            index: 1,
+            word_groups: vec!["able-acid-aged-also".into(), "arch-area-army-atom".into()],
+        };
+        assert_eq!(ns.total_words(), 8);
+    }
+
+    #[test]
+    fn total_words_partial_last_group() {
+        // 34 words = 8 full groups + 1 group of 2
+        let ns = NamedShare {
+            custodian_name: "Bob".into(),
+            index: 2,
+            word_groups: vec![
+                "able-acid-aged-also".into(),
+                "arch-area-army-atom".into(),
+                "able-acid-aged-also".into(),
+                "arch-area-army-atom".into(),
+                "able-acid-aged-also".into(),
+                "arch-area-army-atom".into(),
+                "able-acid-aged-also".into(),
+                "arch-area-army-atom".into(),
+                "able-acid".into(),
+            ],
+        };
+        assert_eq!(ns.total_words(), 34);
+        assert_eq!(ns.word_groups.len(), 9);
+    }
+
+    #[test]
+    fn total_words_matches_share_encoding() {
+        // A real share with 32-byte secret: 1 + 32 + 1 = 34 bytes = 34 words
+        let share = Share {
+            index: 1,
+            data: vec![0u8; 32],
+            checksum: 0,
+        };
+        let words = share.to_words();
+        let groups: Vec<String> = words.split(" / ").map(String::from).collect();
+        let ns = NamedShare {
+            custodian_name: "Test".into(),
+            index: 1,
+            word_groups: groups,
+        };
+        assert_eq!(ns.total_words(), 34);
     }
 
     #[test]
