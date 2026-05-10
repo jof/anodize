@@ -644,17 +644,15 @@ pub fn gather_cert_detail_pub(
     }
 
     // Revocation status
-    let serial_val = crate::helpers::serial_to_u64(&tbs.serial_number);
-    if serial_val != 0 {
-        if let Some(rev) = revocations.iter().find(|r| r.serial == serial_val) {
-            let reason = rev.reason.as_deref().unwrap_or("unspecified");
-            lines.push(format!(
-                "  REVOKED: serial={} at {} reason={}",
-                rev.serial, rev.revocation_time, reason
-            ));
-        } else {
-            lines.push("  Revocation status: not revoked".into());
-        }
+    let serial_hex = crate::helpers::serial_to_hex(&tbs.serial_number);
+    if let Some(rev) = revocations.iter().find(|r| r.serial == serial_hex) {
+        let reason = rev.reason.as_deref().unwrap_or("unspecified");
+        lines.push(format!(
+            "  REVOKED: serial={} at {} reason={}",
+            rev.serial, rev.revocation_time, reason
+        ));
+    } else {
+        lines.push("  Revocation status: not revoked".into());
     }
 
     lines.push(String::new());

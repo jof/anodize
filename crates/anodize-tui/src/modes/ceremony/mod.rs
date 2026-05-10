@@ -437,13 +437,10 @@ impl CeremonyMode {
                     String::new(),
                     "  Select a certificate to revoke:".into(),
                     String::new(),
-                    format!(
-                        "  {:<3} {:<12} {:<40} {:<14} {}",
-                        "#", "Serial", "Subject", "Expires", "Status"
-                    ),
                 ];
                 for (i, c) in certs.iter().enumerate() {
-                    let marker = if i == cursor { ">" } else { " " };
+                    let selected = i == cursor;
+                    let marker = if selected { ">" } else { " " };
                     let status = if c.already_revoked {
                         "(revoked)"
                     } else if c.is_root {
@@ -451,24 +448,22 @@ impl CeremonyMode {
                     } else {
                         "active"
                     };
-                    let subject = if c.subject.len() > 38 {
-                        format!("{}...", &c.subject[..35])
-                    } else {
-                        c.subject.clone()
-                    };
                     lines.push(format!(
-                        " {marker}{:<3} {:<12} {:<40} {:<14} {}",
+                        " {marker} [{:>2}] Serial: {}  Status: {}",
                         i + 1,
                         c.serial,
-                        subject,
-                        c.not_after,
                         status
                     ));
+                    // Split the subject DN on ", " and wrap each component
+                    for part in c.subject.split(", ") {
+                        lines.push(format!("        {part}"));
+                    }
+                    lines.push(format!("        Expires: {}", c.not_after));
+                    lines.push(String::new());
                 }
                 if certs.is_empty() {
                     lines.push("  (No certificates found on disc.)".into());
                 }
-                lines.push(String::new());
                 lines.push(
                     "  [j/k] navigate  [Enter] select  [m] manual serial  [Esc] cancel".into(),
                 );
@@ -477,7 +472,7 @@ impl CeremonyMode {
 
             CeremonyPhase::Planning(PlanningState::RevokeInput) => {
                 let phase_hint = if app.data.revoke_phase == 0 {
-                    "Enter serial number (digits only):"
+                    "Enter serial number (hex):"
                 } else {
                     "Enter reason (optional, press Enter to skip):"
                 };

@@ -79,7 +79,10 @@ impl DiscContext {
 /// Summary of a certificate found on disc, for the revocation picker.
 #[derive(Debug, Clone)]
 pub struct CertSummary {
-    pub serial: u64,
+    /// Uppercase hex string of the full certificate serial number.
+    pub serial: String,
+    /// Raw serial bytes for constructing `SerialNumber` in CRL issuance.
+    pub serial_bytes: Vec<u8>,
     pub subject: String,
     pub not_after: String,
     pub session_dir: String,
@@ -935,7 +938,7 @@ impl App {
                 self.data.revoke_phase = 0;
                 self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokeInput);
                 self.set_status(
-                    "Enter certificate serial number (digits). Press Enter to continue.",
+                    "Enter certificate serial number (hex). Press Enter to continue.",
                 );
             }
             Action::RevokeSelectCancel => {
@@ -946,7 +949,7 @@ impl App {
 
             // Revocation input
             Action::RevokeInputChar(c) => {
-                if self.data.revoke_phase == 0 && c.is_ascii_digit() {
+                if self.data.revoke_phase == 0 && c.is_ascii_hexdigit() {
                     self.data.revoke_serial_buf.push(c);
                 } else if self.data.revoke_phase == 1 {
                     self.data.revoke_reason_buf.push(c);

@@ -1198,16 +1198,14 @@ impl App {
     // ── Mode 3: Add revocation entry ─────────────────────────────────────────
 
     pub(crate) fn do_add_revocation_entry(&mut self) {
-        let serial: u64 = match self.data.revoke_serial_buf.parse() {
-            Ok(n) => n,
-            Err(_) => {
-                self.set_status(format!(
-                    "Invalid serial number: {:?}. Must be a u64.",
-                    self.data.revoke_serial_buf
-                ));
-                return;
-            }
-        };
+        let serial = self.data.revoke_serial_buf.to_uppercase();
+        if serial.is_empty() || !serial.chars().all(|c| c.is_ascii_hexdigit()) {
+            self.set_status(format!(
+                "Invalid serial number: {:?}. Must be hex digits.",
+                self.data.revoke_serial_buf
+            ));
+            return;
+        }
 
         if self.data.revocation_list.iter().any(|e| e.serial == serial) {
             self.set_status(format!(
@@ -1604,19 +1602,25 @@ impl App {
             }
         };
 
-        // Convert RevocationEntry list to (serial, SystemTime, reason) triples
-        let revoked: Vec<(u64, SystemTime, Option<anodize_ca::CrlReason>)> = self
+        // Convert RevocationEntry list to (SerialNumber, SystemTime, reason) triples
+        let revoked: Vec<(
+            x509_cert::serial_number::SerialNumber,
+            SystemTime,
+            Option<anodize_ca::CrlReason>,
+        )> = self
             .data
             .revocation_list
             .iter()
-            .map(|e| {
+            .filter_map(|e| {
+                let serial_bytes = hex_serial_to_bytes(&e.serial)?;
+                let sn = x509_cert::serial_number::SerialNumber::new(&serial_bytes).ok()?;
                 let t = parse_rfc3339_to_system_time(&e.revocation_time)
                     .unwrap_or_else(SystemTime::now);
                 let reason = e
                     .reason
                     .as_deref()
                     .map(anodize_ca::reason_str_to_crl_reason);
-                (e.serial, t, reason)
+                Some((sn, t, reason))
             })
             .collect();
 
@@ -1829,7 +1833,7 @@ impl App {
                 ))
             }
             Some(Operation::RevokeCert) => {
-                let serial: u64 = self.data.revoke_serial_buf.parse().unwrap_or(0);
+                let serial_hex = self.data.revoke_serial_buf.to_uppercase();
                 let reason = if self.data.revoke_reason_buf.is_empty() {
                     serde_json::Value::Null
                 } else {
@@ -1839,7 +1843,7 @@ impl App {
                     "cert.revoke.intent".into(),
                     serde_json::json!({
                         "operation": "revoke-and-issue-crl",
-                        "serial": serial,
+                        "serial_hex": serial_hex,
                         "reason": reason,
                         "crl_number": self.data.crl_number.unwrap_or(0),
                         "revocation_count": self.data.revocation_list.len(),
@@ -2963,7 +2967,7 @@ mod tests {
     #[test]
     fn revoke_next_phase_from_reason_adds_entry() {
         let mut app = revoke_app();
-        app.data.revoke_serial_buf = "99999".into();
+        app.data.revoke_serial_buf = "01AB23".into();
         app.data.revoke_reason_buf = "key-compromise".into();
         app.data.revoke_phase = 1;
 
@@ -2975,7 +2979,7 @@ mod tests {
             "phase 1 Enter should transition to RevokePreview"
         );
         assert_eq!(app.data.revocation_list.len(), 1);
-        assert_eq!(app.data.revocation_list[0].serial, 99999);
+        assert_eq!(app.data.revocation_list[0].serial, "01AB23");
         assert_eq!(
             app.data.revocation_list[0].reason.as_deref(),
             Some("key-compromise")
