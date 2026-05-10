@@ -77,7 +77,9 @@ define nix-iso-build
 		'. /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh && \
 		 cd $(NIX_BUILDER_DIR) && \
 		 nix build .#$(1) -L'
-	scp $(SSH_OPTS) '$(NIX_BUILDER):$(NIX_BUILDER_DIR)/result/iso/*.iso' $(2)
+	rsync -az --progress \
+		-e 'ssh $(SSH_OPTS)' \
+		'$(NIX_BUILDER):$(NIX_BUILDER_DIR)/result/iso/*.iso' $(2)
 	@echo "ISO ready: $(2)"
 endef
 else
