@@ -25,10 +25,35 @@ pub struct CertProfile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RevocationEntry {
-    pub serial: u64,
+    /// Certificate serial number as uppercase hex string (e.g. "01AB23CD…").
+    /// Legacy entries serialized as integer 0 are accepted on read.
+    #[serde(deserialize_with = "deserialize_serial_hex")]
+    pub serial: String,
     pub revocation_time: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+/// Accept both a TOML string and a legacy TOML integer (always 0 from the old
+/// `serial_to_u64` bug) so that previously-written REVOKED.TOML files still parse.
+fn deserialize_serial_hex<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    struct SerialVisitor;
+    impl<'de> serde::de::Visitor<'de> for SerialVisitor {
+        type Value = String;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a hex string or integer serial number")
+        }
+        fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<String, E> {
+            Ok(v.to_uppercase())
+        }
+        fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<String, E> {
+            Ok(format!("{v:X}"))
+        }
+        fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<String, E> {
+            Ok(format!("{:X}", v as u64))
+        }
+    }
+    d.deserialize_any(SerialVisitor)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -234,28 +259,28 @@ validity_days = 365
     fn revocation_list_round_trip() {
         let toml = r#"
 [[entries]]
-serial          = 12345
+serial          = "3039"
 revocation_time = "2026-04-01T00:00:00Z"
 reason          = "key-compromise"
 
 [[entries]]
-serial          = 67890
+serial          = "10932"
 revocation_time = "2026-05-15T12:00:00Z"
 "#;
         let entries = parse_revocation_list(toml.as_bytes()).expect("parse");
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].serial, 12345);
+        assert_eq!(entries[0].serial, "3039");
         assert_eq!(entries[0].revocation_time, "2026-04-01T00:00:00Z");
         assert_eq!(entries[0].reason.as_deref(), Some("key-compromise"));
-        assert_eq!(entries[1].serial, 67890);
+        assert_eq!(entries[1].serial, "10932");
         assert!(entries[1].reason.is_none());
 
         // Serialize and re-parse
         let serialized = serialize_revocation_list(&entries);
         let reparsed = parse_revocation_list(serialized.as_bytes()).expect("re-parse");
         assert_eq!(reparsed.len(), 2);
-        assert_eq!(reparsed[0].serial, 12345);
-        assert_eq!(reparsed[1].serial, 67890);
+        assert_eq!(reparsed[0].serial, "3039");
+        assert_eq!(reparsed[1].serial, "10932");
     }
 
     #[test]
@@ -275,5 +300,17 @@ revocation_time = "2026-05-15T12:00:00Z"
         let serialized = serialize_revocation_list(&[]);
         let reparsed = parse_revocation_list(serialized.as_bytes()).expect("re-parse empty");
         assert!(reparsed.is_empty());
+    }
+
+    #[test]
+    fn revocation_legacy_integer_serial_compat() {
+        // Old REVOKED.TOML files wrote serial as integer (always 0 due to bug).
+        let toml = r#"
+[[entries]]
+serial          = 0
+revocation_time = "2026-05-10T00:00:00Z"
+"#;
+        let entries = parse_revocation_list(toml.as_bytes()).expect("parse legacy integer");
+        assert_eq!(entries[0].serial, "0");
     }
 }
