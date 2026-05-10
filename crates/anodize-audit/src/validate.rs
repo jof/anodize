@@ -67,6 +67,8 @@ pub struct StateFields {
     pub last_hsm_log_seq: Option<u64>,
     /// True if this session contains a `MIGRATION.JSON` marker.
     pub is_migration: bool,
+    /// Custodian names from `STATE.JSON`, for cross-checking rekey events.
+    pub custodian_names: Vec<String>,
 }
 
 /// Disc-level status, mirroring `media::DiscStatus`.
@@ -76,6 +78,145 @@ pub enum DiscStatus {
     Incomplete,
     Complete,
     Other(u8),
+}
+
+// ── STATE.JSON consistency ──────────────────────────────────────────────────
+
+/// Verify STATE.JSON fields are consistent with the actual files on disc.
+///
+/// Checks:
+/// - `root_cert_sha256` matches the SHA-256 of `ROOT.CRT` on disc.
+/// - CRL number is consistent with CRL-issuing events in the audit log.
+/// - Custodian list changes correspond to rekey events in the audit log.
+/// - `last_hsm_log_seq` is monotonically non-decreasing across sessions.
+pub fn validate_state_consistency(sessions: &[SessionSnapshot]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+
+    for session in sessions {
+        let i = session.index;
+
+        // ── root_cert_sha256 vs ROOT.CRT file hash ──────────────────────
+        if !session.state.root_cert_sha256.is_empty() {
+            if let Some(file_hash) = session.file_hashes.get("ROOT.CRT") {
+                if !file_hash.is_empty()
+                    && file_hash.eq_ignore_ascii_case(&session.state.root_cert_sha256)
+                {
+                    findings.push(Finding {
+                        severity: Severity::Pass,
+                        check: format!("state.root_cert_hash[session {i}]"),
+                        message: "STATE.JSON root_cert_sha256 matches ROOT.CRT on disc".into(),
+                    });
+                } else if !file_hash.is_empty() {
+                    findings.push(Finding {
+                        severity: Severity::Error,
+                        check: format!("state.root_cert_hash[session {i}]"),
+                        message: format!(
+                            "STATE.JSON root_cert_sha256 ({}) does not match ROOT.CRT hash ({})",
+                            session.state.root_cert_sha256, file_hash
+                        ),
+                    });
+                }
+            } else {
+                findings.push(Finding {
+                    severity: Severity::Warn,
+                    check: format!("state.root_cert_hash[session {i}]"),
+                    message: "ROOT.CRT not found on disc — cannot verify root_cert_sha256".into(),
+                });
+            }
+        }
+
+        // ── CRL number vs crl-issuing audit events ──────────────────────
+        // The CRL number should equal the count of CRL-issuing events seen
+        // up to and including this session's audit log.
+        let crl_issue_count = session
+            .audit_records
+            .iter()
+            .filter(|r| {
+                r.event.contains("crl") && (r.event.contains("issue") || r.event.contains("signed"))
+            })
+            .count() as u64;
+        if session.state.crl_number > 0 || crl_issue_count > 0 {
+            if session.state.crl_number >= crl_issue_count {
+                findings.push(Finding {
+                    severity: Severity::Pass,
+                    check: format!("state.crl_number[session {i}]"),
+                    message: format!(
+                        "CRL number ({}) consistent with {} CRL event(s) in audit log",
+                        session.state.crl_number, crl_issue_count
+                    ),
+                });
+            } else {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    check: format!("state.crl_number[session {i}]"),
+                    message: format!(
+                        "CRL number ({}) is less than CRL event count ({}) in audit log",
+                        session.state.crl_number, crl_issue_count
+                    ),
+                });
+            }
+        }
+    }
+
+    // ── Custodian list vs rekey events ───────────────────────────────────
+    // If custodian names change between sessions, there should be a rekey
+    // event in the later session's audit log.
+    for i in 1..sessions.len() {
+        let prev = &sessions[i - 1];
+        let curr = &sessions[i];
+
+        if !prev.state.custodian_names.is_empty()
+            && !curr.state.custodian_names.is_empty()
+            && prev.state.custodian_names != curr.state.custodian_names
+        {
+            let has_rekey = curr.audit_records.iter().any(|r| r.event.contains("rekey"));
+            if has_rekey {
+                findings.push(Finding {
+                    severity: Severity::Pass,
+                    check: format!("state.custodians[{}→{}]", i - 1, i),
+                    message: format!(
+                        "Custodian list changed ({:?} → {:?}) with corresponding rekey event",
+                        prev.state.custodian_names, curr.state.custodian_names
+                    ),
+                });
+            } else {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    check: format!("state.custodians[{}→{}]", i - 1, i),
+                    message: format!(
+                        "Custodian list changed ({:?} → {:?}) but no rekey event in audit log",
+                        prev.state.custodian_names, curr.state.custodian_names
+                    ),
+                });
+            }
+        }
+    }
+
+    // ── last_hsm_log_seq monotonicity ────────────────────────────────────
+    for i in 1..sessions.len() {
+        let prev = &sessions[i - 1];
+        let curr = &sessions[i];
+
+        if let (Some(prev_seq), Some(curr_seq)) =
+            (prev.state.last_hsm_log_seq, curr.state.last_hsm_log_seq)
+        {
+            if curr_seq >= prev_seq {
+                findings.push(Finding {
+                    severity: Severity::Pass,
+                    check: format!("state.hsm_log_seq[{}→{}]", i - 1, i),
+                    message: format!("HSM log sequence advanced: {prev_seq} → {curr_seq}"),
+                });
+            } else {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    check: format!("state.hsm_log_seq[{}→{}]", i - 1, i),
+                    message: format!("HSM log sequence regressed: {prev_seq} → {curr_seq}"),
+                });
+            }
+        }
+    }
+
+    findings
 }
 
 // ── HSM audit log types (backend-agnostic) ─────────────────────────────────
@@ -726,6 +867,7 @@ mod tests {
                 last_audit_hash: last_hash,
                 last_hsm_log_seq: None,
                 is_migration: false,
+                custodian_names: vec![],
             },
         }
     }
@@ -857,6 +999,7 @@ mod tests {
                 last_audit_hash: chain[1].entry_hash.clone(),
                 last_hsm_log_seq: None,
                 is_migration: false,
+                custodian_names: vec![],
             },
         };
         let s1 = SessionSnapshot {
@@ -874,6 +1017,7 @@ mod tests {
                 last_audit_hash: chain[2].entry_hash.clone(),
                 last_hsm_log_seq: None,
                 is_migration: false,
+                custodian_names: vec![],
             },
         };
         let findings = validate_audit_chain(&[s0, s1]);
@@ -1029,6 +1173,7 @@ mod tests {
                 last_audit_hash: chain[1].entry_hash.clone(),
                 last_hsm_log_seq: None,
                 is_migration: false,
+                custodian_names: vec![],
             },
         };
         // Session 1 starts with a record whose prev_hash doesn't match session 0's
@@ -1053,6 +1198,7 @@ mod tests {
                 last_audit_hash: "x".repeat(64),
                 last_hsm_log_seq: None,
                 is_migration: false,
+                custodian_names: vec![],
             },
         };
         let findings = validate_audit_chain(&[s0, s1]);
@@ -1166,5 +1312,236 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.severity == Severity::Error && f.check == "hsm.continuity"));
+    }
+
+    // ── validate_state_consistency tests ─────────────────────────────────
+
+    #[test]
+    fn state_root_cert_hash_match() {
+        use sha2::{Digest, Sha256};
+        let cert_content = b"fake-root-cert-der";
+        let hash = format!("{:x}", Sha256::digest(cert_content));
+        let s = SessionSnapshot {
+            index: 0,
+            file_hashes: [("ROOT.CRT".to_string(), hash.clone())]
+                .into_iter()
+                .collect(),
+            audit_records: vec![],
+            state: StateFields {
+                root_cert_sha256: hash,
+                crl_number: 0,
+                last_audit_hash: String::new(),
+                last_hsm_log_seq: None,
+                is_migration: false,
+                custodian_names: vec![],
+            },
+        };
+        let findings = validate_state_consistency(&[s]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Pass && f.check.contains("root_cert_hash")));
+    }
+
+    #[test]
+    fn state_root_cert_hash_mismatch() {
+        let s = SessionSnapshot {
+            index: 0,
+            file_hashes: [("ROOT.CRT".to_string(), "b".repeat(64))]
+                .into_iter()
+                .collect(),
+            audit_records: vec![],
+            state: StateFields {
+                root_cert_sha256: "a".repeat(64),
+                crl_number: 0,
+                last_audit_hash: String::new(),
+                last_hsm_log_seq: None,
+                is_migration: false,
+                custodian_names: vec![],
+            },
+        };
+        let findings = validate_state_consistency(&[s]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Error && f.check.contains("root_cert_hash")));
+    }
+
+    #[test]
+    fn state_crl_number_consistent() {
+        let records = make_chain(&["key.generate", "crl.issue"]);
+        let s = SessionSnapshot {
+            index: 0,
+            file_hashes: BTreeMap::new(),
+            audit_records: records,
+            state: StateFields {
+                root_cert_sha256: String::new(),
+                crl_number: 1,
+                last_audit_hash: String::new(),
+                last_hsm_log_seq: None,
+                is_migration: false,
+                custodian_names: vec![],
+            },
+        };
+        let findings = validate_state_consistency(&[s]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Pass && f.check.contains("crl_number")));
+    }
+
+    #[test]
+    fn state_crl_number_less_than_events() {
+        let records = make_chain(&["crl.issue", "crl.issue"]);
+        let s = SessionSnapshot {
+            index: 0,
+            file_hashes: BTreeMap::new(),
+            audit_records: records,
+            state: StateFields {
+                root_cert_sha256: String::new(),
+                crl_number: 1,
+                last_audit_hash: String::new(),
+                last_hsm_log_seq: None,
+                is_migration: false,
+                custodian_names: vec![],
+            },
+        };
+        let findings = validate_state_consistency(&[s]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Error && f.check.contains("crl_number")));
+    }
+
+    #[test]
+    fn state_custodian_change_with_rekey() {
+        let s0 = SessionSnapshot {
+            index: 0,
+            file_hashes: BTreeMap::new(),
+            audit_records: make_chain(&["key.generate"]),
+            state: StateFields {
+                root_cert_sha256: String::new(),
+                crl_number: 0,
+                last_audit_hash: String::new(),
+                last_hsm_log_seq: None,
+                is_migration: false,
+                custodian_names: vec!["Alice".into(), "Bob".into()],
+            },
+        };
+        let s1 = SessionSnapshot {
+            index: 1,
+            file_hashes: BTreeMap::new(),
+            audit_records: make_chain(&["sss.rekey"]),
+            state: StateFields {
+                root_cert_sha256: String::new(),
+                crl_number: 0,
+                last_audit_hash: String::new(),
+                last_hsm_log_seq: None,
+                is_migration: false,
+                custodian_names: vec!["Charlie".into(), "Diana".into()],
+            },
+        };
+        let findings = validate_state_consistency(&[s0, s1]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Pass && f.check.contains("custodians")));
+    }
+
+    #[test]
+    fn state_custodian_change_without_rekey() {
+        let s0 = SessionSnapshot {
+            index: 0,
+            file_hashes: BTreeMap::new(),
+            audit_records: make_chain(&["key.generate"]),
+            state: StateFields {
+                root_cert_sha256: String::new(),
+                crl_number: 0,
+                last_audit_hash: String::new(),
+                last_hsm_log_seq: None,
+                is_migration: false,
+                custodian_names: vec!["Alice".into(), "Bob".into()],
+            },
+        };
+        let s1 = SessionSnapshot {
+            index: 1,
+            file_hashes: BTreeMap::new(),
+            audit_records: make_chain(&["cert.issue"]),
+            state: StateFields {
+                root_cert_sha256: String::new(),
+                crl_number: 0,
+                last_audit_hash: String::new(),
+                last_hsm_log_seq: None,
+                is_migration: false,
+                custodian_names: vec!["Charlie".into(), "Diana".into()],
+            },
+        };
+        let findings = validate_state_consistency(&[s0, s1]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Error && f.check.contains("custodians")));
+    }
+
+    #[test]
+    fn state_hsm_seq_monotonic() {
+        let s0 = SessionSnapshot {
+            index: 0,
+            file_hashes: BTreeMap::new(),
+            audit_records: vec![],
+            state: StateFields {
+                root_cert_sha256: String::new(),
+                crl_number: 0,
+                last_audit_hash: String::new(),
+                last_hsm_log_seq: Some(10),
+                is_migration: false,
+                custodian_names: vec![],
+            },
+        };
+        let s1 = SessionSnapshot {
+            index: 1,
+            file_hashes: BTreeMap::new(),
+            audit_records: vec![],
+            state: StateFields {
+                root_cert_sha256: String::new(),
+                crl_number: 0,
+                last_audit_hash: String::new(),
+                last_hsm_log_seq: Some(20),
+                is_migration: false,
+                custodian_names: vec![],
+            },
+        };
+        let findings = validate_state_consistency(&[s0, s1]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Pass && f.check.contains("hsm_log_seq")));
+    }
+
+    #[test]
+    fn state_hsm_seq_regression() {
+        let s0 = SessionSnapshot {
+            index: 0,
+            file_hashes: BTreeMap::new(),
+            audit_records: vec![],
+            state: StateFields {
+                root_cert_sha256: String::new(),
+                crl_number: 0,
+                last_audit_hash: String::new(),
+                last_hsm_log_seq: Some(20),
+                is_migration: false,
+                custodian_names: vec![],
+            },
+        };
+        let s1 = SessionSnapshot {
+            index: 1,
+            file_hashes: BTreeMap::new(),
+            audit_records: vec![],
+            state: StateFields {
+                root_cert_sha256: String::new(),
+                crl_number: 0,
+                last_audit_hash: String::new(),
+                last_hsm_log_seq: Some(10),
+                is_migration: false,
+                custodian_names: vec![],
+            },
+        };
+        let findings = validate_state_consistency(&[s0, s1]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Error && f.check.contains("hsm_log_seq")));
     }
 }

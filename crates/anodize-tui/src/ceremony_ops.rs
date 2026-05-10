@@ -2710,6 +2710,7 @@ impl App {
                     last_audit_hash: s.last_audit_hash.clone(),
                     last_hsm_log_seq: s.last_hsm_log_seq,
                     is_migration: has_migration,
+                    custodian_names: s.sss.custodians.iter().map(|c| c.name.clone()).collect(),
                 }
             } else {
                 StateFields {
@@ -2718,6 +2719,7 @@ impl App {
                     last_audit_hash: String::new(),
                     last_hsm_log_seq: None,
                     is_migration: has_migration,
+                    custodian_names: vec![],
                 }
             };
             snapshots.push(SessionSnapshot {

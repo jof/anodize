@@ -17,10 +17,15 @@ use clap::Parser;
 
 use anodize_audit::validate::{
     format_report, validate_audit_chain, validate_disc_status, validate_session_continuity,
-    DiscStatus, Finding, SessionSnapshot, Severity, StateFields,
+    validate_state_consistency, DiscStatus, Finding, SessionSnapshot, Severity, StateFields,
+};
+use anodize_ca::{
+    extract_crl_number, verify_cert_issued_by, verify_crl_issued_by, verify_root_cert_self_signed,
 };
 use anodize_config::state::SessionState;
+use der::Decode;
 use sha2::{Digest, Sha256};
+use x509_cert::Certificate;
 
 #[derive(Parser)]
 #[command(name = "anodize-validate", about = "Offline disc validation")]
@@ -94,6 +99,7 @@ fn main() -> Result<()> {
                         last_audit_hash: s.last_audit_hash,
                         last_hsm_log_seq: s.last_hsm_log_seq,
                         is_migration: has_migration,
+                        custodian_names: s.sss.custodians.iter().map(|c| c.name.clone()).collect(),
                     },
                     Err(e) => {
                         findings.push(Finding {
@@ -107,6 +113,7 @@ fn main() -> Result<()> {
                             last_audit_hash: String::new(),
                             last_hsm_log_seq: None,
                             is_migration: has_migration,
+                            custodian_names: vec![],
                         }
                     }
                 },
@@ -122,6 +129,7 @@ fn main() -> Result<()> {
                         last_audit_hash: String::new(),
                         last_hsm_log_seq: None,
                         is_migration: has_migration,
+                        custodian_names: vec![],
                     }
                 }
             }
@@ -137,6 +145,7 @@ fn main() -> Result<()> {
                 last_audit_hash: String::new(),
                 last_hsm_log_seq: None,
                 is_migration: has_migration,
+                custodian_names: vec![],
             }
         };
 
@@ -172,6 +181,12 @@ fn main() -> Result<()> {
 
     // Audit chain integrity.
     findings.extend(validate_audit_chain(&snapshots));
+
+    // STATE.JSON consistency.
+    findings.extend(validate_state_consistency(&snapshots));
+
+    // Certificate signature verification.
+    findings.extend(validate_cert_signatures(&session_dirs));
 
     // Combined audit log check (if there's a top-level audit.log).
     let combined_log = staging.join("audit.log");
@@ -210,4 +225,187 @@ fn main() -> Result<()> {
         Severity::Warn => process::exit(1),
         Severity::Error => process::exit(2),
     }
+}
+
+/// Verify certificate and CRL signatures from the most recent session directory.
+///
+/// - ROOT.CRT: must be validly self-signed.
+/// - INTERMEDIATE.CRT: if present, must chain to ROOT.CRT.
+/// - ROOT.CRL: if present, must be signed by ROOT.CRT, and its CRL number
+///   should be consistent.
+fn validate_cert_signatures(session_dirs: &[PathBuf]) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let Some(latest) = session_dirs.last() else {
+        return findings;
+    };
+
+    // ── ROOT.CRT self-signature ──────────────────────────────────────────
+    let root_path = latest.join("ROOT.CRT");
+    let root_cert = if root_path.exists() {
+        match std::fs::read(&root_path) {
+            Ok(der) => match Certificate::from_der(&der) {
+                Ok(cert) => {
+                    match verify_root_cert_self_signed(&cert) {
+                        Ok(()) => {
+                            findings.push(Finding {
+                                severity: Severity::Pass,
+                                check: "cert.root_self_signed".into(),
+                                message: "ROOT.CRT self-signature verified".into(),
+                            });
+                        }
+                        Err(e) => {
+                            findings.push(Finding {
+                                severity: Severity::Error,
+                                check: "cert.root_self_signed".into(),
+                                message: format!("ROOT.CRT self-signature FAILED: {e}"),
+                            });
+                        }
+                    }
+                    Some(cert)
+                }
+                Err(e) => {
+                    findings.push(Finding {
+                        severity: Severity::Error,
+                        check: "cert.root_self_signed".into(),
+                        message: format!("ROOT.CRT is not valid DER: {e}"),
+                    });
+                    None
+                }
+            },
+            Err(e) => {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    check: "cert.root_self_signed".into(),
+                    message: format!("Cannot read ROOT.CRT: {e}"),
+                });
+                None
+            }
+        }
+    } else {
+        findings.push(Finding {
+            severity: Severity::Warn,
+            check: "cert.root_self_signed".into(),
+            message: "ROOT.CRT not found — cannot verify self-signature".into(),
+        });
+        None
+    };
+
+    // ── INTERMEDIATE.CRT chain to root ───────────────────────────────────
+    let int_path = latest.join("INTERMEDIATE.CRT");
+    if int_path.exists() {
+        match std::fs::read(&int_path) {
+            Ok(der) => match Certificate::from_der(&der) {
+                Ok(int_cert) => {
+                    if let Some(ref root) = root_cert {
+                        match verify_cert_issued_by(&int_cert, root) {
+                            Ok(()) => {
+                                findings.push(Finding {
+                                    severity: Severity::Pass,
+                                    check: "cert.intermediate_chain".into(),
+                                    message: "INTERMEDIATE.CRT signature chains to ROOT.CRT".into(),
+                                });
+                            }
+                            Err(e) => {
+                                findings.push(Finding {
+                                    severity: Severity::Error,
+                                    check: "cert.intermediate_chain".into(),
+                                    message: format!(
+                                        "INTERMEDIATE.CRT does NOT chain to ROOT.CRT: {e}"
+                                    ),
+                                });
+                            }
+                        }
+                    } else {
+                        findings.push(Finding {
+                            severity: Severity::Warn,
+                            check: "cert.intermediate_chain".into(),
+                            message: "Cannot verify INTERMEDIATE.CRT chain — ROOT.CRT unavailable"
+                                .into(),
+                        });
+                    }
+                }
+                Err(e) => {
+                    findings.push(Finding {
+                        severity: Severity::Error,
+                        check: "cert.intermediate_chain".into(),
+                        message: format!("INTERMEDIATE.CRT is not valid DER: {e}"),
+                    });
+                }
+            },
+            Err(e) => {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    check: "cert.intermediate_chain".into(),
+                    message: format!("Cannot read INTERMEDIATE.CRT: {e}"),
+                });
+            }
+        }
+    }
+
+    // ── ROOT.CRL signature ───────────────────────────────────────────────
+    let crl_path = latest.join("ROOT.CRL");
+    if crl_path.exists() {
+        match std::fs::read(&crl_path) {
+            Ok(crl_der) => {
+                if let Some(ref root) = root_cert {
+                    match verify_crl_issued_by(&crl_der, root) {
+                        Ok(()) => {
+                            findings.push(Finding {
+                                severity: Severity::Pass,
+                                check: "cert.crl_signature".into(),
+                                message: "ROOT.CRL signature verified against ROOT.CRT".into(),
+                            });
+                        }
+                        Err(e) => {
+                            findings.push(Finding {
+                                severity: Severity::Error,
+                                check: "cert.crl_signature".into(),
+                                message: format!("ROOT.CRL signature FAILED: {e}"),
+                            });
+                        }
+                    }
+
+                    // Also check CRL number if extractable.
+                    match extract_crl_number(&crl_der) {
+                        Ok(Some(n)) => {
+                            findings.push(Finding {
+                                severity: Severity::Pass,
+                                check: "cert.crl_number".into(),
+                                message: format!("ROOT.CRL contains CRL number {n}"),
+                            });
+                        }
+                        Ok(None) => {
+                            findings.push(Finding {
+                                severity: Severity::Warn,
+                                check: "cert.crl_number".into(),
+                                message: "ROOT.CRL has no CRL number extension".into(),
+                            });
+                        }
+                        Err(e) => {
+                            findings.push(Finding {
+                                severity: Severity::Warn,
+                                check: "cert.crl_number".into(),
+                                message: format!("Could not parse CRL number from ROOT.CRL: {e}"),
+                            });
+                        }
+                    }
+                } else {
+                    findings.push(Finding {
+                        severity: Severity::Warn,
+                        check: "cert.crl_signature".into(),
+                        message: "Cannot verify ROOT.CRL — ROOT.CRT unavailable".into(),
+                    });
+                }
+            }
+            Err(e) => {
+                findings.push(Finding {
+                    severity: Severity::Error,
+                    check: "cert.crl_signature".into(),
+                    message: format!("Cannot read ROOT.CRL: {e}"),
+                });
+            }
+        }
+    }
+
+    findings
 }
