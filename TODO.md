@@ -25,13 +25,86 @@ second open, confirming the first session was committed and the disc remained
 appendable. Full end-to-end test (two complete session writes in one ceremony run)
 is blocked by the state machine bug above.
 
-## 9. Full end-to-end ceremony test
+## Findings from e2e run (2026-05-10)
 
-Depends on **all** of the above plus the existing "cdemu multi-session append"
-TODO (#3).  Covers the complete ceremony lifecycle:
+### Shuttle copy silently fails after Phase 1
 
-InitRoot → KeyBackup (pair + backup) → SignCsr → RevokeCert → IssueCrl →
-RekeyShares (with real PIN rotation across all HSMs) → MigrateDisc →
-ValidateDisc.
+After InitRoot the shuttle (`/mnt/usb`) correctly received `root.crt`,
+`root.crl`, and `audit.log`.  Every subsequent phase reported "Copy artifacts
+to shuttle" success, but the shuttle contents never changed — no
+`intermediate.crt`, no updated `audit.log`, no updated `root.crl`.
 
-Test methodology: see `docs/e2e-test-plan.md`.
+The likely cause is a stale mount / symlink at `/tmp/anodize-shuttle`.  On the
+first ceremony session the shuttle USB is auto-detected and mounted; on later
+sessions the path still exists but the mount may have gone stale (the debug
+user also mounts the same device at `/mnt/usb`).  The shuttle-copy code should
+re-verify the mount is live before writing, and return a visible error when the
+copy actually fails.
+
+### ValidateDisc should be more comprehensive
+
+The validation report checked only 4 items:
+
+    disc.finalization, session.count, session.migration, audit_chain
+
+Missing checks that would add confidence:
+
+- **Certificate signature verification** — verify root cert self-signature and
+  any intermediate cert signatures chain to root.
+- **STATE.JSON consistency** — `root_cert_sha256` matches the actual cert on
+  disc, custodian list matches latest rekey event, CRL number matches latest
+  CRL.
+- **HSM audit log reconciliation** — compare the on-disc audit log against the
+  HSM's internal monotonic counter (docs mention this but it was not tested).
+- **Cross-session file immutability** — confirm that files written in session N
+  are byte-identical when read back through session N+k (guards against
+  growisofs or cdemu silently corrupting earlier sessions).
+
+### Share word count mismatch in UI ("34" vs "36")
+
+Share Distribution says "Total: 9 groups, **36 words**" but Share Input
+prompts for "Word 1/**34**".  The 2-word discrepancy is the identifier prefix
+(`acid`/`aged` first word), but this is never explained to the operator.
+Either:
+- Display "Word 1/36" and auto-fill the prefix, or
+- Add a hint: "The first word identifies the share. Enter words 2–35:".
+
+### No progress indicator during disc writes
+
+After confirming a disc write, the TUI blocks with no spinner, progress bar,
+or elapsed timer.  On bare-metal this completed quickly (~2 s), but on slower
+media or with large audit logs it could look like a hang.  A simple
+"Writing session… (elapsed Xs)" would eliminate operator anxiety.
+
+### cdemu-swap-disc.sh brittle PATH handling
+
+The script failed on the debug user because `gdbus` is only in the Nix
+store, not in `$PATH`.  The `GDBUS=` fallback tries `command -v` first
+which misses the Nix path.  Fix: search known Nix store paths as a
+second-order fallback, or have the NixOS module drop a wrapper script at
+a well-known location (e.g. `/run/anodize/bin/gdbus`).
+
+### MigrateDisc step ordering wrong in e2e-test-plan.md
+
+The test plan shows step 5 as "Write confirmation: press Enter" before the disc
+swap prompt, but the actual flow is:
+
+    MigrateConfirm → (press 1) → WaitMigrateTarget → (swap disc) → (press 1) → write
+
+The plan should drop the premature "write confirmation" step and clarify that
+the swap happens before the write, not after.
+
+### ~~RekeyShares: no verification that old shares are invalidated~~ (DONE)
+
+Post-rekey smoke-check implemented: after `change_pin` succeeds on all HSMs,
+`do_rekey_verify_old_pin_rejected` opens a fresh session with the old PIN
+(already cached in memory from the quorum phase) and confirms the HSM rejects
+it.  If the old PIN still works, the ceremony aborts with a CRITICAL error
+before writing to disc.
+
+### Cosmetic: "Disc Session Written" title is generic
+
+Every operation shows the same "Disc Session Written" banner.  It would be
+clearer to include the operation name, e.g. "Revocation Record Written" or
+"CRL Refresh Written" — the status line beneath does this already, but the
+banner title is what operators see first.
