@@ -13,10 +13,10 @@ The `lint --list-usb` help text references this but it doesn't exist yet.
 ~~Use color to indicate ceremony lock state: **red** if a ceremony is
 running on another terminal, **green** if the appliance is idle/ready.~~
 
-### Sentinel: dev-mode warning banner
+### ~~Sentinel: dev-mode warning banner~~ ✅
 
-Show a prominent red "DEV MODE" banner in the sentinel, matching the
-style of the existing dev-mode warning in the TUI.
+Implemented: bold red "DEV BUILD" box in the sentinel when
+`dev-softhsm-usb` is enabled, matching the TUI style.
 
 ### Sentinel: bottom-justify the refresh display
 
