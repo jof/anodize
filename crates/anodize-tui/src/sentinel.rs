@@ -13,6 +13,7 @@
 #[path = "syshealth.rs"]
 mod syshealth;
 
+use std::fmt::Write as _;
 use std::fs::OpenOptions;
 use std::mem;
 use std::os::unix::io::{AsFd, AsRawFd};
@@ -269,28 +270,36 @@ fn dev_mode_banner() -> &'static str {
 }
 
 fn print_status_banner(lock_path: &Path) {
-    // ANSI: clear screen + cursor home; works on both serial and EFI consoles.
-    print!("\x1b[2J\x1b[H");
-    println!("+-----------------------------------------+");
-    println!("|      ANODIZE ROOT CA CEREMONY           |");
-    println!("|            S E N T I N E L              |");
-    println!("+-----------------------------------------+");
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+
+    // Build the entire frame in memory so the terminal update is a single
+    // write — no visible blank/partial frame between refreshes.
+    let mut buf = String::with_capacity(2048);
+
+    // ANSI: clear screen + cursor home.
+    buf.push_str("\x1b[2J\x1b[H");
+
+    let _ = writeln!(buf, "+-----------------------------------------+");
+    let _ = writeln!(buf, "|      ANODIZE ROOT CA CEREMONY           |");
+    let _ = writeln!(buf, "|            S E N T I N E L              |");
+    let _ = writeln!(buf, "+-----------------------------------------+");
 
     // ── Dev-mode warning ──────────────────────────────────────────────────
     let banner = dev_mode_banner();
     if !banner.is_empty() {
-        println!();
-        println!("{banner}");
+        let _ = writeln!(buf);
+        let _ = writeln!(buf, "{banner}");
     }
 
-    println!();
+    let _ = writeln!(buf);
 
     // ── Ceremony lock status (most prominent) ─────────────────────────────
-    println!(
+    let _ = writeln!(
+        buf,
         "{}",
         ceremony_status_line(check_ceremony_running(lock_path))
     );
-    println!();
+    let _ = writeln!(buf);
 
     // ── System health ─────────────────────────────────────────────────────
     // Compact one-liner rows; best-effort — missing data is silently skipped.
@@ -299,12 +308,17 @@ fn print_status_banner(lock_path: &Path) {
         let load = la
             .map(|l| format!("  Load: {} {} {}", l.one, l.five, l.fifteen))
             .unwrap_or_default();
-        println!("  Uptime: {}d {}h {}m{}", u.days, u.hours, u.minutes, load);
+        let _ = writeln!(
+            buf,
+            "  Uptime: {}d {}h {}m{}",
+            u.days, u.hours, u.minutes, load
+        );
     }
 
     if let Some(m) = syshealth::read_meminfo() {
         let used = m.total_kb.saturating_sub(m.avail_kb);
-        println!(
+        let _ = writeln!(
+            buf,
             "  Memory: {} / {}   Entropy: {}",
             syshealth::format_kb(used),
             syshealth::format_kb(m.total_kb),
@@ -324,7 +338,7 @@ fn print_status_banner(lock_path: &Path) {
             .map(|v| format!("   NixOS: {v}"))
             .unwrap_or_default();
         if !kv.is_empty() {
-            println!("  {kv}{nv}");
+            let _ = writeln!(buf, "  {kv}{nv}");
         }
     }
 
@@ -345,14 +359,18 @@ fn print_status_banner(lock_path: &Path) {
             None => "SecureBoot: N/A",
         };
         if !ntp.is_empty() {
-            println!("  {ntp}   {sb}");
+            let _ = writeln!(buf, "  {ntp}   {sb}");
         }
     }
 
     // Optical drive
     match syshealth::read_optical_drive() {
-        Some(model) => println!("  Optical: /dev/sr0 ({model})"),
-        None => println!("  Optical: no drive detected"),
+        Some(model) => {
+            let _ = writeln!(buf, "  Optical: /dev/sr0 ({model})");
+        }
+        None => {
+            let _ = writeln!(buf, "  Optical: no drive detected");
+        }
     }
 
     // Thermal (if any sensors exist)
@@ -362,47 +380,50 @@ fn print_status_banner(lock_path: &Path) {
             .iter()
             .map(|z| format!("{}: {:.0}°C", z.name, z.temp_c))
             .collect();
-        println!("  Thermal: {}", temps.join(", "));
+        let _ = writeln!(buf, "  Thermal: {}", temps.join(", "));
     }
 
     // ── Network interfaces ────────────────────────────────────────────────
     let net = syshealth::run_network_interfaces();
     if !net.is_empty() {
-        println!();
-        println!("  Network:");
+        let _ = writeln!(buf);
+        let _ = writeln!(buf, "  Network:");
         for line in net.lines() {
-            println!("    {line}");
+            let _ = writeln!(buf, "    {line}");
         }
     }
 
     // ── Failed systemd units ──────────────────────────────────────────────
     let failed = syshealth::run_failed_units();
     if !failed.is_empty() {
-        println!();
-        println!("  Failed units:");
+        let _ = writeln!(buf);
+        let _ = writeln!(buf, "  Failed units:");
         for line in failed.lines() {
-            println!("    {line}");
+            let _ = writeln!(buf, "    {line}");
         }
     }
 
     // ── Block devices ─────────────────────────────────────────────────────
     let blk = syshealth::run_lsblk();
     if !blk.is_empty() {
-        println!();
-        println!("  Block devices:");
+        let _ = writeln!(buf);
+        let _ = writeln!(buf, "  Block devices:");
         for line in blk.lines() {
-            println!("    {line}");
+            let _ = writeln!(buf, "    {line}");
         }
     }
 
     // ── Footer (pinned to bottom of terminal) ────────────────────────
-    let (cols, rows) = terminal::size().unwrap_or((80, 24));
     let ft = footer_lines(cols, rows);
     let start_row = footer_start_row(rows, ft.len() as u16);
-    print!("\x1b[{start_row};1H");
+    let _ = write!(buf, "\x1b[{start_row};1H");
     for line in &ft {
-        println!("{line}");
+        let _ = writeln!(buf, "{line}");
     }
+
+    // Atomic write — the terminal sees the complete frame in one go.
+    print!("{buf}");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
 }
 
 /// Build the footer lines displayed at the bottom of the sentinel banner.
@@ -584,5 +605,27 @@ mod tests {
         assert_eq!(footer_start_row(2, 4), 1);
         // Exact fit
         assert_eq!(footer_start_row(4, 4), 1);
+    }
+
+    #[test]
+    fn double_buffer_footer_rendering() {
+        use std::fmt::Write as _;
+
+        let cols = 80u16;
+        let rows = 24u16;
+        let ft = footer_lines(cols, rows);
+        let start_row = footer_start_row(rows, ft.len() as u16);
+
+        let mut buf = String::new();
+        let _ = write!(buf, "\x1b[{start_row};1H");
+        for line in &ft {
+            let _ = writeln!(buf, "{line}");
+        }
+
+        // Buffer must contain the cursor-positioning escape.
+        assert!(buf.contains("\x1b[21;1H"), "expected cursor at row 21");
+        // All footer content present in a single buffer.
+        assert!(buf.contains("Press Enter"));
+        assert!(buf.contains("refreshes every"));
     }
 }
