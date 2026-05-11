@@ -395,20 +395,32 @@ fn print_status_banner(lock_path: &Path) {
         }
     }
 
-    // ── Key bindings ──────────────────────────────────────────────────────
-    println!();
-    println!("  Press Enter to begin the ceremony.");
-    println!("  Press [s] to power off.  Press [q] to exit.");
+    // ── Footer (pinned to bottom of terminal) ────────────────────────
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let ft = footer_lines(cols, rows);
+    let start_row = footer_start_row(rows, ft.len() as u16);
+    print!("\x1b[{start_row};1H");
+    for line in &ft {
+        println!("{line}");
+    }
+}
 
-    // Terminal size hint
-    let size_hint = terminal::size()
-        .map(|(c, r)| format!("  [{c}×{r}]"))
-        .unwrap_or_default();
-    println!(
-        "  (refreshes every {}s){size_hint}",
-        REFRESH_INTERVAL.as_secs()
-    );
-    println!();
+/// Build the footer lines displayed at the bottom of the sentinel banner.
+fn footer_lines(cols: u16, rows: u16) -> Vec<String> {
+    vec![
+        String::new(),
+        "  Press Enter to begin the ceremony.".to_string(),
+        "  Press [s] to power off.  Press [q] to exit.".to_string(),
+        format!(
+            "  (refreshes every {}s)  [{cols}\u{00d7}{rows}]",
+            REFRESH_INTERVAL.as_secs()
+        ),
+    ]
+}
+
+/// Calculate the 1-indexed terminal row where the footer should start.
+fn footer_start_row(rows: u16, footer_height: u16) -> u16 {
+    rows.saturating_sub(footer_height).saturating_add(1).max(1)
 }
 
 /// Read the real UID of the current process from /proc/self/status.
@@ -546,5 +558,31 @@ mod tests {
         let idle = ceremony_status_line(false);
         assert!(idle.contains("idle"));
         assert!(idle.contains(ANSI_GREEN));
+    }
+
+    #[test]
+    fn footer_lines_content() {
+        let ft = footer_lines(80, 24);
+        let joined = ft.join("\n");
+        assert!(joined.contains("Press Enter to begin the ceremony"));
+        assert!(joined.contains("Press [s] to power off"));
+        assert!(joined.contains("refreshes every"));
+        assert!(joined.contains("80\u{00d7}24"));
+    }
+
+    #[test]
+    fn footer_lines_count() {
+        assert_eq!(footer_lines(80, 24).len(), 4);
+        assert_eq!(footer_lines(120, 50).len(), 4);
+    }
+
+    #[test]
+    fn footer_cursor_row() {
+        // 24-row terminal, 4-line footer → footer starts at row 21
+        assert_eq!(footer_start_row(24, 4), 21);
+        // Tiny terminal: never below row 1
+        assert_eq!(footer_start_row(2, 4), 1);
+        // Exact fit
+        assert_eq!(footer_start_row(4, 4), 1);
     }
 }
