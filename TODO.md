@@ -8,16 +8,6 @@ The `lint --list-usb` help text references this but it doesn't exist yet.
 
 ## Findings from e2e runs
 
-### ~~Sentinel: color ceremony-lock status~~ ✅
-
-~~Use color to indicate ceremony lock state: **red** if a ceremony is
-running on another terminal, **green** if the appliance is idle/ready.~~
-
-### ~~Sentinel: dev-mode warning banner~~ ✅
-
-Implemented: bold red "DEV BUILD" box in the sentinel when
-`dev-softhsm-usb` is enabled, matching the TUI style.
-
 ### Sentinel: double-buffer repaints to prevent flicker
 
 Build the new frame in a buffer before clearing and repainting the
