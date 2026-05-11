@@ -2589,8 +2589,7 @@ impl App {
             }
 
             Some(Operation::MigrateDisc) => {
-                // Copy files from the source disc's last session (the accumulated
-                // state), append a migration audit event, and add MIGRATION.JSON.
+                // Pure copy of the source disc's last session.
                 let source_files = match self.data.migrate_sessions.last() {
                     Some(s) => s.files.clone(),
                     None => {
@@ -2598,97 +2597,11 @@ impl App {
                         return None;
                     }
                 };
-                let session_count = self.data.migrate_sessions.len();
-                let source_fp = self
-                    .data
-                    .migrate_source_fingerprint
-                    .clone()
-                    .unwrap_or_default();
-
-                // Separate AUDIT.LOG from other files
-                let mut files: Vec<IsoFile> = Vec::new();
-                let mut source_audit: Option<Vec<u8>> = None;
-                for f in &source_files {
-                    if f.name == "AUDIT.LOG" {
-                        source_audit = Some(f.data.clone());
-                    } else {
-                        files.push(f.clone());
-                    }
-                }
-
-                let source_audit = match source_audit {
-                    Some(data) => data,
-                    None => {
-                        self.set_status(
-                            "Source disc's last session has no AUDIT.LOG — cannot migrate",
-                        );
-                        return None;
-                    }
-                };
-
-                // Write source audit log to staging, reopen, and append migration event
-                let log_path = staging.join("audit.log");
-                if let Err(e) = std::fs::write(&log_path, &source_audit) {
-                    self.set_status(format!("Cannot write staging audit log: {e}"));
-                    return None;
-                }
-                let mut log = match AuditLog::open(&log_path) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.set_status(format!("Audit log reopen failed: {e}"));
-                        return None;
-                    }
-                };
-                if let Err(e) = log.append(
-                    "audit.disc.migrate",
-                    serde_json::json!({
-                        "source_disc_fingerprint": source_fp,
-                        "source_session_count": session_count,
-                    }),
-                ) {
-                    self.set_status(format!("Audit log append failed: {e}"));
-                    return None;
-                }
-                drop(log);
-
-                let audit_bytes = match std::fs::read(&log_path) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        self.set_status(format!("Cannot read audit log: {e}"));
-                        return None;
-                    }
-                };
-                self.update_session_state_for_record(&audit_bytes);
-                files.push(IsoFile {
-                    name: "AUDIT.LOG".into(),
-                    data: audit_bytes,
-                });
-
-                // Add MIGRATION.JSON marker
-                let migration_meta = serde_json::json!({
-                    "source_disc_fingerprint": source_fp,
-                    "source_session_count": session_count,
-                    "migration_timestamp": ts
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                });
-                files.push(IsoFile {
-                    name: "MIGRATION.JSON".into(),
-                    data: serde_json::to_vec_pretty(&migration_meta).unwrap_or_default(),
-                });
-
-                // Update STATE.JSON
-                if let Some(state_file) = self.build_state_json_file() {
-                    // Remove old STATE.JSON if carried from source
-                    files.retain(|f| f.name != anodize_config::state::STATE_FILENAME);
-                    files.push(state_file);
-                }
 
                 Some(SessionEntry {
                     dir_name,
                     timestamp: ts,
-                    files,
+                    files: source_files,
                 })
             }
 
