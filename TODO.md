@@ -45,3 +45,18 @@ Currently all fleet devices must share the same backend kind.  Future work:
 - **Automatic failover**: if the usual primary device is absent at ceremony
   start, `open_session_any_recognized` already falls through to the next fleet
   member.  Add UI indication of which device was selected.
+
+## Future: crash-resumption and WAL recovery
+
+Once the WAL has been written, it should be possible to resume a ceremony
+after a system crash or unexpected power loss.
+
+- **WAL replay**: on startup, detect incomplete WAL entries and offer to
+  resume the interrupted operation from the last committed step.
+- **HSM audit-log reconciliation**: compare the HSM's on-device audit log
+  against the WAL to determine whether any key operations (generate, sign,
+  wrap/unwrap) actually executed before the crash.
+- **Manual state fixup with audit trail**: if out-of-order or manual fixes
+  to `state.json` are required, log an audit event that includes an
+  operator-supplied explanation of the incongruity so the discrepancy is
+  permanently recorded.
