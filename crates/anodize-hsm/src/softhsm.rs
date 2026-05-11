@@ -174,6 +174,11 @@ impl HsmBackend for SoftHsmBackend {
         }))
     }
 
+    fn open_session_by_id(&self, device_id: &str, pin: &SecretString) -> Result<Box<dyn Hsm>> {
+        // For SoftHSM / PKCS#11, device_id is the token label.
+        self.open_session(device_id, pin)
+    }
+
     fn bootstrap(
         &self,
         slot_id: u64,

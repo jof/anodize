@@ -420,6 +420,80 @@ fn change_pin_on_device_wrong_pin_fails() {
     println!("change_pin_on_device wrong PIN rejection: OK");
 }
 
+/// open_session_by_id on SoftHSM uses the token label as device_id.
+#[test]
+fn open_session_by_id_softhsm() {
+    let (_module, _conf) = match softhsm_env() {
+        Some(v) => v,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE or SOFTHSM2_CONF not set");
+            return;
+        }
+    };
+
+    init_test_token("anodize-byid");
+
+    let module = PathBuf::from(env::var("SOFTHSM2_MODULE").unwrap());
+    let backend =
+        anodize_hsm::SoftHsmBackend::with_module(module).expect("SoftHsmBackend::with_module");
+
+    let pin = secrecy::SecretString::new("1234".to_string());
+    use anodize_hsm::HsmBackend;
+    let _hsm = backend
+        .open_session_by_id("anodize-byid", &pin)
+        .expect("open_session_by_id should succeed with correct label");
+
+    // Wrong device_id should fail
+    let result = backend.open_session_by_id("nonexistent-token", &pin);
+    assert!(
+        result.is_err(),
+        "open_session_by_id with wrong device_id should fail"
+    );
+
+    println!("open_session_by_id (SoftHSM): OK");
+}
+
+/// open_session_any_recognized finds a fleet member among connected devices.
+#[test]
+fn open_session_any_recognized_softhsm() {
+    let (_module, _conf) = match softhsm_env() {
+        Some(v) => v,
+        None => {
+            eprintln!("SKIP: SOFTHSM2_MODULE or SOFTHSM2_CONF not set");
+            return;
+        }
+    };
+
+    init_test_token("anodize-fleet");
+
+    let module = PathBuf::from(env::var("SOFTHSM2_MODULE").unwrap());
+    let backend =
+        anodize_hsm::SoftHsmBackend::with_module(module).expect("SoftHsmBackend::with_module");
+
+    // Get the device serial from inventory to use as fleet ID
+    use anodize_hsm::HsmInventory;
+    let devices = backend.enumerate_devices().expect("enumerate_devices");
+    assert!(!devices.is_empty());
+    let serial = &devices[0].serial;
+
+    let pin = secrecy::SecretString::new("1234".to_string());
+    let fleet_ids = vec![serial.as_str()];
+    let (found_id, _hsm) =
+        anodize_hsm::open_session_any_recognized(&backend, &backend, &fleet_ids, &pin)
+            .expect("open_session_any_recognized should find fleet device");
+    assert_eq!(&found_id, serial);
+
+    // No matching fleet IDs should fail
+    let empty_fleet: Vec<&str> = vec!["bogus-serial"];
+    let result = anodize_hsm::open_session_any_recognized(&backend, &backend, &empty_fleet, &pin);
+    assert!(
+        result.is_err(),
+        "open_session_any_recognized should fail with no matching fleet IDs"
+    );
+
+    println!("open_session_any_recognized (SoftHSM): OK");
+}
+
 /// change_pin_on_device works through dyn HsmBackup (object safety).
 #[test]
 fn change_pin_on_device_dyn_dispatch() {

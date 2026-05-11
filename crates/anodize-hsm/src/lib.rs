@@ -137,6 +137,12 @@ pub trait HsmBackend: Send {
     /// Returns a ready-to-use `Hsm` session.
     fn open_session(&self, label: &str, pin: &SecretString) -> Result<Box<dyn Hsm>>;
 
+    /// Open a session on a specific device identified by its backend-specific
+    /// `device_id` (USB serial for YubiHSM, token label for SoftHSM, etc.).
+    /// This is the primary way fleet-aware code authenticates — no more
+    /// "try all devices".
+    fn open_session_by_id(&self, device_id: &str, pin: &SecretString) -> Result<Box<dyn Hsm>>;
+
     /// Bootstrap a fresh token: initialise, set PIN, return authenticated
     /// session. Used during InitRoot.
     fn bootstrap(
@@ -188,6 +194,28 @@ pub struct HsmDeviceInfo {
 /// Enumerate connected HSM devices without requiring authentication.
 pub trait HsmInventory: Send {
     fn enumerate_devices(&self) -> Result<Vec<HsmDeviceInfo>>;
+}
+
+/// Open a session on the first connected device whose ID is in the caller's
+/// fleet list. Composes `enumerate_devices()` + `open_session_by_id()`.
+///
+/// Returns `(device_id, session)` so the caller knows which device was used.
+pub fn open_session_any_recognized(
+    backend: &dyn HsmBackend,
+    inventory: &dyn HsmInventory,
+    fleet_device_ids: &[&str],
+    pin: &SecretString,
+) -> Result<(String, Box<dyn Hsm>)> {
+    let connected = inventory.enumerate_devices()?;
+    for device in &connected {
+        if fleet_device_ids.contains(&device.serial.as_str()) {
+            let session = backend.open_session_by_id(&device.serial, pin)?;
+            return Ok((device.serial.clone(), session));
+        }
+    }
+    Err(HsmError::TokenNotFound(
+        "no recognized fleet device connected".into(),
+    ))
 }
 
 /// Create the inventory implementation for the given backend kind.

@@ -131,6 +131,27 @@ impl HsmBackend for YubiHsmBackend {
         )))
     }
 
+    fn open_session_by_id(&self, device_id: &str, pin: &SecretString) -> Result<Box<dyn Hsm>> {
+        // For YubiHSM, device_id is the USB serial number.
+        let serial: yubihsm::device::SerialNumber = device_id
+            .parse()
+            .map_err(|e| HsmError::BackendError(format!("invalid YubiHSM serial: {e}")))?;
+        let connector = yubihsm::Connector::usb(&yubihsm::UsbConfig {
+            serial: Some(serial),
+            ..Default::default()
+        });
+        let creds = yubihsm::Credentials::from_password(
+            ANODIZE_AUTH_KEY_ID,
+            pin.expose_secret().as_bytes(),
+        );
+        let client = yubihsm::Client::open(connector, creds, true).map_err(|e| {
+            HsmError::BackendError(format!(
+                "YubiHSM open_session_by_id: serial {device_id}: {e}"
+            ))
+        })?;
+        Ok(Box::new(YubiHsmSession { client }))
+    }
+
     fn bootstrap(
         &self,
         slot_id: u64,
