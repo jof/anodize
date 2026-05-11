@@ -153,6 +153,11 @@ The auto-refresh status text currently renders mid-screen after the last
 line of content.  Pin it to the bottom of the terminal so the layout
 stays stable across refreshes.
 
+### Sentinel: double-buffer repaints to prevent flicker
+
+Build the new frame in a buffer before clearing and repainting the
+screen, so the user never sees a blank/partial frame between refreshes.
+
 ### cdemu-swap-disc.sh still broken in `make` target
 
 `make cdemu-swap-disc` still fails with "ERROR: gdbus not found" because the
