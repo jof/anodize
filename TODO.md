@@ -137,6 +137,22 @@ Now that the refresh loop displays network interface info inline, the
 manual "press N to show network" action is redundant.  Remove the
 keybinding and associated handler.
 
+### Sentinel: color ceremony-lock status
+
+Use color to indicate ceremony lock state: **red** if a ceremony is
+running on another terminal, **green** if the appliance is idle/ready.
+
+### Sentinel: dev-mode warning banner
+
+Show a prominent red "DEV MODE" banner in the sentinel, matching the
+style of the existing dev-mode warning in the TUI.
+
+### Sentinel: bottom-justify the refresh display
+
+The auto-refresh status text currently renders mid-screen after the last
+line of content.  Pin it to the bottom of the terminal so the layout
+stays stable across refreshes.
+
 ### cdemu-swap-disc.sh still broken in `make` target
 
 `make cdemu-swap-disc` still fails with "ERROR: gdbus not found" because the
