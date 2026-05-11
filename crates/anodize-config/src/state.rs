@@ -80,17 +80,9 @@ pub struct Custodian {
 // ── HSM Fleet ───────────────────────────────────────────────────────────────
 
 /// Fleet of enrolled HSM devices tracked in STATE.JSON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HsmFleet {
     pub devices: Vec<HsmDevice>,
-}
-
-impl Default for HsmFleet {
-    fn default() -> Self {
-        Self {
-            devices: Vec::new(),
-        }
-    }
 }
 
 /// A single HSM device enrolled in the fleet.
