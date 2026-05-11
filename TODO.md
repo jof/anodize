@@ -17,14 +17,6 @@ deep in `/nix/store/...glib-2.86.3-bin/bin/gdbus`.
 Workaround: run the swap commands manually via debug SSH as ceremony user.
 Fix: have the NixOS module drop a wrapper at `/run/anodize/bin/gdbus`.
 
-### Disc status bar shows "not detected" while disc is loaded
-
-Throughout the ceremony the bottom status bar reads `Disc: ○ not detected`
-even when `/dev/sr0` is present, loaded, and actively being written to.
-Likely the poller checks for an optical-drive vendor string that cdemu
-doesn't emulate.  Should fall back to `lsblk` presence of `sr*` with `rom`
-type, or at least update to "detected (cdemu)" after a successful read.
-
 ### e2e-test.expect needs update for new ceremony gates
 
 The expect script doesn't account for:
