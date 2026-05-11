@@ -1142,6 +1142,7 @@ impl App {
                 self.data.migrate_sessions = self.disc.prior_sessions.clone();
                 self.disc.prior_sessions.clear();
                 self.disc.optical_dev = None;
+                self.hw.disc_state = HwState::Absent;
                 self.disc.sessions_remaining = None;
                 self.ceremony.set_state_wait_migrate_target();
                 self.set_status("Eject old disc. Insert blank new disc.");

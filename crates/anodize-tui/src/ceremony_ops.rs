@@ -73,6 +73,7 @@ impl App {
     pub(crate) fn tick_wait_disc(&mut self, need_blank: bool) {
         if self.skip_disc {
             self.disc.optical_dev = Some(PathBuf::from("/run/anodize/staging"));
+            self.hw.disc_state = HwState::Present("--skip-disc".into());
             self.disc.sessions_remaining = Some(100);
             let label = if need_blank {
                 "--skip-disc mode: target disc ready. Press [1]."
@@ -108,6 +109,8 @@ impl App {
                         continue;
                     }
                     self.disc.optical_dev = Some(dev.clone());
+                    self.hw.disc_state =
+                        HwState::Present(format!("{} ({cap_summary})", dev.display()));
                     if !need_blank {
                         self.disc.prior_sessions = scan.sessions;
                         self.disc.session_state =
@@ -149,6 +152,7 @@ impl App {
             }
         }
         self.disc.optical_dev = None;
+        self.hw.disc_state = HwState::Absent;
         if let Some(msg) = rw_rejection {
             self.set_status(msg);
         } else if drives.is_empty() {
@@ -220,6 +224,7 @@ impl App {
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.setup.phase = SetupPhase::WaitDisc;
                 self.disc.optical_dev = None;
+                self.hw.disc_state = HwState::Absent;
             }
             Ok(()) => {
                 tracing::info!("tick_intent_burn: write OK, advancing state");
@@ -310,6 +315,7 @@ impl App {
                 self.set_status(format!("Burn failed: {e} — reinsert disc and retry."));
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.disc.optical_dev = None;
+                self.hw.disc_state = HwState::Absent;
             }
         }
     }
@@ -3828,6 +3834,81 @@ mod tests {
             app.status.contains("stale") || app.status.contains("does not exist"),
             "status should mention missing path, got: {}",
             app.status
+        );
+    }
+
+    // ── Disc state tracking tests ──────────────────────────────────────
+
+    #[test]
+    fn tick_wait_disc_skip_disc_sets_disc_state_present() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        assert_eq!(app.hw.disc_state, HwState::Absent);
+
+        app.tick_wait_disc(false);
+
+        assert!(
+            matches!(app.hw.disc_state, HwState::Present(_)),
+            "skip_disc should set disc_state to Present, got {:?}",
+            app.hw.disc_state,
+        );
+    }
+
+    #[test]
+    fn tick_intent_burn_error_clears_disc_state() {
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::Commit;
+        app.hw.disc_state = HwState::Present("/dev/sr0".into());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::media::BurnProgress::Done(Err(anyhow::anyhow!(
+            "write error"
+        ))))
+        .unwrap();
+        app.disc.burn_rx = Some(rx);
+
+        app.tick_intent_burn();
+
+        assert_eq!(
+            app.hw.disc_state,
+            HwState::Absent,
+            "intent burn error should reset disc_state to Absent"
+        );
+    }
+
+    #[test]
+    fn tick_record_burn_error_clears_disc_state() {
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::BurningDisc;
+        app.hw.disc_state = HwState::Present("/dev/sr0".into());
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::media::BurnProgress::Done(Err(anyhow::anyhow!(
+            "laser misfire"
+        ))))
+        .unwrap();
+        app.disc.burn_rx = Some(rx);
+
+        app.tick_record_burn();
+
+        assert_eq!(
+            app.hw.disc_state,
+            HwState::Absent,
+            "record burn error should reset disc_state to Absent"
+        );
+    }
+
+    #[test]
+    fn confirm_migrate_clears_disc_state() {
+        let mut app = migrate_app_with_sessions(2);
+        app.do_migrate_confirm();
+        app.hw.disc_state = HwState::Present("/dev/sr0".into());
+
+        app.update(Action::ConfirmMigrate);
+
+        assert_eq!(
+            app.hw.disc_state,
+            HwState::Absent,
+            "ConfirmMigrate should reset disc_state to Absent"
         );
     }
 }
