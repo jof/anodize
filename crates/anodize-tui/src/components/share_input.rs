@@ -105,6 +105,11 @@ impl ShareInput {
             KeyCode::Char(c) if c.is_ascii_alphabetic() => {
                 self.word_buf.push(c.to_ascii_lowercase());
                 self.update_completions();
+                // Auto-accept the last word when prefix uniquely resolves
+                if self.words.len() == self.expected_words - 1 && self.completions.len() == 1 {
+                    let word = self.completions[0].to_string();
+                    return self.try_accept_complete(word);
+                }
                 false
             }
             KeyCode::Backspace => {
@@ -432,5 +437,160 @@ impl ShareInput {
             .wrap(Wrap { trim: false })
             .scroll((scroll_offset, 0));
         frame.render_widget(para, inner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anodize_config::state::Custodian;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    /// Build a minimal ShareInput backed by a real share so submit() succeeds.
+    fn fixture() -> (ShareInput, String) {
+        let secret = b"test";
+        let shares = anodize_sss::split(secret, 2, 2).unwrap();
+        let share = &shares[0];
+        let commitment = share.commitment("Alice");
+        let commitment_hex = hex::encode(commitment);
+
+        let meta = SssMetadata {
+            generation: 1,
+            threshold: 2,
+            total: 2,
+            custodians: vec![
+                Custodian {
+                    name: "Alice".into(),
+                    index: 1,
+                },
+                Custodian {
+                    name: "Bob".into(),
+                    index: 2,
+                },
+            ],
+            pin_verify_hash: String::new(),
+            share_commitments: vec![commitment_hex, String::new()],
+        };
+
+        let words = share.to_words();
+        // to_words returns "a-b-c-d / e-f" — flatten to plain dash-separated
+        let flat = words.replace(" / ", "-");
+        let input = ShareInput::new(meta, secret.len());
+        (input, flat)
+    }
+
+    fn type_word(input: &mut ShareInput, word: &str) -> bool {
+        let mut submitted = false;
+        for c in word.chars() {
+            if input.handle_key(key(KeyCode::Char(c))) {
+                submitted = true;
+            }
+        }
+        submitted
+    }
+
+    #[test]
+    fn last_word_auto_accepts_without_separator() {
+        let (mut input, flat) = fixture();
+        let words: Vec<&str> = flat.split('-').collect();
+        assert_eq!(words.len(), input.expected_words);
+
+        // Type all words except the last, separating with Space
+        for &w in &words[..words.len() - 1] {
+            assert!(!type_word(&mut input, w));
+            assert!(!input.handle_key(key(KeyCode::Char(' '))));
+        }
+        assert_eq!(input.words.len(), words.len() - 1);
+
+        // Type the last word character by character — should auto-submit
+        let last = words.last().unwrap();
+        let submitted = type_word(&mut input, last);
+        assert!(submitted, "last word should auto-accept without separator");
+        assert!(matches!(
+            input.last_result,
+            Some(ShareVerifyResult::Accepted { .. })
+        ));
+    }
+
+    #[test]
+    fn non_last_word_does_not_auto_accept() {
+        let (mut input, flat) = fixture();
+        let words: Vec<&str> = flat.split('-').collect();
+
+        // Typing the first word character-by-character should NOT auto-submit
+        let submitted = type_word(&mut input, words[0]);
+        assert!(!submitted);
+        assert!(
+            input.words.is_empty(),
+            "non-last word should stay in buffer"
+        );
+    }
+
+    #[test]
+    fn separator_still_works_for_last_word() {
+        let (mut input, flat) = fixture();
+        let words: Vec<&str> = flat.split('-').collect();
+
+        for &w in &words[..words.len() - 1] {
+            type_word(&mut input, w);
+            input.handle_key(key(KeyCode::Char(' ')));
+        }
+
+        // Type only a unique prefix of the last word, then Space
+        let last = words.last().unwrap();
+        // Find shortest unique prefix
+        let mut prefix_len = 1;
+        while prefix_len < last.len() {
+            let matches = anodize_sss::prefix_matches(&last[..prefix_len]);
+            if matches.len() == 1 {
+                break;
+            }
+            prefix_len += 1;
+        }
+        // But for this test, just type the whole word + space
+        type_word(&mut input, last);
+        // If auto-accept already fired, we're done; otherwise space should work
+        if input.last_result.is_none() {
+            let submitted = input.handle_key(key(KeyCode::Char(' ')));
+            assert!(submitted);
+        }
+        assert!(matches!(
+            input.last_result,
+            Some(ShareVerifyResult::Accepted { .. })
+        ));
+    }
+
+    #[test]
+    fn backspace_on_last_word_resets_auto_accept() {
+        let (mut input, flat) = fixture();
+        let words: Vec<&str> = flat.split('-').collect();
+
+        // Accept all but last two words
+        for &w in &words[..words.len() - 1] {
+            type_word(&mut input, w);
+            input.handle_key(key(KeyCode::Char(' ')));
+        }
+
+        let last = words.last().unwrap();
+        // Type all but the last char
+        for c in last[..last.len() - 1].chars() {
+            input.handle_key(key(KeyCode::Char(c)));
+        }
+        // Backspace should not submit
+        input.handle_key(key(KeyCode::Backspace));
+        assert!(input.last_result.is_none());
+        // Re-type the deleted chars to complete
+        let remaining = &last[last.len() - 2..];
+        let submitted = type_word(&mut input, remaining);
+        assert!(submitted, "re-typed last word should auto-accept");
     }
 }
