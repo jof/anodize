@@ -46,6 +46,11 @@ struct Cli {
 
 const CEREMONY_BIN: &str = "anodize-ceremony";
 
+const ANSI_RED: &str = "\x1b[31m";
+const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_BOLD: &str = "\x1b[1m";
+const ANSI_RESET: &str = "\x1b[0m";
+
 /// How often the status banner refreshes when idle.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -229,6 +234,15 @@ fn poweroff() {
     let _ = std::io::Write::flush(&mut std::io::stderr());
 }
 
+/// Return a color-coded status line for the ceremony lock state.
+fn ceremony_status_line(running: bool) -> String {
+    if running {
+        format!("  {ANSI_RED}*** CEREMONY IS RUNNING on another terminal ***{ANSI_RESET}")
+    } else {
+        format!("  {ANSI_GREEN}Ceremony: idle (not running){ANSI_RESET}")
+    }
+}
+
 /// Check whether the ceremony lock file is currently held by another process.
 fn check_ceremony_running(lock_path: &Path) -> bool {
     let file = match OpenOptions::new().write(true).create(false).open(lock_path) {
@@ -239,6 +253,22 @@ fn check_ceremony_running(lock_path: &Path) -> bool {
     Flock::lock(file, FlockArg::LockExclusiveNonblock).is_err()
 }
 
+/// Return a dev-mode warning banner when the `dev-softhsm-usb` feature is
+/// active, or an empty string for production builds.
+fn dev_mode_banner() -> &'static str {
+    if cfg!(feature = "dev-softhsm-usb") {
+        concat!(
+            "\x1b[1m\x1b[31m",
+            "+-------------------------------------------+\n",
+            "|  *** DEV BUILD — NOT FOR PRODUCTION USE ***  |\n",
+            "+-------------------------------------------+",
+            "\x1b[0m",
+        )
+    } else {
+        ""
+    }
+}
+
 fn print_status_banner(lock_path: &Path) {
     // ANSI: clear screen + cursor home; works on both serial and EFI consoles.
     print!("\x1b[2J\x1b[H");
@@ -246,14 +276,21 @@ fn print_status_banner(lock_path: &Path) {
     println!("|      ANODIZE ROOT CA CEREMONY           |");
     println!("|            S E N T I N E L              |");
     println!("+-----------------------------------------+");
+
+    // ── Dev-mode warning ──────────────────────────────────────────────────
+    let banner = dev_mode_banner();
+    if !banner.is_empty() {
+        println!();
+        println!("{banner}");
+    }
+
     println!();
 
     // ── Ceremony lock status (most prominent) ─────────────────────────────
-    if check_ceremony_running(lock_path) {
-        println!("  *** CEREMONY IS RUNNING on another terminal ***");
-    } else {
-        println!("  Ceremony: idle (not running)");
-    }
+    println!(
+        "{}",
+        ceremony_status_line(check_ceremony_running(lock_path))
+    );
     println!();
 
     // ── System health ─────────────────────────────────────────────────────
@@ -433,4 +470,57 @@ fn ensure_cdemu() {
 
     // Give cdemu-daemon a moment to register with VHBA and create /dev/sr0.
     std::thread::sleep(std::time::Duration::from_secs(3));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_line_running_is_red() {
+        let line = ceremony_status_line(true);
+        assert!(line.contains(ANSI_RED), "expected red ANSI code");
+        assert!(line.contains("CEREMONY IS RUNNING"));
+        assert!(line.ends_with(ANSI_RESET));
+    }
+
+    #[test]
+    fn status_line_idle_is_green() {
+        let line = ceremony_status_line(false);
+        assert!(line.contains(ANSI_GREEN), "expected green ANSI code");
+        assert!(line.contains("idle"));
+        assert!(line.ends_with(ANSI_RESET));
+    }
+
+    #[test]
+    fn check_ceremony_running_no_lockfile() {
+        // Non-existent path → not running.
+        assert!(!check_ceremony_running(Path::new(
+            "/tmp/anodize-test-nonexistent.lock"
+        )));
+    }
+
+    #[test]
+    fn check_ceremony_running_unlocked_file() {
+        let path = std::env::temp_dir().join("anodize-test-sentinel-unlocked.lock");
+        // Create file but don't hold a lock.
+        std::fs::File::create(&path).unwrap();
+        assert!(!check_ceremony_running(&path));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn check_ceremony_running_locked_file() {
+        let path = std::env::temp_dir().join("anodize-test-sentinel-locked.lock");
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        // Hold an exclusive lock for the duration of the test.
+        let _lock = Flock::lock(file, FlockArg::LockExclusiveNonblock).unwrap();
+        assert!(check_ceremony_running(&path));
+        std::fs::remove_file(&path).ok();
+    }
 }
