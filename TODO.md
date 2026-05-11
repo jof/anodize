@@ -8,12 +8,6 @@ The `lint --list-usb` help text references this but it doesn't exist yet.
 
 ## Findings from e2e runs
 
-### Sentinel: remove press-N-to-show-network functionality
-
-Now that the refresh loop displays network interface info inline, the
-manual "press N to show network" action is redundant.  Remove the
-keybinding and associated handler.
-
 ### Sentinel: color ceremony-lock status
 
 Use color to indicate ceremony lock state: **red** if a ceremony is
