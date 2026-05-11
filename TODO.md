@@ -8,11 +8,6 @@ The `lint --list-usb` help text references this but it doesn't exist yet.
 
 ## Findings from e2e runs
 
-### Sentinel: double-buffer repaints to prevent flicker
-
-Build the new frame in a buffer before clearing and repainting the
-screen, so the user never sees a blank/partial frame between refreshes.
-
 ### cdemu-swap-disc.sh: gdbus not found
 
 `make cdemu-swap-disc` fails with "ERROR: gdbus not found" because
