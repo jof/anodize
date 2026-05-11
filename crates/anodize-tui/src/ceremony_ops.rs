@@ -3425,6 +3425,57 @@ mod tests {
         assert!(app.data.migrate_source_fingerprint.is_none());
     }
 
+    // ── Migrate build_burn_session tests ─────────────────────────────────
+
+    #[test]
+    fn migrate_build_burn_session_is_pure_copy() {
+        let mut app = migrate_app_with_sessions(3);
+        app.do_migrate_confirm();
+        app.update(Action::ConfirmMigrate);
+
+        let staging =
+            std::env::temp_dir().join(format!("anodize-migrate-test-{}", std::process::id()));
+        std::fs::create_dir_all(&staging).unwrap();
+
+        let session = app
+            .build_burn_session(&staging)
+            .expect("should produce session");
+
+        // Must match the last source session's files exactly.
+        let source_files = &app.data.migrate_sessions.last().unwrap().files;
+        assert_eq!(session.files.len(), source_files.len());
+        for (got, want) in session.files.iter().zip(source_files.iter()) {
+            assert_eq!(got.name, want.name);
+            assert_eq!(got.data, want.data);
+        }
+
+        // No MIGRATION.JSON injected.
+        assert!(
+            !session.files.iter().any(|f| f.name == "MIGRATION.JSON"),
+            "pure copy should not contain MIGRATION.JSON"
+        );
+
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
+    #[test]
+    fn migrate_build_burn_session_empty_returns_none() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.current_op = Some(Operation::MigrateDisc);
+        // migrate_sessions is empty — no source data.
+
+        let staging =
+            std::env::temp_dir().join(format!("anodize-migrate-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&staging).unwrap();
+
+        assert!(
+            app.build_burn_session(&staging).is_none(),
+            "should return None when no source sessions"
+        );
+
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+
     // ── Quit-guard tests ────────────────────────────────────────────────
 
     use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
