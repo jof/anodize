@@ -71,25 +71,20 @@ Both `Commit` and `BurningDisc` phases now show an animated Braille spinner,
 elapsed-seconds counter, and real-time step messages from the background
 burn thread (e.g. "WRITE sector 4/8 (128 KiB, LBA 150)…").
 
-### Sentinel status page: add system health info
+### ~~Sentinel status page: add system health info~~ (DONE)
 
-The sentinel status page should surface more regular system status info.
-Ideas (suggestions welcome):
+The sentinel banner now auto-refreshes every 5 seconds (via `event::poll`)
+and displays system health inline.  Ceremony lock status is shown
+prominently at the top ("CEREMONY IS RUNNING" / "idle").
 
-- Mounts (`/proc/mounts` summary or key mount points)
-- System load averages
-- Current systemd sessions / logged-in users (`loginctl`)
-- Uptime
-- Wall clock / NTP sync status
-- Entropy available (read-only `/proc/sys/kernel/random/entropy_avail`)
-- Memory / tmpfs usage
-- Network interfaces (unexpected interface up = red flag on air-gapped box)
-- Failed systemd units (`systemctl --failed`)
-- Optical drive status (disc loaded, media type, finalization state)
-- NixOS generation / kernel version
-- Block device summary (`lsblk`)
-- Temperature / thermal sensors (`/sys/class/thermal` if available)
-- Secure Boot / TPM status
+Gathered via `syshealth.rs` (pure procfs/sysfs parsers + command runners):
+
+    ceremony lock status, uptime, load averages, memory/swap, entropy,
+    kernel version, NixOS generation, NTP sync, Secure Boot, optical
+    drive model, thermal zones, network interfaces, failed systemd
+    units, block devices
+
+All parsers have unit tests (`syshealth::tests`).
 
 ### cdemu-swap-disc.sh brittle PATH handling
 

@@ -10,18 +10,22 @@
 //! `anodize-ceremony` holds the lock for its entire lifetime; the lock is
 //! released automatically when the ceremony process exits.
 
+#[path = "syshealth.rs"]
+mod syshealth;
+
 use std::fs::OpenOptions;
 use std::mem;
 use std::os::unix::io::{AsFd, AsRawFd};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
-    terminal::{disable_raw_mode, enable_raw_mode},
+    terminal::{self, disable_raw_mode, enable_raw_mode},
 };
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, Flock, FlockArg};
 use nix::sys::reboot::{reboot, RebootMode};
@@ -42,25 +46,29 @@ struct Cli {
 
 const CEREMONY_BIN: &str = "anodize-ceremony";
 
+/// How often the status banner refreshes when idle.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     loop {
-        print_banner();
+        print_status_banner(&cli.lock_file);
 
-        // ── Wait for keypress ──────────────────────────────────────────────────
+        // ── Wait for keypress (with periodic refresh) ─────────────────────────
         enable_raw_mode()?;
-        let key = read_keypress();
+        let key = poll_keypress(REFRESH_INTERVAL);
         disable_raw_mode().ok();
 
         let key = match key {
-            Ok(k) => k,
-            Err(e) => {
+            Some(Ok(k)) => k,
+            Some(Err(e)) => {
                 if show_and_wait(&format!("  keyboard error: {e}")) {
                     break;
                 }
                 continue;
             }
+            None => continue, // timeout — redraw
         };
 
         match key {
@@ -189,6 +197,15 @@ fn read_keypress() -> Result<KeyCode> {
     }
 }
 
+/// Poll for a keypress with a timeout.  Returns `None` on timeout.
+fn poll_keypress(timeout: Duration) -> Option<Result<KeyCode>> {
+    match event::poll(timeout) {
+        Ok(true) => Some(read_keypress()),
+        Ok(false) => None,
+        Err(e) => Some(Err(e.into())),
+    }
+}
+
 /// Ask the operator to confirm shutdown. Returns `true` if confirmed.
 fn confirm_shutdown() -> bool {
     disable_raw_mode().ok();
@@ -216,7 +233,17 @@ fn poweroff() {
     let _ = std::io::Write::flush(&mut std::io::stderr());
 }
 
-fn print_banner() {
+/// Check whether the ceremony lock file is currently held by another process.
+fn check_ceremony_running(lock_path: &Path) -> bool {
+    let file = match OpenOptions::new().write(true).create(false).open(lock_path) {
+        Ok(f) => f,
+        Err(_) => return false, // file doesn't exist → not running
+    };
+    // Try non-blocking exclusive lock.  If it fails → held by another process.
+    Flock::lock(file, FlockArg::LockExclusiveNonblock).is_err()
+}
+
+fn print_status_banner(lock_path: &Path) {
     // ANSI: clear screen + cursor home; works on both serial and EFI consoles.
     print!("\x1b[2J\x1b[H");
     println!("+-----------------------------------------+");
@@ -224,12 +251,134 @@ fn print_banner() {
     println!("|            S E N T I N E L              |");
     println!("+-----------------------------------------+");
     println!();
+
+    // ── Ceremony lock status (most prominent) ─────────────────────────────
+    if check_ceremony_running(lock_path) {
+        println!("  *** CEREMONY IS RUNNING on another terminal ***");
+    } else {
+        println!("  Ceremony: idle (not running)");
+    }
+    println!();
+
+    // ── System health ─────────────────────────────────────────────────────
+    // Compact one-liner rows; best-effort — missing data is silently skipped.
+    if let Some(u) = syshealth::read_uptime() {
+        let la = syshealth::read_loadavg();
+        let load = la
+            .map(|l| format!("  Load: {} {} {}", l.one, l.five, l.fifteen))
+            .unwrap_or_default();
+        println!("  Uptime: {}d {}h {}m{}", u.days, u.hours, u.minutes, load);
+    }
+
+    if let Some(m) = syshealth::read_meminfo() {
+        let used = m.total_kb.saturating_sub(m.avail_kb);
+        println!(
+            "  Memory: {} / {}   Entropy: {}",
+            syshealth::format_kb(used),
+            syshealth::format_kb(m.total_kb),
+            syshealth::read_entropy()
+                .map(|e| {
+                    let tag = if e >= 256 { "OK" } else { "LOW" };
+                    format!("{e} ({tag})")
+                })
+                .unwrap_or_else(|| "?".into()),
+        );
+    }
+
+    // Kernel + NixOS on one line
+    {
+        let kv = syshealth::read_kernel_version().unwrap_or_default();
+        let nv = syshealth::read_nixos_version()
+            .map(|v| format!("   NixOS: {v}"))
+            .unwrap_or_default();
+        if !kv.is_empty() {
+            println!("  {kv}{nv}");
+        }
+    }
+
+    // NTP + Secure Boot on one line
+    {
+        let ntp = syshealth::run_timedatectl_ntp()
+            .map(|v| {
+                if v == "yes" {
+                    "NTP: sync".to_string()
+                } else {
+                    "NTP: NO SYNC".to_string()
+                }
+            })
+            .unwrap_or_default();
+        let sb = match syshealth::read_secure_boot() {
+            Some(true) => "SecureBoot: on",
+            Some(false) => "SecureBoot: off",
+            None => "SecureBoot: N/A",
+        };
+        if !ntp.is_empty() {
+            println!("  {ntp}   {sb}");
+        }
+    }
+
+    // Optical drive
+    match syshealth::read_optical_drive() {
+        Some(model) => println!("  Optical: /dev/sr0 ({model})"),
+        None => println!("  Optical: no drive detected"),
+    }
+
+    // Thermal (if any sensors exist)
+    let zones = syshealth::read_thermal_zones();
+    if !zones.is_empty() {
+        let temps: Vec<String> = zones
+            .iter()
+            .map(|z| format!("{}: {:.0}°C", z.name, z.temp_c))
+            .collect();
+        println!("  Thermal: {}", temps.join(", "));
+    }
+
+    // ── Network interfaces ────────────────────────────────────────────────
+    let net = syshealth::run_network_interfaces();
+    if !net.is_empty() {
+        println!();
+        println!("  Network:");
+        for line in net.lines() {
+            println!("    {line}");
+        }
+    }
+
+    // ── Failed systemd units ──────────────────────────────────────────────
+    let failed = syshealth::run_failed_units();
+    if !failed.is_empty() {
+        println!();
+        println!("  Failed units:");
+        for line in failed.lines() {
+            println!("    {line}");
+        }
+    }
+
+    // ── Block devices ─────────────────────────────────────────────────────
+    let blk = syshealth::run_lsblk();
+    if !blk.is_empty() {
+        println!();
+        println!("  Block devices:");
+        for line in blk.lines() {
+            println!("    {line}");
+        }
+    }
+
+    // ── Key bindings ──────────────────────────────────────────────────────
+    println!();
     println!("  Press Enter to begin the ceremony.");
     if cfg!(feature = "dev-softhsm-usb") {
         println!("  Press [n] to show network info.");
     }
-    println!("  Press [s] to power off.");
-    println!("  Press [q] to exit.");
+    println!("  Press [s] to power off.  Press [q] to exit.");
+
+    // Terminal size hint
+    let size_hint = terminal::size()
+        .map(|(c, r)| format!("  [{c}×{r}]"))
+        .unwrap_or_default();
+    println!(
+        "  (refreshes every {}s){size_hint}",
+        REFRESH_INTERVAL.as_secs()
+    );
     println!();
 }
 
