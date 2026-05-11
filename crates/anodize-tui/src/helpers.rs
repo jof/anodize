@@ -249,6 +249,25 @@ pub fn hex_serial_to_bytes(hex: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+// ── Certificate field extraction ──────────────────────────────────────────────
+
+/// Extract the subject DN string and approximate validity period in days from
+/// a DER-encoded X.509 certificate. Returns `None` if the DER cannot be parsed.
+pub fn cert_subject_and_validity_days(der: &[u8]) -> Option<(String, u32)> {
+    let cert = Certificate::from_der(der).ok()?;
+    let subject = cert.tbs_certificate.subject.to_string();
+    let not_before = cert.tbs_certificate.validity.not_before;
+    let not_after = cert.tbs_certificate.validity.not_after;
+    // Convert x509_cert::time::Time → SystemTime for duration arithmetic.
+    let before: SystemTime = not_before.to_system_time();
+    let after: SystemTime = not_after.to_system_time();
+    let days = after
+        .duration_since(before)
+        .map(|d| (d.as_secs() / 86400) as u32)
+        .unwrap_or(0);
+    Some((subject, days))
+}
+
 // ── Certificate preview (compiled CSR + profile) ─────────────────────────────
 
 /// Build a human-readable preview of the certificate that will result from
@@ -660,6 +679,71 @@ mod tests {
         // Should fall back to config-provided issuer DN.
         assert!(text.contains("FallbackCN"));
         assert!(text.contains("FallbackOrg"));
+    }
+
+    // ── cert_subject_and_validity_days tests ─────────────────────────────────
+
+    #[test]
+    fn cert_subject_and_validity_returns_correct_fields() {
+        let der = build_test_root_cert_der("CN=Test Root,O=Acme,C=US");
+        let (subject, days) = cert_subject_and_validity_days(&der).expect("should parse");
+        assert!(subject.contains("Test Root"), "subject={subject}");
+        assert!(subject.contains("Acme"), "subject={subject}");
+        // build_test_root_cert_der uses 86400s = 1 day
+        assert_eq!(days, 1);
+    }
+
+    #[test]
+    fn cert_subject_and_validity_multi_year() {
+        // Build a cert with ~5 years validity (1825 days).
+        use der::Encode;
+        use p256::ecdsa::SigningKey;
+        use p256::pkcs8::EncodePublicKey;
+        use x509_cert::certificate::{Certificate, TbsCertificate, Version};
+        use x509_cert::serial_number::SerialNumber;
+        use x509_cert::time::Validity;
+
+        let sk = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let vk = sk.verifying_key();
+        let spki_der = vk.to_public_key_der().expect("spki");
+        let spki =
+            spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse spki");
+        let name = x509_cert::name::Name::from_str("CN=Sub CA,O=Org,C=DE").unwrap();
+        let validity =
+            Validity::from_now(std::time::Duration::from_secs(1825 * 86400)).expect("validity");
+        let serial = SerialNumber::new(&[0x02]).unwrap();
+        let alg = spki::AlgorithmIdentifierOwned {
+            oid: der::oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"),
+            parameters: None,
+        };
+        let tbs = TbsCertificate {
+            version: Version::V3,
+            serial_number: serial,
+            signature: alg.clone(),
+            issuer: name.clone(),
+            validity,
+            subject: name,
+            subject_public_key_info: spki,
+            issuer_unique_id: None,
+            subject_unique_id: None,
+            extensions: None,
+        };
+        let cert = Certificate {
+            tbs_certificate: tbs,
+            signature_algorithm: alg,
+            signature: der::asn1::BitString::from_bytes(&[0u8; 64]).expect("bitstring"),
+        };
+        let der = cert.to_der().expect("encode cert");
+
+        let (subject, days) = cert_subject_and_validity_days(&der).expect("should parse");
+        assert!(subject.contains("Sub CA"), "subject={subject}");
+        // Allow ±1 day for rounding
+        assert!((1824..=1825).contains(&days), "expected ~1825, got {days}");
+    }
+
+    #[test]
+    fn cert_subject_and_validity_invalid_der() {
+        assert!(cert_subject_and_validity_days(b"not valid DER").is_none());
     }
 
     #[test]
