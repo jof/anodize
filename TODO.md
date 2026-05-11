@@ -131,6 +131,12 @@ Fixed: CertPreview now parses the actual cert from `cert_der` to extract
 subject and validity, instead of always showing root CA profile fields.
 Falls back to profile data only when `cert_der` is absent.
 
+### Sentinel: remove press-N-to-show-network functionality
+
+Now that the refresh loop displays network interface info inline, the
+manual "press N to show network" action is redundant.  Remove the
+keybinding and associated handler.
+
 ### cdemu-swap-disc.sh still broken in `make` target
 
 `make cdemu-swap-disc` still fails with "ERROR: gdbus not found" because the
