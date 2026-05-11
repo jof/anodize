@@ -8,10 +8,10 @@ The `lint --list-usb` help text references this but it doesn't exist yet.
 
 ## Findings from e2e runs
 
-### Sentinel: color ceremony-lock status
+### ~~Sentinel: color ceremony-lock status~~ ✅
 
-Use color to indicate ceremony lock state: **red** if a ceremony is
-running on another terminal, **green** if the appliance is idle/ready.
+~~Use color to indicate ceremony lock state: **red** if a ceremony is
+running on another terminal, **green** if the appliance is idle/ready.~~
 
 ### Sentinel: dev-mode warning banner
 
