@@ -17,6 +17,29 @@ deep in `/nix/store/...glib-2.86.3-bin/bin/gdbus`.
 Workaround: run the swap commands manually via debug SSH as ceremony user.
 Fix: have the NixOS module drop a wrapper at `/run/anodize/bin/gdbus`.
 
+### Disc status bar shows "not detected" while disc is loaded
+
+Throughout the ceremony the bottom status bar reads `Disc: ○ not detected`
+even when `/dev/sr0` is present, loaded, and actively being written to.
+Likely the poller checks for an optical-drive vendor string that cdemu
+doesn't emulate.  Should fall back to `lsblk` presence of `sr*` with `rom`
+type, or at least update to "detected (cdemu)" after a successful read.
+
+### e2e-test.expect needs update for new ceremony gates
+
+The expect script doesn't account for:
+- **Clock re-confirm** gate that fires before every signing operation
+- **Two-step write confirmation** (press `[1]` then `[Enter]`) on disc writes
+- **KeyBackup two-phase flow** (Pair first, then Backup in a second session)
+- **Migrate Disc** flow with cdemu disc swap
+
+### Disc migration skips shuttle export
+
+Unlike all other operations, Migrate Disc ends with "no USB export" and no
+option to copy artifacts to the shuttle.  If the new disc is the only copy
+of state.json / certs / CRLs, the shuttle should still receive a fresh
+export so operators have an offline backup of the latest manifest.
+
 ## Future: cross-vendor HSM resilience
 
 Currently all fleet devices must share the same backend kind.  Future work:
