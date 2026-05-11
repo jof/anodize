@@ -256,7 +256,8 @@ impl ShareInput {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(
-                "Share Input — {}/{} shares",
+                "Share Input (Gen {}) — {}/{} shares",
+                self.sss_meta.generation,
                 self.collected.len(),
                 if self.verify_all {
                     self.sss_meta.total

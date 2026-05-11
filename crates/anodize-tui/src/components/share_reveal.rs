@@ -43,10 +43,12 @@ pub struct ShareReveal {
     pub revealed: Vec<bool>,
     /// Vertical scroll offset for the content area.
     pub scroll_offset: u16,
+    /// SSS generation counter — displayed on paper for custodian reference.
+    pub generation: u64,
 }
 
 impl ShareReveal {
-    pub fn new(shares: Vec<Share>, custodian_names: &[String]) -> Self {
+    pub fn new(shares: Vec<Share>, custodian_names: &[String], generation: u64) -> Self {
         let named: Vec<NamedShare> = shares
             .iter()
             .zip(custodian_names.iter())
@@ -67,6 +69,7 @@ impl ShareReveal {
             visible: false,
             revealed: vec![false; count],
             scroll_offset: 0,
+            generation,
         }
     }
 
@@ -111,7 +114,8 @@ impl ShareReveal {
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(
-                "Share Distribution — {}/{}",
+                "Share Distribution (Gen {}) — {}/{}",
+                self.generation,
                 (self.current + 1).min(self.shares.len()),
                 self.shares.len()
             ))
@@ -204,6 +208,12 @@ impl ShareReveal {
                 lines.push(Line::from(Span::styled(
                     format!("  Share #{} for: {}", ns.index, ns.custodian_name),
                     bold,
+                )));
+                lines.push(Line::from(Span::styled(
+                    format!("  Generation: {}", self.generation),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(""));
 
@@ -310,7 +320,7 @@ mod tests {
     #[test]
     fn s_key_reveals_once_and_cannot_hide() {
         let (shares, names) = test_shares();
-        let mut sr = ShareReveal::new(shares, &names);
+        let mut sr = ShareReveal::new(shares, &names, 1);
 
         assert!(!sr.visible);
         assert!(!sr.revealed[0]);
@@ -329,7 +339,7 @@ mod tests {
     #[test]
     fn enter_advances_to_next_share() {
         let (shares, names) = test_shares();
-        let mut sr = ShareReveal::new(shares, &names);
+        let mut sr = ShareReveal::new(shares, &names, 1);
 
         // Reveal share 0
         sr.handle_key(key(KeyCode::Char('S')));
@@ -346,7 +356,7 @@ mod tests {
     #[test]
     fn enter_ignored_when_not_revealed() {
         let (shares, names) = test_shares();
-        let mut sr = ShareReveal::new(shares, &names);
+        let mut sr = ShareReveal::new(shares, &names, 1);
 
         // Enter without revealing should do nothing
         sr.handle_key(key(KeyCode::Enter));
@@ -406,7 +416,7 @@ mod tests {
     #[test]
     fn all_revealed_after_both_confirmed() {
         let (shares, names) = test_shares();
-        let mut sr = ShareReveal::new(shares, &names);
+        let mut sr = ShareReveal::new(shares, &names, 1);
 
         // Share 0: reveal + confirm
         sr.handle_key(key(KeyCode::Char('s')));
