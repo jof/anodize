@@ -79,10 +79,6 @@ fn main() -> Result<()> {
                 }
                 continue;
             }
-            KeyCode::Char('n') | KeyCode::Char('N') if cfg!(feature = "dev-softhsm-usb") => {
-                show_network_info();
-                continue;
-            }
             KeyCode::Enter => {}
             _ => continue,
         }
@@ -366,9 +362,6 @@ fn print_status_banner(lock_path: &Path) {
     // ── Key bindings ──────────────────────────────────────────────────────
     println!();
     println!("  Press Enter to begin the ceremony.");
-    if cfg!(feature = "dev-softhsm-usb") {
-        println!("  Press [n] to show network info.");
-    }
     println!("  Press [s] to power off.  Press [q] to exit.");
 
     // Terminal size hint
@@ -440,43 +433,4 @@ fn ensure_cdemu() {
 
     // Give cdemu-daemon a moment to register with VHBA and create /dev/sr0.
     std::thread::sleep(std::time::Duration::from_secs(3));
-}
-
-/// Run `ip -brief addr show` and display the output (dev builds only).
-fn show_network_info() {
-    disable_raw_mode().ok();
-    println!("\r");
-    println!("  === Network Interfaces ===\r");
-    match Command::new("ip").args(["-brief", "addr", "show"]).output() {
-        Ok(out) => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines() {
-                println!("  {line}\r");
-            }
-        }
-        Err(e) => println!("  ip: {e}\r"),
-    }
-    println!("\r");
-    println!("  === SSH Host Keys ===\r");
-    match Command::new("sh")
-        .args([
-            "-c",
-            "for f in /etc/ssh/ssh_host_*_key.pub; do ssh-keygen -lf \"$f\"; done",
-        ])
-        .output()
-    {
-        Ok(out) => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            for line in text.lines() {
-                println!("  {line}\r");
-            }
-        }
-        Err(e) => println!("  ssh-keygen: {e}\r"),
-    }
-    println!("\r");
-    println!("  Press any key to return.\r");
-
-    enable_raw_mode().ok();
-    let _ = read_keypress();
-    disable_raw_mode().ok();
 }
