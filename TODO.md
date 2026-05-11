@@ -71,6 +71,26 @@ Both `Commit` and `BurningDisc` phases now show an animated Braille spinner,
 elapsed-seconds counter, and real-time step messages from the background
 burn thread (e.g. "WRITE sector 4/8 (128 KiB, LBA 150)…").
 
+### Sentinel status page: add system health info
+
+The sentinel status page should surface more regular system status info.
+Ideas (suggestions welcome):
+
+- Mounts (`/proc/mounts` summary or key mount points)
+- System load averages
+- Current systemd sessions / logged-in users (`loginctl`)
+- Uptime
+- Wall clock / NTP sync status
+- Entropy available (read-only `/proc/sys/kernel/random/entropy_avail`)
+- Memory / tmpfs usage
+- Network interfaces (unexpected interface up = red flag on air-gapped box)
+- Failed systemd units (`systemctl --failed`)
+- Optical drive status (disc loaded, media type, finalization state)
+- NixOS generation / kernel version
+- Block device summary (`lsblk`)
+- Temperature / thermal sensors (`/sys/class/thermal` if available)
+- Secure Boot / TPM status
+
 ### cdemu-swap-disc.sh brittle PATH handling
 
 The script failed on the debug user because `gdbus` is only in the Nix
@@ -92,4 +112,35 @@ Post-rekey smoke-check implemented: after `change_pin` succeeds on all HSMs,
 (already cached in memory from the quorum phase) and confirms the HSM rejects
 it.  If the old PIN still works, the ceremony aborts with a CRITICAL error
 before writing to disc.
+
+## Findings from e2e run (2026-05-11)
+
+Full 7-of-8 phase lifecycle (KeyBackup skipped — single SoftHSM) on bare-metal
+dev VM (192.168.178.76).  Phases run: InitRoot → SignCsr → RevokeCert →
+IssueCrl → RekeyShares → MigrateDisc → ValidateDisc.
+
+### Confirmed fixes working
+
+- **Share word count**: displays "9 groups, 34 words" — correct.
+- **Hex serial revocation**: RevokeCert shows serial `632AAC91F575A0ED2B8BA361B19FD343` in hex.
+- **Shuttle copy**: shuttle artifacts present after every phase (root.crt, root.crl, audit.log, intermediate.crt, revoked.toml).
+- **ValidateDisc**: 4 PASS / 0 WARN / 0 ERROR on migrated disc.
+- **Audit chain**: hash chain verified across all sessions.
+- **MigrateDisc**: 9 sessions consolidated to new blank disc successfully.
+- **RekeyShares**: custodian rotation (Alice/Bob → Charlie/Diana) accepted, new shares verified.
+- **Two-step write confirmation**: disc write dialogs require `[1]` then `[Enter]`.
+
+### ~~BUG: CertPreview shows root cert fields during SignCsr~~ (FIXED)
+
+Fixed: CertPreview now parses the actual cert from `cert_der` to extract
+subject and validity, instead of always showing root CA profile fields.
+Falls back to profile data only when `cert_der` is absent.
+
+### cdemu-swap-disc.sh still broken in `make` target
+
+`make cdemu-swap-disc` still fails with "ERROR: gdbus not found" because the
+script's fallback path (`/run/current-system/sw/bin/gdbus`) doesn't exist.
+The actual path is deep in `/nix/store/...glib-2.86.3-bin/bin/gdbus`.
+Workaround: run the swap commands manually via debug SSH as ceremony user.
+The TODO item from the prior run (brittle PATH handling) remains open.
 
