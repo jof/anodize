@@ -97,7 +97,7 @@ pub struct HsmConfig {
 /// Named HSM backend model. Each variant maps to a concrete implementation
 /// in `anodize-hsm` that knows its own module paths, factory credentials,
 /// and native SDK quirks.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HsmBackendKind {
     Softhsm,

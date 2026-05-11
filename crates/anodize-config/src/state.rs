@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::RevocationEntry;
+use crate::{HsmBackendKind, RevocationEntry};
 
 /// Current schema version. Increment on breaking changes.
 pub const STATE_VERSION: u32 = 1;
@@ -40,10 +40,11 @@ pub struct SessionState {
     /// Entry hash of the last audit log record, for chain verification.
     pub last_audit_hash: String,
     /// Sequence number of the last consumed YubiHSM audit log entry.
-    /// `None` for states created before audit log tracking was added, or
-    /// when using a backend that has no internal audit log (e.g. SoftHSM).
+    /// `None` when using a backend that has no internal audit log (e.g. SoftHSM).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_hsm_log_seq: Option<u64>,
+    /// Fleet of enrolled HSM devices.
+    pub fleet: HsmFleet,
 }
 
 /// SSS metadata stored on the audit disc.
@@ -51,6 +52,8 @@ pub struct SessionState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SssMetadata {
+    /// Share generation counter. Starts at 1, incremented on every RekeyShares.
+    pub generation: u64,
     /// Minimum shares needed to reconstruct (k).
     pub threshold: u8,
     /// Total shares distributed (n).
@@ -72,6 +75,67 @@ pub struct Custodian {
     pub name: String,
     /// Share index (x-coordinate), 1-indexed.
     pub index: u8,
+}
+
+// ── HSM Fleet ───────────────────────────────────────────────────────────────
+
+/// Fleet of enrolled HSM devices tracked in STATE.JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HsmFleet {
+    pub devices: Vec<HsmDevice>,
+}
+
+impl Default for HsmFleet {
+    fn default() -> Self {
+        Self {
+            devices: Vec::new(),
+        }
+    }
+}
+
+/// A single HSM device enrolled in the fleet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HsmDevice {
+    /// Backend-specific unique ID (USB serial for YubiHSM, token label for
+    /// PKCS#11, ARN for CloudHSM, etc.).
+    pub device_id: String,
+    /// Human-readable model description, e.g. "YubiHSM2 fw 2.2.0".
+    pub model: String,
+    /// Which backend type this device uses. All fleet devices must share the
+    /// same backend for now.
+    pub backend: HsmBackendKind,
+    /// ISO 8601 timestamp when this device was first enrolled.
+    pub enrolled_at: String,
+    /// ISO 8601 timestamp of the last ceremony session that used this device.
+    pub last_seen_at: String,
+    /// Current device status.
+    pub status: HsmDeviceStatus,
+}
+
+/// Lifecycle status of an HSM device in the fleet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state")]
+pub enum HsmDeviceStatus {
+    /// Device is active and available for ceremony operations.
+    Active,
+    /// Device has been removed from the fleet (kept for audit trail).
+    Removed {
+        /// ISO 8601 timestamp when removed.
+        at: String,
+        /// Human-readable reason for removal.
+        reason: String,
+    },
+}
+
+impl HsmFleet {
+    /// Return device IDs of all active fleet members.
+    pub fn active_device_ids(&self) -> Vec<&str> {
+        self.devices
+            .iter()
+            .filter(|d| matches!(d.status, HsmDeviceStatus::Active))
+            .map(|d| d.device_id.as_str())
+            .collect()
+    }
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────
@@ -177,6 +241,7 @@ mod tests {
             root_cert_sha256: "a".repeat(64),
             root_cert_der_b64: "MIIB...".into(),
             sss: SssMetadata {
+                generation: 1,
                 threshold: 2,
                 total: 3,
                 custodians: vec![
@@ -200,6 +265,16 @@ mod tests {
             crl_number: 0,
             last_audit_hash: "f".repeat(64),
             last_hsm_log_seq: None,
+            fleet: HsmFleet {
+                devices: vec![HsmDevice {
+                    device_id: "0034332673".into(),
+                    model: "YubiHSM2 fw 2.2.0".into(),
+                    backend: crate::HsmBackendKind::Yubihsm,
+                    enrolled_at: "2026-01-01T00:00:00Z".into(),
+                    last_seen_at: "2026-01-01T00:00:00Z".into(),
+                    status: HsmDeviceStatus::Active,
+                }],
+            },
         }
     }
 
@@ -247,5 +322,77 @@ mod tests {
         let json = serde_json::to_vec(&state).unwrap();
         let err = SessionState::from_json(&json).unwrap_err();
         assert!(matches!(err, StateValidationError::SssInvalid(_)));
+    }
+
+    #[test]
+    fn fleet_active_device_ids_filters_removed() {
+        let mut state = example_state();
+        state.fleet.devices.push(HsmDevice {
+            device_id: "0034332674".into(),
+            model: "YubiHSM2 fw 2.2.0".into(),
+            backend: crate::HsmBackendKind::Yubihsm,
+            enrolled_at: "2026-02-01T00:00:00Z".into(),
+            last_seen_at: "2026-02-01T00:00:00Z".into(),
+            status: HsmDeviceStatus::Removed {
+                at: "2026-03-01T00:00:00Z".into(),
+                reason: "decommissioned".into(),
+            },
+        });
+        let active = state.fleet.active_device_ids();
+        assert_eq!(active, vec!["0034332673"]);
+    }
+
+    #[test]
+    fn fleet_empty_roundtrip() {
+        let mut state = example_state();
+        state.fleet = HsmFleet::default();
+        let json = state.to_json();
+        let parsed = SessionState::from_json(&json).unwrap();
+        assert!(parsed.fleet.devices.is_empty());
+        assert!(parsed.fleet.active_device_ids().is_empty());
+    }
+
+    #[test]
+    fn fleet_multi_device_roundtrip() {
+        let mut state = example_state();
+        state.fleet.devices.push(HsmDevice {
+            device_id: "0034332674".into(),
+            model: "YubiHSM2 fw 2.3.0".into(),
+            backend: crate::HsmBackendKind::Yubihsm,
+            enrolled_at: "2026-02-01T00:00:00Z".into(),
+            last_seen_at: "2026-02-15T00:00:00Z".into(),
+            status: HsmDeviceStatus::Active,
+        });
+        let json = state.to_json();
+        let parsed = SessionState::from_json(&json).unwrap();
+        assert_eq!(parsed.fleet.devices.len(), 2);
+        assert_eq!(parsed.fleet.active_device_ids().len(), 2);
+    }
+
+    #[test]
+    fn generation_roundtrip() {
+        let mut state = example_state();
+        state.sss.generation = 42;
+        let json = state.to_json();
+        let parsed = SessionState::from_json(&json).unwrap();
+        assert_eq!(parsed.sss.generation, 42);
+    }
+
+    #[test]
+    fn removed_device_preserves_reason() {
+        let mut state = example_state();
+        state.fleet.devices[0].status = HsmDeviceStatus::Removed {
+            at: "2026-06-01T00:00:00Z".into(),
+            reason: "tamper suspected".into(),
+        };
+        let json = state.to_json();
+        let parsed = SessionState::from_json(&json).unwrap();
+        match &parsed.fleet.devices[0].status {
+            HsmDeviceStatus::Removed { at, reason } => {
+                assert_eq!(at, "2026-06-01T00:00:00Z");
+                assert_eq!(reason, "tamper suspected");
+            }
+            _ => panic!("expected Removed status"),
+        }
     }
 }
