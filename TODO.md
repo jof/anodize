@@ -166,3 +166,61 @@ The actual path is deep in `/nix/store/...glib-2.86.3-bin/bin/gdbus`.
 Workaround: run the swap commands manually via debug SSH as ceremony user.
 The TODO item from the prior run (brittle PATH handling) remains open.
 
+## Findings from e2e run (2026-05-11, bare-metal, two real YubiHSMs)
+
+Full 8-phase lifecycle on bare-metal dev VM (192.168.178.76) with two
+YubiHSM 2 devices (serials 0034332673, 0034332674).  Phases 1–5 passed;
+Phase 6 (RekeyShares) hit a bug.
+
+### Confirmed working
+
+- **InitRoot**: 2-of-2 SSS, custodians Alice/Bob, keygen, cert, disc write.
+- **KeyBackup**: both HSMs discovered, pair + backup completed, public keys match.
+- **SignCsr**: CertPreview fix validated — shows intermediate subject/validity.
+- **RevokeCert**: certificate picker, reason entry, CRL #2 written.
+- **IssueCrl**: CRL #3 refresh, 1 revoked entry carried forward.
+- **Sentinel health banner**: auto-refreshing, all fields present.
+
+### ~~BUG: RekeyShares fails — primary HSM identifier mismatch in backup PIN propagation~~ (FIXED)
+
+All three sub-bugs fixed in the multi-HSM fleet redesign:
+
+1. `do_rekey_change_pin_backups()` now reads fleet device IDs from STATE.JSON
+   and uses `HwContext.device_id` to identify the primary HSM (skips it when
+   propagating PIN changes to the rest of the fleet).
+2. `do_rekey_verify_old_pin_rejected()` now verifies the old PIN is rejected
+   on ALL active fleet devices (via `open_session_by_id` per device), not just
+   whichever device `open_session` happens to try first.
+3. Menu description changed from "keep same PIN" to "new custodians + new HSM PIN".
+
+## Multi-HSM fleet architecture
+
+STATE.JSON now contains an `HsmFleet` with `HsmDevice` entries tracking each
+enrolled device by `device_id` (USB serial for YubiHSM, token label for SoftHSM),
+model description, backend type, enrollment timestamp, last-seen timestamp, and
+status (Active / Removed).
+
+- `SssMetadata.generation` tracks the SSS share generation (incremented on rekey).
+- `HsmBackend.open_session_by_id(device_id, pin)` targets a specific device.
+- `open_session_any_recognized(fleet_ids, pin)` for fleet-aware login with
+  membership enforcement.
+- InitRoot bootstraps the primary HSM and enrolls it in the fleet.
+- KeyBackup enrolls the destination device in the fleet after successful
+  pair/backup.
+- Daily ops (quorum login) use fleet-aware session opening and update
+  `last_seen_at`.
+
+### Future: cross-vendor HSM resilience
+
+Currently all fleet devices must share the same backend kind.  Future work:
+
+- **Mixed-vendor fleets**: allow `HsmDevice` entries with different `backend`
+  values; dispatch `open_session_by_id` through the correct backend per device.
+- **Quorum-based fleet changes**: require threshold custodian approval before
+  adding or removing fleet members.
+- **Fleet health checks**: during ValidateDisc, enumerate connected devices,
+  cross-reference fleet membership, report missing/unexpected devices.
+- **Automatic failover**: if the usual primary device is absent at ceremony
+  start, `open_session_any_recognized` already falls through to the next fleet
+  member.  Add UI indication of which device was selected.
+
