@@ -739,6 +739,7 @@ mod tests {
                 root_cert_sha256: "abcdef".into(),
                 root_cert_der_b64: String::new(),
                 sss: SssMetadata {
+                    generation: 1,
                     threshold: 2,
                     total: 3,
                     custodians: vec![
@@ -763,6 +764,7 @@ mod tests {
                 crl_number: 5,
                 last_audit_hash: "deadbeef".into(),
                 last_hsm_log_seq: None,
+                fleet: anodize_config::state::HsmFleet::default(),
             }),
         }
     }

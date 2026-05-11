@@ -36,6 +36,9 @@ pub struct HwContext {
     pub shuttle_state: HwState,
     pub actor: Option<HsmActor>,
     pub root_key: Option<KeyHandle>,
+    /// Backend-specific device ID of the currently authenticated HSM
+    /// (USB serial for YubiHSM, token label for SoftHSM).
+    pub device_id: Option<String>,
 }
 
 impl HwContext {
@@ -46,6 +49,7 @@ impl HwContext {
             shuttle_state: HwState::Absent,
             actor: None,
             root_key: None,
+            device_id: None,
         }
     }
 }

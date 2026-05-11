@@ -431,14 +431,57 @@ impl App {
             Err(e) => return Err(format!("HSM bootstrap failed: {e}")),
         };
 
-        let serial = target.serial_number.clone();
+        // Determine device_id and model for fleet enrollment via inventory.
+        // YubiHSM: USB serial number; SoftHSM: token label.
+        let (device_id, model) = {
+            let inventory = anodize_hsm::create_inventory(cfg.backend)
+                .map_err(|e| format!("Inventory init: {e}"))?;
+            let devices = inventory
+                .enumerate_devices()
+                .map_err(|e| format!("Device enumeration: {e}"))?;
+            match devices.iter().find(|d| d.serial == target.serial_number) {
+                Some(d) => (d.serial.clone(), d.model.clone()),
+                None => (target.serial_number.clone(), format!("{:?}", cfg.backend)),
+            }
+        };
+
+        let now = {
+            let d = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            format!("{}Z", d.as_secs())
+        };
+
+        // Enroll the bootstrapped device into the fleet in STATE.JSON.
+        use anodize_config::state::{HsmDevice, HsmDeviceStatus, HsmFleet};
+        let fleet_device = HsmDevice {
+            device_id: device_id.clone(),
+            model,
+            backend: cfg.backend,
+            enrolled_at: now.clone(),
+            last_seen_at: now,
+            status: HsmDeviceStatus::Active,
+        };
+
+        if let Some(ref mut state) = self.disc.session_state {
+            state.fleet = HsmFleet {
+                devices: vec![fleet_device],
+            };
+        }
+
+        tracing::info!(
+            device_id = %device_id,
+            "do_bootstrap_hsm: enrolled device in fleet"
+        );
+
         let actor = HsmActor::spawn(hsm);
         self.hw.actor = Some(actor);
+        self.hw.device_id = Some(device_id.clone());
         self.hw.hsm_state = HwState::Ready(format!(
-            "bootstrapped (serial={serial}, label={})",
+            "bootstrapped (id={device_id}, label={})",
             cfg.token_label
         ));
-        tracing::info!(serial, label = %cfg.token_label, "do_bootstrap_hsm: token ready");
+        tracing::info!(device_id, label = %cfg.token_label, "do_bootstrap_hsm: token ready");
         Ok(())
     }
 
@@ -461,12 +504,60 @@ impl App {
             Err(e) => return Err(format!("HSM backend error: {e}")),
         };
 
-        let hsm = match backend.open_session(&cfg.token_label, &pin) {
-            Ok(h) => h,
-            Err(e) => return Err(format!("HSM open/login failed: {e}")),
+        // Fleet-aware login: if STATE.JSON has active fleet devices, use
+        // open_session_any_recognized to authenticate against a known device
+        // and enforce fleet membership (hard deny for unknown devices).
+        let fleet_ids: Vec<String> = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| {
+                s.fleet
+                    .active_device_ids()
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let (device_id, hsm) = if fleet_ids.is_empty() {
+            // Pre-fleet (InitRoot bootstrap) — legacy path.
+            let hsm = backend
+                .open_session(&cfg.token_label, &pin)
+                .map_err(|e| format!("HSM open/login failed: {e}"))?;
+            (None, hsm)
+        } else {
+            let inventory = anodize_hsm::create_inventory(cfg.backend)
+                .map_err(|e| format!("HSM inventory error: {e}"))?;
+            let id_refs: Vec<&str> = fleet_ids.iter().map(|s| s.as_str()).collect();
+            let (did, hsm) =
+                anodize_hsm::open_session_any_recognized(&*backend, &*inventory, &id_refs, &pin)
+                    .map_err(|e| format!("Fleet login failed: {e}"))?;
+            tracing::info!(device_id = %did, "Fleet login: authenticated to known device");
+            (Some(did), hsm)
         };
+
+        // Update last_seen_at for the device we authenticated to.
+        if let Some(ref did) = device_id {
+            if let Some(ref mut state) = self.disc.session_state {
+                let now = {
+                    let d = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    // Good-enough ISO 8601 without pulling in chrono
+                    format!("{}Z", d.as_secs())
+                };
+                for dev in &mut state.fleet.devices {
+                    if dev.device_id == *did {
+                        dev.last_seen_at = now.clone();
+                    }
+                }
+            }
+        }
+
         let actor = HsmActor::spawn(hsm);
         self.hw.actor = Some(actor);
+        self.hw.device_id = device_id;
         self.hw.hsm_state = HwState::Ready("authenticated via SSS quorum".into());
         Ok(())
     }
@@ -726,8 +817,12 @@ impl App {
 
     /// Execute the backup/pair HSM operation (no audit logging — that happens
     /// in build_burn_session when the record is written to disc).
+    ///
+    /// After a successful operation, the destination device is enrolled into
+    /// the fleet (if not already a member).
     pub(crate) fn do_backup_execute(&mut self) {
         let pin = secrecy::SecretString::new(self.pin_buf.clone());
+        let backend_kind = self.profile.as_ref().map(|p| p.hsm.backend);
         if let Some(ref profile) = self.profile {
             match anodize_hsm::create_backup(profile.hsm.backend) {
                 Ok(backup_impl) => {
@@ -739,6 +834,40 @@ impl App {
                             "Backend init: {e}"
                         ));
                     self.utilities.backup.render_lines();
+                }
+            }
+        }
+
+        // Enroll the destination device in the fleet if backup succeeded.
+        if self.utilities.backup.phase == crate::modes::utilities::backup::BackupPhase::Done {
+            if let (Some(dest_idx), Some(bk)) = (self.utilities.backup.dest_idx, backend_kind) {
+                let dest_id = self.utilities.backup.targets[dest_idx].identifier.clone();
+                let dest_desc = self.utilities.backup.targets[dest_idx].description.clone();
+
+                if let Some(ref mut state) = self.disc.session_state {
+                    let already = state.fleet.devices.iter().any(|d| d.device_id == dest_id);
+                    if !already {
+                        let now = {
+                            let d = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default();
+                            format!("{}Z", d.as_secs())
+                        };
+                        use anodize_config::state::{HsmDevice, HsmDeviceStatus};
+                        state.fleet.devices.push(HsmDevice {
+                            device_id: dest_id.clone(),
+                            model: dest_desc,
+                            backend: bk,
+                            enrolled_at: now.clone(),
+                            last_seen_at: now,
+                            status: HsmDeviceStatus::Active,
+                        });
+                        tracing::info!(
+                            device_id = %dest_id,
+                            fleet_size = state.fleet.devices.len(),
+                            "KeyBackup: enrolled destination device in fleet"
+                        );
+                    }
                 }
             }
         }
@@ -806,6 +935,7 @@ impl App {
             root_cert_sha256: "0".repeat(64), // placeholder, updated after keygen
             root_cert_der_b64: String::new(), // placeholder
             sss: SssMetadata {
+                generation: 1,
                 threshold,
                 total,
                 custodians,
@@ -816,6 +946,7 @@ impl App {
             crl_number: 0,
             last_audit_hash: String::new(),
             last_hsm_log_seq: None,
+            fleet: anodize_config::state::HsmFleet::default(),
         };
 
         self.disc.session_state = Some(state);
@@ -824,7 +955,7 @@ impl App {
 
         // Create ShareReveal component
         self.sss.share_reveal = Some(crate::components::share_reveal::ShareReveal::new(
-            shares, &names,
+            shares, &names, 1,
         ));
 
         self.ceremony.state = CeremonyPhase::Planning(PlanningState::ShareReveal);
@@ -959,6 +1090,7 @@ impl App {
             .collect();
 
         if let Some(ref mut state) = self.disc.session_state {
+            state.sss.generation += 1;
             state.sss.threshold = threshold;
             state.sss.total = total;
             state.sss.custodians = custodians;
@@ -972,9 +1104,15 @@ impl App {
         self.sss.custodian_names = names.clone();
         self.sss.shares = Some(shares.clone());
 
-        // Create ShareReveal component
+        // Create ShareReveal component — use the newly incremented generation
+        let generation = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.generation)
+            .unwrap_or(1);
         self.sss.share_reveal = Some(crate::components::share_reveal::ShareReveal::new(
-            shares, &names,
+            shares, &names, generation,
         ));
 
         self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyShareReveal);
@@ -1076,44 +1214,59 @@ impl App {
         new_pin_hex: &str,
     ) -> Result<Vec<String>, String> {
         let profile = self.profile.as_ref().ok_or("No profile loaded")?;
-        let primary_id = profile.hsm.token_label.clone();
         let backend_kind = profile.hsm.backend;
+
+        // Get active fleet device IDs from STATE.JSON — these are the
+        // authoritative set of HSMs that need the PIN change.
+        let fleet = self
+            .disc
+            .session_state
+            .as_ref()
+            .ok_or("No STATE.JSON loaded")?
+            .fleet
+            .clone();
+        let active_ids = fleet.active_device_ids();
+
+        // The primary HSM (the one with the live actor session) already had
+        // its PIN changed by do_rekey_change_pin_primary.  We need to change
+        // the PIN on all *other* fleet members.
+        let primary_device_id = self
+            .hw
+            .device_id
+            .as_ref()
+            .ok_or("No primary device_id recorded")?
+            .clone();
 
         let backup_impl = anodize_hsm::create_backup(backend_kind)
             .map_err(|e| format!("Backup backend init: {e}"))?;
 
         let old_pin = SecretString::new(old_pin_hex.to_string());
-        let targets = backup_impl
-            .enumerate_backup_targets(Some(&old_pin))
-            .map_err(|e| format!("Enumerate backup targets: {e}"))?;
-
         let new_pin = SecretString::new(new_pin_hex.to_string());
         let mut changed: Vec<String> = Vec::new();
 
-        for target in &targets {
-            // Skip primary HSM and devices without the signing key
-            if !target.has_signing_key || target.identifier == primary_id {
+        for device_id in &active_ids {
+            if *device_id == primary_device_id {
                 continue;
             }
-            tracing::info!(device = %target.identifier, "RekeyShares: changing PIN on backup HSM");
-            match backup_impl.change_pin_on_device(&target.identifier, &old_pin, &new_pin) {
+            tracing::info!(device = %device_id, "RekeyShares: changing PIN on fleet HSM");
+            match backup_impl.change_pin_on_device(device_id, &old_pin, &new_pin) {
                 Ok(()) => {
-                    changed.push(target.identifier.clone());
-                    tracing::info!(device = %target.identifier, "RekeyShares: backup PIN changed");
+                    changed.push(device_id.to_string());
+                    tracing::info!(device = %device_id, "RekeyShares: fleet HSM PIN changed");
                 }
                 Err(e) => {
                     tracing::error!(
-                        device = %target.identifier,
-                        "RekeyShares: backup PIN change failed: {e}, initiating rollback"
+                        device = %device_id,
+                        "RekeyShares: fleet PIN change failed: {e}, initiating rollback"
                     );
-                    // Roll back already-changed backups to the old PIN.
+                    // Roll back already-changed fleet devices to the old PIN.
                     Self::rollback_backup_pins(&*backup_impl, &changed, &new_pin, &old_pin);
                     // Roll back primary HSM to the old PIN.
                     Self::rollback_primary_pin(self.hw.actor.as_mut(), &new_pin, &old_pin);
                     return Err(format!(
-                        "PIN change failed on backup {}: {e}. \
+                        "PIN change failed on fleet device {}: {e}. \
                          All HSMs rolled back to old PIN.",
-                        target.identifier
+                        device_id
                     ));
                 }
             }
@@ -1123,7 +1276,7 @@ impl App {
             tracing::info!(
                 count = changed.len(),
                 devices = ?changed,
-                "RekeyShares: backup HSM PIN propagation complete"
+                "RekeyShares: fleet PIN propagation complete"
             );
         }
 
@@ -1195,25 +1348,53 @@ impl App {
             Err(e) => return Err(format!("HSM backend error during old-PIN check: {e}")),
         };
 
+        let fleet = self
+            .disc
+            .session_state
+            .as_ref()
+            .ok_or("No STATE.JSON loaded")?
+            .fleet
+            .clone();
+        let active_ids = fleet.active_device_ids();
+
+        if active_ids.is_empty() {
+            return Err("No active fleet devices in STATE.JSON".into());
+        }
+
         let pin_bytes = match hex::decode(old_pin_hex) {
             Ok(b) => b,
             Err(e) => return Err(format!("Internal PIN decode error: {e}")),
         };
         let pin = SecretString::new(hex::encode(&pin_bytes));
 
-        match backend.open_session(&cfg.token_label, &pin) {
-            Ok(_) => {
-                // The old PIN should NOT work — this is a serious problem.
-                tracing::error!("RekeyShares: old PIN still accepted by HSM after change_pin!");
-                Err("CRITICAL: old PIN still accepted by HSM after PIN change. \
-                     The PIN rotation may not have taken effect."
-                    .into())
-            }
-            Err(_) => {
-                tracing::info!("RekeyShares: old PIN correctly rejected by HSM");
-                Ok(())
+        // Verify old PIN is rejected on EVERY active fleet device.
+        for device_id in &active_ids {
+            match backend.open_session_by_id(device_id, &pin) {
+                Ok(_) => {
+                    tracing::error!(
+                        device = %device_id,
+                        "RekeyShares: old PIN still accepted after change_pin!"
+                    );
+                    return Err(format!(
+                        "CRITICAL: old PIN still accepted by fleet device {}. \
+                         The PIN rotation may not have taken effect.",
+                        device_id
+                    ));
+                }
+                Err(_) => {
+                    tracing::info!(
+                        device = %device_id,
+                        "RekeyShares: old PIN correctly rejected"
+                    );
+                }
             }
         }
+
+        tracing::info!(
+            count = active_ids.len(),
+            "RekeyShares: old PIN rejected on all fleet devices"
+        );
+        Ok(())
     }
 
     // ── Mode 2: Load CSR ──────────────────────────────────────────────────────

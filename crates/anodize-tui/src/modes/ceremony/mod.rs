@@ -288,7 +288,7 @@ impl CeremonyMode {
                     "  [2]  Sign intermediate CSR  (requires csr.der on shuttle)".into(),
                     "  [3]  Revoke a certificate   (adds entry + issues new CRL)".into(),
                     "  [4]  Issue CRL refresh      (re-signs current revocation list)".into(),
-                    "  [5]  Re-key shares          (change custodians, keep same PIN)".into(),
+                    "  [5]  Re-key shares          (new custodians + new HSM PIN)".into(),
                     "  [6]  Migrate disc           (copy all sessions to new disc)".into(),
                     "  [7]  Key backup             (pair HSMs + backup signing key)".into(),
                     "  [8]  Validate disc           (verify integrity + HSM audit)".into(),
