@@ -247,16 +247,46 @@ pub fn read_secure_boot() -> Option<bool> {
 }
 
 pub fn read_optical_drive() -> Option<String> {
+    // First try the specific model file (works for real SCSI/ATAPI drives).
     let model_path = Path::new("/sys/class/block/sr0/device/model");
     if model_path.exists() {
         let model = fs::read_to_string(model_path)
             .unwrap_or_default()
             .trim()
             .to_string();
-        Some(model)
-    } else {
-        None
+        if !model.is_empty() {
+            return Some(model);
+        }
     }
+
+    // Fallback: scan /sys/block for sr* devices (catches cdemu and other
+    // virtual optical drives that don't expose a model string).
+    detect_optical_drive_fallback()
+}
+
+/// Scan `/sys/block` for `sr*` entries and return a description string for
+/// the first one found.  Tries to read the vendor sysfs attribute; falls
+/// back to "virtual drive" when no identifying information is available.
+pub fn detect_optical_drive_fallback() -> Option<String> {
+    let entries = fs::read_dir("/sys/block").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if !name_str.starts_with("sr") {
+            continue;
+        }
+        // Try vendor string (e.g. "CDEmu" for virtual drives).
+        let vendor = fs::read_to_string(entry.path().join("device/vendor"))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        return Some(match vendor {
+            Some(v) => format!("{v} virtual drive"),
+            None => "virtual drive".to_string(),
+        });
+    }
+    None
 }
 
 // ── Command runners ───────────────────────────────────────────────────────────
@@ -462,5 +492,22 @@ none /run/anodize tmpfs rw 0 0
         assert_eq!(format_kb(512), "512 KiB");
         assert_eq!(format_kb(2048), "2 MiB");
         assert_eq!(format_kb(16_777_216), "16.0 GiB");
+    }
+
+    #[test]
+    fn test_read_optical_drive_no_sysfs() {
+        // On macOS / CI there is no /sys/class/block/sr0 — returns None.
+        // On Linux without an optical drive, same result.
+        // This just confirms the function doesn't panic.
+        let _result = read_optical_drive();
+    }
+
+    #[test]
+    fn test_detect_optical_drive_fallback_no_sysfs() {
+        // Same: on macOS /sys/block doesn't exist → None, no panic.
+        let result = detect_optical_drive_fallback();
+        if !Path::new("/sys/block").exists() {
+            assert!(result.is_none(), "no /sys/block → should return None");
+        }
     }
 }
