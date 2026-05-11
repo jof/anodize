@@ -18,12 +18,6 @@ running on another terminal, **green** if the appliance is idle/ready.~~
 Implemented: bold red "DEV BUILD" box in the sentinel when
 `dev-softhsm-usb` is enabled, matching the TUI style.
 
-### Sentinel: bottom-justify the refresh display
-
-The auto-refresh status text currently renders mid-screen after the last
-line of content.  Pin it to the bottom of the terminal so the layout
-stays stable across refreshes.
-
 ### Sentinel: double-buffer repaints to prevent flicker
 
 Build the new frame in a buffer before clearing and repainting the
