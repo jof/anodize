@@ -65,11 +65,13 @@ anodize/
 ├── deny.toml                     # cargo-deny supply-chain policy
 ├── Makefile                      # dev shortcuts
 ├── crates/
-│   ├── anodize-hsm/              # HSM abstraction — Hsm + HsmBackend traits, SoftHSM + YubiHSM backends
+│   ├── anodize-hsm/              # HSM abstraction — Hsm + HsmBackend traits, SoftHSM + YubiHSM backends, fleet + backup
 │   ├── anodize-ca/               # X.509 cert/CRL generation, CSR validation
-│   ├── anodize-audit/            # hash-chained JSONL audit log
-│   ├── anodize-config/           # TOML profile loader (profile.toml)
-│   └── anodize-tui/              # ceremony binary (anodize-ceremony) + terminal gatekeeper (anodize-sentinel), ship on ISO
+│   ├── anodize-audit/            # hash-chained JSONL audit log, disc validation
+│   ├── anodize-config/           # TOML profile loader, STATE.JSON schema, fleet metadata
+│   ├── anodize-sss/              # Shamir Secret Sharing over GF(256), wordlist encoding
+│   ├── anodize-shuttle/          # CLI tool for shuttle USB preparation and linting
+│   └── anodize-tui/              # ceremony binary + sentinel + disc validator, ships on ISO
 │       └── src/media/            # ISO 9660 writer, SG_IO MMC, USB/optical discovery
 ├── nix/
 │   ├── iso.nix                   # NixOS base module for all ISO images
@@ -77,9 +79,19 @@ anodize/
 ├── tests/
 │   └── softhsm-fixtures/         # softhsm2.conf template for integration tests
 └── docs/
-    ├── design.md                 # architecture and rationale
+    ├── README.md                 # design overview — start here
+    ├── architecture.md           # crate structure, HSM traits, X.509 bridge
+    ├── ceremony-pipeline.md      # ceremony state machine, operations
+    ├── optical-disc.md           # multi-session SAO format, SG_IO MMC
+    ├── sss-pin-management.md     # SSS, PIN lifecycle, share commitments
+    ├── hsm-fleet.md              # multi-HSM fleet, key backup, PIN propagation
+    ├── security.md               # invariants, threat model, findings
+    ├── builds-and-iso.md         # Nix, reproducible builds, prod vs dev ISO
     ├── ceremony-init.md          # printable runbook: root ceremony
-    └── ceremony-sign.md          # printable runbook: intermediate signing
+    ├── ceremony-sign.md          # printable runbook: intermediate signing
+    ├── ceremony-validate.md      # disc validation procedures
+    ├── e2e-test-plan.md          # full 8-phase ceremony test plan
+    └── ceremony-multisession-test.md  # cross-reboot validation
 ```
 
 ## Development
@@ -156,4 +168,8 @@ make dev-arm64      # dev ISO for Apple Silicon
 | 4 | CLI + ceremony TUI | Done |
 | 5 | Live ISO (Nix flake, reproducible build) | Done |
 | 6 | Self-managed disc lifecycle: SG_IO SAO, ISO 9660, internal USB mount | Done |
-| 7 | Production hardening: WAL, sentinel, disc capacity guard, dev ISO | Ongoing |
+| 7 | SSS + shuttle: share commitments, quorum, PIN verification | Done |
+| 8 | Full ceremony pipeline: 8 operations, WAL, crash recovery | Done |
+| 9 | Multi-HSM fleet: fleet state, key backup, PIN propagation | Done |
+| 10 | Disc validation: offline + HSM cross-check | Done |
+| 11 | Production hardening: `cargo-deny` + `cargo-vet`, sentinel health banner | Ongoing |

@@ -4,8 +4,8 @@ This runbook covers the one-time ceremony to generate the root CA keypair,
 issue the self-signed root certificate, and commit both to archival media.
 
 **Threat model reminder**: Anodize cannot protect you from ceremony discipline failures,
-a compromised ISO build host, or a stolen YubiHSM with a known PIN. See `docs/design.md`
-for the full threat model stub.
+a compromised ISO build host, or a stolen YubiHSM with a known PIN. See the
+[security document](security.md) for the full threat model.
 
 ---
 
