@@ -446,6 +446,62 @@ impl App {
             }
         }
 
+        // Disc sync has its own scroll/navigation — intercept before global scroll
+        if self.mode == Mode::Utilities
+            && self.utilities.screen == crate::modes::utilities::UtilScreen::DiscSync
+        {
+            use crate::modes::utilities::disc_sync::SyncAction;
+            let (consumed, deferred) = self.utilities.disc_sync.handle_key(key);
+            match deferred {
+                SyncAction::ScanSource => {
+                    if let Some(ref dev) = self.disc.optical_dev {
+                        if let Err(e) = self.utilities.disc_sync.do_scan_source(dev) {
+                            self.utilities.disc_sync.phase =
+                                crate::modes::utilities::disc_sync::SyncPhase::Error(e);
+                        }
+                    } else {
+                        self.utilities.disc_sync.phase =
+                            crate::modes::utilities::disc_sync::SyncPhase::Error(
+                                "No optical device detected".into(),
+                            );
+                    }
+                }
+                SyncAction::ScanTarget => {
+                    if let Some(ref dev) = self.disc.optical_dev {
+                        if let Err(e) = self.utilities.disc_sync.do_scan_target(dev) {
+                            self.utilities.disc_sync.phase =
+                                crate::modes::utilities::disc_sync::SyncPhase::Error(e);
+                        }
+                    } else {
+                        self.utilities.disc_sync.phase =
+                            crate::modes::utilities::disc_sync::SyncPhase::Error(
+                                "No optical device detected".into(),
+                            );
+                    }
+                }
+                SyncAction::StartWrite => {
+                    if let Some(ref dev) = self.disc.optical_dev {
+                        self.utilities.disc_sync.start_writing(dev);
+                    } else {
+                        self.utilities.disc_sync.phase =
+                            crate::modes::utilities::disc_sync::SyncPhase::Error(
+                                "No optical device detected".into(),
+                            );
+                    }
+                }
+                SyncAction::None => {}
+            }
+            if consumed {
+                return Action::Noop;
+            }
+            // Esc not consumed → back to menu, reset sync state
+            if key.code == KeyCode::Esc {
+                self.utilities.disc_sync.reset();
+                self.utilities.screen = crate::modes::utilities::UtilScreen::Menu;
+                return Action::Noop;
+            }
+        }
+
         // Content scrolling (arrow keys when not in text entry)
         if !in_text_entry {
             match key.code {
@@ -790,6 +846,17 @@ impl App {
         if self.ceremony.is_burning_disc() {
             self.tick_record_burn();
         }
+
+        // Disc sync burn polling
+        if self.mode == Mode::Utilities
+            && self.utilities.screen == crate::modes::utilities::UtilScreen::DiscSync
+            && self.utilities.disc_sync.phase
+                == crate::modes::utilities::disc_sync::SyncPhase::Writing
+        {
+            if let Some(ref dev) = self.disc.optical_dev.clone() {
+                self.utilities.disc_sync.poll_burn(dev);
+            }
+        }
     }
 
     /// Process an action, updating app state.
@@ -1087,9 +1154,14 @@ impl App {
                     2 => UtilScreen::AuditLog,
                     3 => UtilScreen::HsmInventory,
                     4 => UtilScreen::DiscInspector,
+                    5 => UtilScreen::DiscSync,
                     _ => UtilScreen::Menu,
                 };
-                if screen == UtilScreen::DiscInspector {
+                if screen == UtilScreen::DiscSync {
+                    // Disc sync has its own FSM; reset on entry.
+                    self.utilities.disc_sync.reset();
+                    self.utilities.screen = screen;
+                } else if screen == UtilScreen::DiscInspector {
                     // Disc inspector has its own state; populate from disjoint fields.
                     use crate::modes::utilities::disc_inspector::{
                         gather_banner_from, gather_session_list_from,

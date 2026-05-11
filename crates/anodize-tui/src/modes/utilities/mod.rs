@@ -1,5 +1,6 @@
 pub mod backup;
 pub mod disc_inspector;
+pub mod disc_sync;
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
@@ -21,9 +22,10 @@ pub enum UtilScreen {
     AuditLog,
     HsmInventory,
     DiscInspector,
+    DiscSync,
 }
 
-/// Utilities mode component: system info, audit log browser, HSM inventory, disc inspector.
+/// Utilities mode component: system info, audit log browser, HSM inventory, disc inspector, disc sync.
 pub struct UtilitiesMode {
     pub screen: UtilScreen,
     /// Cached lines for the current sub-screen (populated on entry).
@@ -32,6 +34,8 @@ pub struct UtilitiesMode {
     pub backup: backup::BackupState,
     /// Disc inspector state (persists across re-renders).
     pub disc_inspector: disc_inspector::DiscInspectorState,
+    /// Disc sync state (persists across re-renders).
+    pub disc_sync: disc_sync::DiscSyncState,
 }
 
 impl UtilitiesMode {
@@ -41,6 +45,7 @@ impl UtilitiesMode {
             cached_lines: Vec::new(),
             backup: backup::BackupState::new(),
             disc_inspector: disc_inspector::DiscInspectorState::new(),
+            disc_sync: disc_sync::DiscSyncState::new(),
         }
     }
 
@@ -53,6 +58,7 @@ impl UtilitiesMode {
             UtilScreen::AuditLog => Self::gather_audit_log(app),
             UtilScreen::HsmInventory => Self::gather_hsm_inventory(app),
             UtilScreen::DiscInspector => Vec::new(), // Disc inspector uses its own state
+            UtilScreen::DiscSync => Vec::new(),      // Disc sync uses its own state
         }
     }
 
@@ -340,6 +346,7 @@ impl UtilitiesMode {
                     "  [2]  Audit Log Browser",
                     "  [3]  HSM Inventory",
                     "  [4]  Disc Inspector",
+                    "  [5]  Disc Sync",
                     "",
                     "  [Esc]  Back",
                 ];
@@ -390,6 +397,9 @@ impl UtilitiesMode {
             UtilScreen::DiscInspector => {
                 self.disc_inspector.render(frame, area);
             }
+            UtilScreen::DiscSync => {
+                self.disc_sync.render(frame, area);
+            }
         }
     }
 }
@@ -402,11 +412,16 @@ impl Component for UtilitiesMode {
                 KeyCode::Char('2') => Action::UtilScreen(2),
                 KeyCode::Char('3') => Action::UtilScreen(3),
                 KeyCode::Char('4') => Action::UtilScreen(4),
+                KeyCode::Char('5') => Action::UtilScreen(5),
                 _ => Action::Noop,
             },
             UtilScreen::DiscInspector => {
                 // Disc inspector handles its own keys; Esc not consumed = back to menu
                 Action::Noop // actual dispatch happens in App::update via disc_inspector.handle_key
+            }
+            UtilScreen::DiscSync => {
+                // Disc sync handles its own keys; Esc not consumed = back to menu
+                Action::Noop // actual dispatch happens in App::update via disc_sync.handle_key
             }
             // Sub-screens: Esc returns to menu, 'r' refreshes
             _ => match key.code {
@@ -419,7 +434,9 @@ impl Component for UtilitiesMode {
                         UtilScreen::SystemInfo => 1,
                         UtilScreen::AuditLog => 2,
                         UtilScreen::HsmInventory => 3,
-                        UtilScreen::Menu | UtilScreen::DiscInspector => return Action::Noop,
+                        UtilScreen::Menu | UtilScreen::DiscInspector | UtilScreen::DiscSync => {
+                            return Action::Noop
+                        }
                     };
                     Action::UtilScreen(screen_idx)
                 }
