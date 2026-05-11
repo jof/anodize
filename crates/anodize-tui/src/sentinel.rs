@@ -48,7 +48,6 @@ const CEREMONY_BIN: &str = "anodize-ceremony";
 
 const ANSI_RED: &str = "\x1b[31m";
 const ANSI_GREEN: &str = "\x1b[32m";
-const ANSI_BOLD: &str = "\x1b[1m";
 const ANSI_RESET: &str = "\x1b[0m";
 
 /// How often the status banner refreshes when idle.
@@ -522,5 +521,30 @@ mod tests {
         let _lock = Flock::lock(file, FlockArg::LockExclusiveNonblock).unwrap();
         assert!(check_ceremony_running(&path));
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn dev_mode_banner_production_is_empty() {
+        // Without the dev-softhsm-usb feature the banner must be empty.
+        let banner = dev_mode_banner();
+        if cfg!(feature = "dev-softhsm-usb") {
+            assert!(!banner.is_empty());
+            assert!(banner.contains("DEV BUILD"));
+            assert!(banner.contains("\x1b[31m")); // red
+            assert!(banner.contains("\x1b[0m")); // reset
+        } else {
+            assert!(banner.is_empty());
+        }
+    }
+
+    #[test]
+    fn ceremony_status_line_formatting() {
+        let running = ceremony_status_line(true);
+        assert!(running.contains("CEREMONY IS RUNNING"));
+        assert!(running.contains(ANSI_RED));
+
+        let idle = ceremony_status_line(false);
+        assert!(idle.contains("idle"));
+        assert!(idle.contains(ANSI_GREEN));
     }
 }
