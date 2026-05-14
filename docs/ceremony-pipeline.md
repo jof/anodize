@@ -8,13 +8,13 @@ The ceremony TUI implements a structured state machine that enforces ordering in
 
 Setup gates the ceremony by verifying prerequisites in order. Each gate must pass before the next is attempted.
 
-| # | Gate | What happens |
-|---|---|---|
+| # | Gate           | What happens                                                                                                                        |
+|---|----------------|-------------------------------------------------------------------------------------------------------------------------------------|
 | 1 | **ClockCheck** | Displays current UTC time. Operator confirms accuracy before any timestamped operation. Re-confirmed before each signing operation. |
-| 2 | **Shuttle** | Detects and mounts shuttle USB (`ANODIZE-SHUTTLE` volume label) with `profile.toml`. Mount uses `MS_NOEXEC ∣ MS_NOSUID ∣ MS_NODEV`. |
-| 3 | **Profile** | Parses and validates `profile.toml`. Loads cert profiles. |
-| 4 | **HSM** | Detects HSM device via the configured backend. No login yet — just probe. |
-| 5 | **Disc** | Detects write-once optical disc, rejects rewritable media. Loads prior sessions + `STATE.JSON` from the disc. |
+| 2 | **Shuttle**    | Detects and mounts shuttle USB (`ANODIZE-SHUTTLE` volume label) with `profile.toml`. Mount uses `MS_NOEXEC ∣ MS_NOSUID ∣ MS_NODEV`. |
+| 3 | **Profile**    | Parses and validates `profile.toml`. Loads cert profiles.                                                                           |
+| 4 | **HSM**        | Detects HSM device via the configured backend. No login yet — just probe.                                                           |
+| 5 | **Disc**       | Detects write-once optical disc, rejects rewritable media. Loads prior sessions + `STATE.JSON` from the disc.                       |
 
 ### Device discovery
 
