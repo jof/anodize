@@ -27,9 +27,9 @@ use nix::mount::{mount, umount2, MntFlags, MsFlags};
 
 use mmc::{
     close_track_session, get_current_profile, max_sessions_for_profile, profile_is_rewritable,
-    profile_name, read_disc_info, read_sectors, read_track_info, reserve_track, send_opc,
-    set_write_parameters, synchronize_cache, write_sectors, CloseTarget, DiscStatus, MultiSession,
-    WriteParams, WriteType,
+    profile_name, read_disc_info, read_sectors, read_track_info, reserve_track, resolve_nwa,
+    send_opc, set_write_parameters, synchronize_cache, wait_drive_ready, write_sectors,
+    CloseTarget, DiscStatus, MultiSession, WriteParams, WriteType,
 };
 use sgdev::{SgDev, CDS_DISC_OK};
 
@@ -453,15 +453,21 @@ fn write_session_inner(
         "write_session_inner: disc info OK"
     );
 
-    // Get the NWA (Next Writable Address) for the new session
-    // For a blank disc the last track is the invisible track (0xFF)
-    let nwa = if info.status == DiscStatus::Blank {
-        0u32
-    } else {
-        read_track_info(&sg, 0xFF)
-            .map(|t| t.nwa)
-            .unwrap_or(info.nwa)
-    };
+    // Wait for drive readiness — after CLOSE SESSION the drive may still be
+    // writing lead-out / updating the Disc Management Structure.  Physical USB
+    // drives (BUFFALO, etc.) can stay busy for tens of seconds.  libburn uses
+    // the same TUR polling pattern before every write sequence.
+    step(progress, "Waiting for drive ready…");
+    tracing::info!("write_session_inner: TEST UNIT READY poll");
+    wait_drive_ready(&sg, std::time::Duration::from_secs(120))
+        .context("drive not ready before write")?;
+    tracing::info!("write_session_inner: drive ready");
+
+    // Resolve NWA using the portable strategy from libburn:
+    // query by last_track_l (primary), 0xFF invisible track (fallback),
+    // then validate the result.
+    step(progress, "Resolving next writable address…");
+    let nwa = resolve_nwa(&sg, &info).context("NWA resolution")?;
     step(
         progress,
         format!("Disc OK — {} session(s), NWA={nwa}", info.sessions),

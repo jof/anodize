@@ -29,9 +29,9 @@ pub struct DiscInfo {
     pub sessions: u16, // number of complete sessions
     #[allow(dead_code)]
     pub first_track: u8,
-    #[allow(dead_code)]
     pub last_track_l: u8,
-    pub nwa: u32, // Next Writable Address (last session's NWA)
+    #[allow(dead_code)]
+    pub nwa: u32, // Last Session Lead-In Start Address (not a reliable NWA — use resolve_nwa)
     #[allow(dead_code)]
     pub free_blocks: u32,
 }
@@ -117,6 +117,90 @@ pub fn read_track_info(dev: &SgDev, track: u8) -> Result<TrackInfo> {
         free_blocks,
         blank,
     })
+}
+
+// ── Drive readiness ──────────────────────────────────────────────────────────
+
+/// TEST UNIT READY (0x00) — returns Ok(()) if the drive is ready, Err otherwise.
+pub fn test_unit_ready(dev: &SgDev) -> Result<()> {
+    let cdb: [u8; 6] = [0x00, 0, 0, 0, 0, 0];
+    dev.cdb_none(&cdb, 5_000).context("TEST UNIT READY")?;
+    Ok(())
+}
+
+/// Poll TEST UNIT READY with exponential backoff until the drive is ready.
+/// Drives may be busy after CLOSE SESSION (lead-out writing, DMS update).
+/// Returns Ok(()) when ready, or Err after `timeout` has elapsed.
+///
+/// Reference: libburn issues TUR loops before writes; MMC-6 §6.37.
+pub fn wait_drive_ready(dev: &SgDev, timeout: std::time::Duration) -> Result<()> {
+    let start = std::time::Instant::now();
+    let mut delay = std::time::Duration::from_millis(250);
+    loop {
+        match test_unit_ready(dev) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if start.elapsed() >= timeout {
+                    return Err(e).context(format!(
+                        "drive not ready after {:.0}s",
+                        timeout.as_secs_f64()
+                    ));
+                }
+                tracing::debug!(
+                    elapsed = ?start.elapsed(),
+                    delay_ms = delay.as_millis(),
+                    "drive not ready, retrying…"
+                );
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(std::time::Duration::from_secs(5));
+            }
+        }
+    }
+}
+
+// ── NWA resolution ───────────────────────────────────────────────────────────
+
+/// Resolve the Next Writable Address for the next session.
+///
+/// Strategy (mirrors libburn — never assumes 0xFF support):
+///  1. Blank disc → NWA is 0.
+///  2. Non-blank → query READ TRACK INFORMATION for the last track number
+///     reported in READ DISC INFORMATION.  This is the most portable method
+///     and works on all tested drives (BUFFALO USB BD-R, Pioneer, LG, cdemu).
+///  3. If that fails, try track 0xFF ("invisible track"), which some drives
+///     support per Feature 0021h Incremental Streaming Writable.  USB bridge
+///     chipsets often reject this — hence it is a fallback, not primary.
+///  4. Validate: NWA must be > 0 on a non-blank disc; bail otherwise.
+pub fn resolve_nwa(dev: &SgDev, info: &DiscInfo) -> Result<u32> {
+    if info.status == DiscStatus::Blank {
+        return Ok(0);
+    }
+
+    // Primary: last track number from disc info (libburn's approach).
+    let nwa = read_track_info(dev, info.last_track_l)
+        // Fallback: invisible track 0xFF (cdemu and some CD-R era drives).
+        .or_else(|e| {
+            tracing::debug!(
+                track = info.last_track_l,
+                "READ TRACK INFO by last_track_l failed ({e:#}), trying 0xFF"
+            );
+            read_track_info(dev, 0xFF)
+        })
+        .map(|t| t.nwa)
+        .context("could not determine NWA from any track query")?;
+
+    // Sanity: on a non-blank disc the NWA should never be 0.
+    if nwa == 0 {
+        anyhow::bail!(
+            "NWA resolved to 0 on a non-blank disc (status={:?}, sessions={}, last_track={}); \
+             refusing to overwrite session 1",
+            info.status,
+            info.sessions,
+            info.last_track_l,
+        );
+    }
+
+    Ok(nwa)
 }
 
 // ── Write parameters ──────────────────────────────────────────────────────────
