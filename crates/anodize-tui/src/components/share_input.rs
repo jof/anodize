@@ -59,6 +59,10 @@ pub struct ShareInput {
     pub last_result: Option<ShareVerifyResult>,
     /// SSS metadata from STATE.JSON (custodian roster + commitments).
     pub sss_meta: SssMetadata,
+    /// All words collected; awaiting explicit Enter to submit.
+    pending_submit: bool,
+    /// Last submit had an error; words preserved for editing.
+    has_error: bool,
 }
 
 impl ShareInput {
@@ -77,6 +81,8 @@ impl ShareInput {
             secret_len,
             last_result: None,
             sss_meta,
+            pending_submit: false,
+            has_error: false,
         }
     }
 
@@ -99,22 +105,41 @@ impl ShareInput {
         }
     }
 
-    /// Handle a key event. Returns true if a share was just submitted.
+    /// Handle a key event. Returns true if a share was just submitted and accepted.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        // Review/error state: all words collected, awaiting explicit Enter
+        if self.pending_submit {
+            match key.code {
+                KeyCode::Enter => {
+                    return self.submit();
+                }
+                KeyCode::Backspace => {
+                    self.pending_submit = false;
+                    self.has_error = false;
+                    self.last_result = None;
+                    if let Some(word) = self.words.pop() {
+                        self.word_buf = word;
+                        self.update_completions();
+                    }
+                    return false;
+                }
+                _ => return false,
+            }
+        }
+
         match key.code {
             KeyCode::Char(c) if c.is_ascii_alphabetic() => {
                 self.word_buf.push(c.to_ascii_lowercase());
                 self.update_completions();
-                // Auto-accept the last word when prefix uniquely resolves
+                // Auto-complete (not auto-submit) the last word when prefix uniquely resolves
                 if self.words.len() == self.expected_words - 1 && self.completions.len() == 1 {
                     let word = self.completions[0].to_string();
-                    return self.try_accept_complete(word);
+                    self.try_accept_complete(word);
                 }
                 false
             }
             KeyCode::Backspace => {
                 if self.word_buf.is_empty() {
-                    // Pop the last accepted word
                     if let Some(word) = self.words.pop() {
                         self.word_buf = word;
                         self.update_completions();
@@ -124,16 +149,19 @@ impl ShareInput {
                     self.update_completions();
                 }
                 self.last_result = None;
+                self.has_error = false;
                 false
             }
             KeyCode::Tab => {
-                // Autocomplete: if exactly one match, accept it
                 if self.completions.len() == 1 {
-                    return self.try_accept_complete(self.completions[0].to_string());
+                    self.try_accept_complete(self.completions[0].to_string());
                 }
                 false
             }
-            KeyCode::Char(' ') | KeyCode::Char('-') | KeyCode::Enter => self.try_accept_current(),
+            KeyCode::Char(' ') | KeyCode::Char('-') | KeyCode::Enter => {
+                self.try_accept_current();
+                false
+            }
             _ => false,
         }
     }
@@ -146,51 +174,51 @@ impl ShareInput {
         }
     }
 
-    fn try_accept_current(&mut self) -> bool {
+    fn try_accept_current(&mut self) {
         if self.word_buf.is_empty() {
-            return false;
+            return;
         }
-        // Auto-complete if exactly one match
         if self.completions.len() == 1 {
             let word = self.completions[0].to_string();
-            return self.try_accept_complete(word);
+            self.try_accept_complete(word);
+            return;
         }
-        // Accept if exact match
         if anodize_sss::is_valid_word(&self.word_buf) {
             let word = self.word_buf.clone();
-            return self.try_accept_complete(word);
+            self.try_accept_complete(word);
         }
-        false
     }
 
-    /// Accept a word and auto-submit when all words are collected.
-    fn try_accept_complete(&mut self, word: String) -> bool {
+    /// Accept a word. When all words are collected, enter review state
+    /// (pending_submit) instead of auto-submitting.
+    fn try_accept_complete(&mut self, word: String) {
         if self.words.len() >= self.expected_words {
-            return false;
+            return;
         }
         self.words.push(word);
         self.word_buf.clear();
         self.completions.clear();
+        self.has_error = false;
+        self.last_result = None;
         if self.words.len() == self.expected_words {
-            self.submit();
-            return true;
+            self.pending_submit = true;
         }
-        false
     }
 
     /// Submit completed word list: decode, identify custodian, verify commitment.
-    fn submit(&mut self) {
+    /// Returns true if the share was accepted; false (with error feedback) otherwise.
+    /// On error, words are preserved for in-place editing.
+    fn submit(&mut self) -> bool {
         let input = self.words.join("-");
-        self.words.clear();
-        self.word_buf.clear();
-        self.completions.clear();
 
         // Decode wordlist → Share
         let share = match Share::from_words(&input, self.secret_len) {
             Ok(s) => s,
             Err(e) => {
                 self.last_result = Some(ShareVerifyResult::DecodeError(e.to_string()));
-                return;
+                self.pending_submit = true;
+                self.has_error = true;
+                return false;
             }
         };
 
@@ -205,7 +233,9 @@ impl ShareInput {
             Some(c) => c,
             None => {
                 self.last_result = Some(ShareVerifyResult::UnknownIndex(share.index));
-                return;
+                self.pending_submit = true;
+                self.has_error = true;
+                return false;
             }
         };
 
@@ -215,7 +245,9 @@ impl ShareInput {
                 "Share #{} ({}) already collected",
                 share.index, custodian.name
             )));
-            return;
+            self.pending_submit = true;
+            self.has_error = true;
+            return false;
         }
 
         // Verify commitment
@@ -239,10 +271,12 @@ impl ShareInput {
                 custodian_name: custodian.name.clone(),
                 index: share.index,
             });
-            return;
+            self.pending_submit = true;
+            self.has_error = true;
+            return false;
         }
 
-        // Accepted
+        // Accepted — clear input state
         let name = custodian.name.clone();
         let idx = share.index;
         self.collected.push(CollectedShare {
@@ -254,10 +288,36 @@ impl ShareInput {
             custodian_name: name,
             index: idx,
         });
+        self.words.clear();
+        self.word_buf.clear();
+        self.completions.clear();
+        self.pending_submit = false;
+        self.has_error = false;
+        true
     }
 
     /// Render the share input UI.
     pub fn render(&self, frame: &mut Frame, area: Rect) {
+        let border_style = if self.has_error {
+            Style::default().fg(Color::Red).bg(Color::Black)
+        } else if self.pending_submit {
+            Style::default().fg(Color::Yellow).bg(Color::Black)
+        } else {
+            crate::theme::MODAL_BORDER_CYAN
+        };
+        let title_style = if self.has_error {
+            Style::default()
+                .fg(Color::Red)
+                .bg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        } else if self.pending_submit {
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(Color::Black)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            crate::theme::MODAL_TITLE_CYAN
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(
@@ -271,14 +331,15 @@ impl ShareInput {
                 }
             ))
             .style(crate::theme::BLOCK)
-            .border_style(crate::theme::MODAL_BORDER_CYAN)
-            .title_style(crate::theme::MODAL_TITLE_CYAN);
+            .border_style(border_style)
+            .title_style(title_style);
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
         let dim = Style::default().fg(Color::DarkGray);
         let green = Style::default().fg(Color::Green);
+        let yellow = Style::default().fg(Color::Yellow);
 
         let mut lines: Vec<Line> = Vec::new();
 
@@ -304,10 +365,15 @@ impl ShareInput {
         if remaining > 0 {
             // Word progress
             let total_entered = self.words.len();
+            let progress_word = if self.pending_submit {
+                self.expected_words
+            } else {
+                total_entered + 1
+            };
             lines.push(Line::from(vec![
                 Span::styled("  Word ", dim),
                 Span::styled(
-                    format!("{}/{}", total_entered + 1, self.expected_words),
+                    format!("{}/{}", progress_word, self.expected_words),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
@@ -315,56 +381,102 @@ impl ShareInput {
                 Span::styled(format!("  ({remaining} share(s) still needed)"), dim),
             ]));
 
-            // Show accepted words as kebab groups (4 per line)
+            // Show entered words as kebab groups (4 per line)
+            let word_color = if self.has_error {
+                Color::Yellow
+            } else if self.pending_submit {
+                Color::White
+            } else {
+                Color::Green
+            };
             if !self.words.is_empty() {
                 for chunk in self.words.chunks(4) {
                     let group = chunk.join("-");
                     lines.push(Line::from(Span::styled(
                         format!("  {group}"),
-                        Style::default().fg(Color::Green),
+                        Style::default().fg(word_color),
                     )));
                 }
             }
 
-            // Current word input
-            let word_valid =
-                !self.word_buf.is_empty() && anodize_sss::is_valid_word(&self.word_buf);
-            let word_style = if self.word_buf.is_empty() {
-                dim
-            } else if word_valid {
-                Style::default().fg(Color::Green)
-            } else if self.completions.is_empty() {
-                Style::default().fg(Color::Red)
-            } else {
-                Style::default().fg(Color::White)
-            };
+            if self.pending_submit {
+                // Review / error state — all words entered
+                lines.push(Line::from(""));
 
-            lines.push(Line::from(vec![
-                Span::raw("  > "),
-                Span::styled(format!("{}█", self.word_buf), word_style),
-            ]));
+                // Error feedback inline
+                if let Some(ref result) = self.last_result {
+                    Self::render_result(&mut lines, result, green);
+                }
 
-            // Autocomplete hint
-            if !self.word_buf.is_empty() {
-                if self.completions.len() == 1 {
+                if self.has_error {
                     lines.push(Line::from(Span::styled(
-                        format!("    → {} [Tab]", self.completions[0]),
-                        Style::default().fg(Color::DarkGray),
+                        "  Press [BS] to edit, or [Enter] to re-submit.",
+                        yellow,
                     )));
-                } else if self.completions.len() > 1 && self.completions.len() <= 6 {
-                    let hint = self
-                        .completions
-                        .iter()
-                        .copied()
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    lines.push(Line::from(Span::styled(format!("    {hint}"), dim)));
-                } else if self.completions.is_empty() && !self.word_buf.is_empty() {
+                } else {
                     lines.push(Line::from(Span::styled(
-                        "    ✘ no matching word",
-                        Style::default().fg(Color::Red),
+                        format!("  ✓ {} words entered. Review and press [Enter] to submit.", self.expected_words),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
                     )));
                 }
+
+                lines.push(Line::from(Span::styled(
+                    "  [Enter] Submit   [BS] Edit   [Esc] Cancel",
+                    dim,
+                )));
+            } else {
+                // Active input state
+                let word_valid =
+                    !self.word_buf.is_empty() && anodize_sss::is_valid_word(&self.word_buf);
+                let word_style = if self.word_buf.is_empty() {
+                    dim
+                } else if word_valid {
+                    Style::default().fg(Color::Green)
+                } else if self.completions.is_empty() {
+                    Style::default().fg(Color::Red)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+
+                lines.push(Line::from(vec![
+                    Span::raw("  > "),
+                    Span::styled(format!("{}█", self.word_buf), word_style),
+                ]));
+
+                // Autocomplete hint
+                if !self.word_buf.is_empty() {
+                    if self.completions.len() == 1 {
+                        lines.push(Line::from(Span::styled(
+                            format!("    → {} [Tab]", self.completions[0]),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    } else if self.completions.len() > 1 && self.completions.len() <= 6 {
+                        let hint = self
+                            .completions
+                            .iter()
+                            .copied()
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        lines.push(Line::from(Span::styled(format!("    {hint}"), dim)));
+                    } else if self.completions.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            "    ✘ no matching word",
+                            Style::default().fg(Color::Red),
+                        )));
+                    }
+                }
+
+                // Result feedback (e.g. "Accepted" after previous share)
+                if let Some(ref result) = self.last_result {
+                    Self::render_result(&mut lines, result, green);
+                }
+
+                lines.push(Line::from(Span::styled(
+                    "  [Tab] Complete   [Space/-] Next word   [BS] Undo   [Esc] Cancel",
+                    dim,
+                )));
             }
         } else {
             lines.push(Line::from(""));
@@ -381,53 +493,6 @@ impl ShareInput {
             )));
         }
 
-        // Last result feedback
-        if let Some(ref result) = self.last_result {
-            match result {
-                ShareVerifyResult::Accepted {
-                    custodian_name,
-                    index,
-                } => {
-                    lines.push(Line::from(Span::styled(
-                        format!("  ✓ Accepted: #{index} {custodian_name}"),
-                        green,
-                    )));
-                }
-                ShareVerifyResult::CommitmentFailed {
-                    custodian_name,
-                    index,
-                } => {
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "  ✘ COMMITMENT MISMATCH: #{index} {custodian_name} — share rejected"
-                        ),
-                        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                    )));
-                    lines.push(Line::from(Span::styled(
-                        "    Re-enter this share carefully.",
-                        Style::default().fg(Color::Yellow),
-                    )));
-                }
-                ShareVerifyResult::UnknownIndex(idx) => {
-                    lines.push(Line::from(Span::styled(
-                        format!("  ✘ Unknown share index #{idx} — not in custodian roster"),
-                        Style::default().fg(Color::Red),
-                    )));
-                }
-                ShareVerifyResult::DecodeError(msg) => {
-                    lines.push(Line::from(Span::styled(
-                        format!("  ✘ {msg}"),
-                        Style::default().fg(Color::Red),
-                    )));
-                }
-            }
-        }
-
-        lines.push(Line::from(Span::styled(
-            "  [Tab] Complete   [Space/-] Next word   [BS] Undo   [Esc] Cancel",
-            dim,
-        )));
-
         // Anchor view to bottom: scroll so the last lines are always visible.
         let content_height = lines.len() as u16;
         let visible_height = inner.height;
@@ -437,6 +502,50 @@ impl ShareInput {
             .wrap(Wrap { trim: false })
             .scroll((scroll_offset, 0));
         frame.render_widget(para, inner);
+    }
+
+    /// Append result feedback lines.
+    fn render_result(lines: &mut Vec<Line<'_>>, result: &ShareVerifyResult, green: Style) {
+        match result {
+            ShareVerifyResult::Accepted {
+                custodian_name,
+                index,
+            } => {
+                lines.push(Line::from(Span::styled(
+                    format!("  ✓ Accepted: #{index} {custodian_name}"),
+                    green,
+                )));
+            }
+            ShareVerifyResult::CommitmentFailed {
+                custodian_name,
+                index,
+            } => {
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  ✘ COMMITMENT MISMATCH: #{index} {custodian_name} — share rejected"
+                    ),
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "    Check each word carefully and correct any errors.",
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+            ShareVerifyResult::UnknownIndex(idx) => {
+                lines.push(Line::from(Span::styled(
+                    format!("  ✘ Unknown share index #{idx} — not in custodian roster"),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+            ShareVerifyResult::DecodeError(msg) => {
+                lines.push(Line::from(Span::styled(
+                    format!("  ✘ {msg}"),
+                    Style::default().fg(Color::Red),
+                )));
+            }
+        }
     }
 }
 
@@ -498,8 +607,23 @@ mod tests {
         submitted
     }
 
+    /// Helper: type all words via Space separators, auto-completing the last word,
+    /// then confirm with Enter. Returns the handle_key result from Enter.
+    fn type_all_words_and_submit(input: &mut ShareInput, flat: &str) -> bool {
+        let words: Vec<&str> = flat.split('-').collect();
+        for &w in &words[..words.len() - 1] {
+            type_word(input, w);
+            input.handle_key(key(KeyCode::Char(' ')));
+        }
+        // Last word: type it — auto-complete will set pending_submit
+        type_word(input, words.last().unwrap());
+        assert!(input.pending_submit, "should enter review after all words");
+        // Confirm
+        input.handle_key(key(KeyCode::Enter))
+    }
+
     #[test]
-    fn last_word_auto_accepts_without_separator() {
+    fn last_word_enters_review_then_enter_submits() {
         let (mut input, flat) = fixture();
         let words: Vec<&str> = flat.split('-').collect();
         assert_eq!(words.len(), input.expected_words);
@@ -511,10 +635,16 @@ mod tests {
         }
         assert_eq!(input.words.len(), words.len() - 1);
 
-        // Type the last word character by character — should auto-submit
+        // Type the last word — should enter pending_submit, NOT auto-submit
         let last = words.last().unwrap();
         let submitted = type_word(&mut input, last);
-        assert!(submitted, "last word should auto-accept without separator");
+        assert!(!submitted, "last word should enter review, not submit");
+        assert!(input.pending_submit);
+        assert!(input.last_result.is_none());
+
+        // Now Enter to confirm
+        let submitted = input.handle_key(key(KeyCode::Enter));
+        assert!(submitted, "Enter in review state should submit");
         assert!(matches!(
             input.last_result,
             Some(ShareVerifyResult::Accepted { .. })
@@ -538,31 +668,8 @@ mod tests {
     #[test]
     fn separator_still_works_for_last_word() {
         let (mut input, flat) = fixture();
-        let words: Vec<&str> = flat.split('-').collect();
-
-        for &w in &words[..words.len() - 1] {
-            type_word(&mut input, w);
-            input.handle_key(key(KeyCode::Char(' ')));
-        }
-
-        // Type only a unique prefix of the last word, then Space
-        let last = words.last().unwrap();
-        // Find shortest unique prefix
-        let mut prefix_len = 1;
-        while prefix_len < last.len() {
-            let matches = anodize_sss::prefix_matches(&last[..prefix_len]);
-            if matches.len() == 1 {
-                break;
-            }
-            prefix_len += 1;
-        }
-        // But for this test, just type the whole word + space
-        type_word(&mut input, last);
-        // If auto-accept already fired, we're done; otherwise space should work
-        if input.last_result.is_none() {
-            let submitted = input.handle_key(key(KeyCode::Char(' ')));
-            assert!(submitted);
-        }
+        let submitted = type_all_words_and_submit(&mut input, &flat);
+        assert!(submitted);
         assert!(matches!(
             input.last_result,
             Some(ShareVerifyResult::Accepted { .. })
@@ -570,27 +677,80 @@ mod tests {
     }
 
     #[test]
-    fn backspace_on_last_word_resets_auto_accept() {
+    fn backspace_from_review_edits_last_word() {
         let (mut input, flat) = fixture();
         let words: Vec<&str> = flat.split('-').collect();
 
-        // Accept all but last two words
+        // Enter all words, reaching pending_submit
         for &w in &words[..words.len() - 1] {
             type_word(&mut input, w);
             input.handle_key(key(KeyCode::Char(' ')));
         }
+        type_word(&mut input, words.last().unwrap());
+        assert!(input.pending_submit);
 
-        let last = words.last().unwrap();
-        // Type all but the last char
-        for c in last[..last.len() - 1].chars() {
-            input.handle_key(key(KeyCode::Char(c)));
-        }
-        // Backspace should not submit
+        // Backspace exits review and pops last word back to buffer
         input.handle_key(key(KeyCode::Backspace));
-        assert!(input.last_result.is_none());
-        // Re-type the deleted chars to complete
-        let remaining = &last[last.len() - 2..];
-        let submitted = type_word(&mut input, remaining);
-        assert!(submitted, "re-typed last word should auto-accept");
+        assert!(!input.pending_submit);
+        assert_eq!(input.words.len(), words.len() - 1);
+        assert!(!input.word_buf.is_empty());
+
+        // Re-type the last word and submit
+        // Clear the buffer first (it has the popped word)
+        while !input.word_buf.is_empty() {
+            input.handle_key(key(KeyCode::Backspace));
+        }
+        type_word(&mut input, words.last().unwrap());
+        assert!(input.pending_submit);
+        let submitted = input.handle_key(key(KeyCode::Enter));
+        assert!(submitted);
+    }
+
+    #[test]
+    fn error_preserves_words_for_editing() {
+        let (mut input, flat) = fixture();
+        let words: Vec<&str> = flat.split('-').collect();
+
+        // Enter all words except corrupt the first one
+        // Type a wrong first word (use a valid word that's wrong for the share)
+        let wrong_word = if words[0] == "able" { "acid" } else { "able" };
+        type_word(&mut input, wrong_word);
+        input.handle_key(key(KeyCode::Char(' ')));
+        for &w in &words[1..words.len() - 1] {
+            type_word(&mut input, w);
+            input.handle_key(key(KeyCode::Char(' ')));
+        }
+        type_word(&mut input, words.last().unwrap());
+
+        // Should be in review state
+        assert!(input.pending_submit);
+
+        // Submit — should fail (checksum mismatch)
+        let submitted = input.handle_key(key(KeyCode::Enter));
+        assert!(!submitted, "corrupted share should not be accepted");
+        assert!(input.has_error, "should be in error state");
+        assert!(input.pending_submit, "should remain in review for editing");
+        // Words should be preserved, not cleared
+        assert_eq!(input.words.len(), input.expected_words);
+
+        // Backspace to start editing — pops last word into word_buf
+        input.handle_key(key(KeyCode::Backspace));
+        assert!(!input.pending_submit);
+        assert_eq!(input.words.len(), input.expected_words - 1);
+        assert!(!input.word_buf.is_empty());
+
+        // Clear word_buf, then pop remaining words back one by one
+        while !input.word_buf.is_empty() {
+            input.handle_key(key(KeyCode::Backspace));
+        }
+        while !input.words.is_empty() {
+            // BS on empty buf pops a word into buf
+            input.handle_key(key(KeyCode::Backspace));
+            // clear that word's chars
+            while !input.word_buf.is_empty() {
+                input.handle_key(key(KeyCode::Backspace));
+            }
+        }
+        assert_eq!(input.words.len(), 0);
     }
 }

@@ -71,11 +71,6 @@ There should be no audit log on the shuttle. It doesn't make any sense that it s
 
 It seems that during the InitRoot ceremony process while initializing the shares, we pushed escape to go back and this state seems like we've picked a generation number and the custodians were set, but it hasn't been written to disk or HSM yet.
 
-# anodize-sss share input screen should be more user friendly
-
-At the share input screen, it's possible that the final word has a prefix which is unique but does not contain all the letters of the word. The auto-completion logic will redraw the screen before the user has finished typing and this may be confusing. At the end, we should carefully validate the content that is being presented and try and auto-validate it and provide immediate feedback. But it should not clear the screen or reset the modal and allow the user to go back and edit the input that they gave.
-It should look more like a text editor where you can go back edit the text and it will auto-complete as you type. In case of an error or invalid input of a share, rather than emptying the complete input, it should just highlight the invalid input and allow the user to go back and edit the text to correct it.
-
 
 # Self-signed certificate fingerprint display
 
