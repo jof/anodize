@@ -243,7 +243,7 @@ pub fn reconstruct(shares: &[Share], threshold: u8) -> Result<Vec<u8>, SssError>
 
     let mut secret = vec![0u8; secret_len];
 
-    for byte_idx in 0..secret_len {
+    for (byte_idx, secret_byte) in secret.iter_mut().enumerate() {
         // Lagrange interpolation at x = 0
         let mut value = 0u8;
 
@@ -269,7 +269,7 @@ pub fn reconstruct(shares: &[Share], threshold: u8) -> Result<Vec<u8>, SssError>
             value = gf256::add(value, gf256::mul(y_i, basis));
         }
 
-        secret[byte_idx] = value;
+        *secret_byte = value;
     }
 
     Ok(secret)
