@@ -302,6 +302,11 @@ pub struct DiscScan {
 pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
     let sg = SgDev::open(dev).map_err(|e| format!("cannot open {}: {e}", dev.display()))?;
 
+    // Wait for drive readiness — the disc may have just been inserted or a
+    // previous session close may still be finalising lead-out / DMS update.
+    wait_drive_ready(&sg, std::time::Duration::from_secs(60))
+        .map_err(|e| format!("drive not ready: {e}"))?;
+
     // Drive-status gate
     match sg.drive_status() {
         Ok(s) if s != CDS_DISC_OK => return Err("no disc present".into()),
