@@ -312,7 +312,7 @@ qemu-aarch64-nographic: anodize-dev-arm64.iso fake-shuttle.img
 # USB write target — write a production ISO to a USB stick identified by
 # serial number.  This avoids hardcoding /dev/diskN which can shift between
 # plugs.
-# macOS only (uses ioreg + diskutil).
+# Cross-platform: macOS (ioreg + diskutil) and Linux (lsblk).
 #
 # Usage:
 #   make write-usb USB_SERIAL=ABCD1234
@@ -323,6 +323,7 @@ qemu-aarch64-nographic: anodize-dev-arm64.iso fake-shuttle.img
 
 USB_SERIAL ?=
 
+ifeq ($(shell uname),Darwin)
 list-usb:
 	@python3 -c '\
 	import subprocess, re, sys; \
@@ -337,8 +338,18 @@ list-usb:
 	     re.search(r"\"BSD Name\"\s*=\s*\"(disk\d+)\"", fwd)))) \
 	  (data[data.rfind("+-o ", 0, pos):pos], data[pos:]))) for s, pos in serials.items()]; \
 	(lambda: [print(f"  {s:<{max(len(x) for x,_ in rows)}}  {d:<{max(len(y) for _,(_, y) in rows)}}  {n}") for s, (n, d) in rows])() if rows else print("No USB storage devices found.")'
+else
+list-usb:
+	@lsblk -J -d -o NAME,SERIAL,VENDOR,MODEL,SIZE,TRAN 2>/dev/null | \
+	python3 -c '\
+	import json, sys; \
+	devs = json.load(sys.stdin).get("blockdevices", []); \
+	usb = [(d["serial"], "/dev/" + d["name"], ((d.get("vendor") or "") + " " + (d.get("model") or "Unknown")).strip(), d.get("size", "")) for d in devs if (d.get("tran") or "") == "usb" and d.get("serial")]; \
+	[print(f"  {s:<{max(len(r[0]) for r in usb)}}  {p:<{max(len(r[1]) for r in usb)+2}}  {n:<{max(len(r[2]) for r in usb)}}  {z}") for s,p,n,z in usb] if usb else print("No USB storage devices found.")'
+endif
 
 # $(call write-usb-iso, <iso-file>)
+ifeq ($(shell uname),Darwin)
 define write-usb-iso
 	@disk=$$(ioreg -r -c IOUSBHostDevice -l | \
 		python3 -c 'import sys, re; \
@@ -356,6 +367,24 @@ define write-usb-iso
 	diskutil eject /dev/$$disk && \
 	echo "Done — safe to remove the USB stick."
 endef
+else
+define write-usb-iso
+	@dev=$$(lsblk -J -d -o NAME,SERIAL,TRAN | \
+		python3 -c 'import json, sys; \
+		devs = json.loads(sys.stdin.read()).get("blockdevices", []); \
+		hits = [d["name"] for d in devs if d.get("tran") == "usb" and d.get("serial") == "$(USB_SERIAL)"]; \
+		print(hits[0]) if hits else sys.exit(1)') && \
+	if [ -z "$$dev" ]; then \
+		echo "No disk found with serial $(USB_SERIAL)" >&2; exit 1; \
+	fi && \
+	echo "Found serial $(USB_SERIAL) at /dev/$$dev" && \
+	udisksctl unmount -b /dev/$${dev}1 2>/dev/null || true && \
+	sudo dd if=$(1) of=/dev/$$dev bs=1M status=progress && \
+	sync && \
+	udisksctl power-off -b /dev/$$dev 2>/dev/null && \
+	echo "Done — safe to remove the USB stick."
+endef
+endif
 
 write-usb: anodize-prod-amd64.iso
 ifndef USB_SERIAL
