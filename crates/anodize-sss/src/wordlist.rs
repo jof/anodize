@@ -1,8 +1,10 @@
 //! Wordlist encoding for human-transcribable share representation.
 //!
-//! Each byte maps to a unique 4–6 letter English word. Words are chosen
-//! to be phonetically distinct, easy to spell, and unambiguous when read
-//! aloud. The list has exactly 256 entries (one per byte value).
+//! Each byte maps to a unique 4-letter English word. Words are chosen
+//! for minimum pairwise Hamming distance ≥ 2: any single-character
+//! transcription error produces a string that is not a valid word,
+//! making mistakes immediately detectable. The list has exactly 256
+//! entries (one per byte value).
 //!
 //! Format: `WORD-WORD-WORD-WORD / WORD-WORD-WORD-WORD / ...`
 //! Groups of 4 words separated by ` / ` for easy row tracking during
@@ -10,41 +12,41 @@
 
 use std::fmt;
 
-/// 256 words, indexed by byte value. Selected for phonetic distinctness
-/// and ease of transcription.
+/// 256 words, indexed by byte value. Every pair differs in at least 2
+/// character positions (Hamming distance ≥ 2).
 const WORDLIST: [&str; 256] = [
-    "able", "acid", "aged", "also", "arch", "area", "army", "atom", // 0x00
-    "aunt", "away", "back", "bake", "band", "bank", "bark", "base", // 0x08
-    "bath", "bead", "beam", "bear", "beat", "beef", "bell", "belt", // 0x10
-    "bend", "best", "bike", "bird", "bite", "blow", "blue", "blur", // 0x18
-    "boat", "body", "bold", "bolt", "bomb", "bond", "bone", "book", // 0x20
-    "born", "boss", "bowl", "bulk", "bump", "burn", "bush", "busy", // 0x28
-    "buzz", "cafe", "cage", "cake", "calm", "came", "camp", "cane", // 0x30
-    "cape", "card", "care", "cart", "case", "cash", "cast", "cave", // 0x38
-    "cell", "chat", "chef", "chin", "chip", "chop", "city", "clad", // 0x40
-    "clam", "clan", "claw", "clay", "clip", "club", "clue", "coal", // 0x48
-    "coat", "code", "coil", "coin", "cold", "colt", "come", "cook", // 0x50
-    "cool", "cope", "copy", "cord", "core", "corn", "cost", "crew", // 0x58
-    "crop", "crow", "cube", "cult", "cups", "curb", "cure", "curl", // 0x60
-    "cute", "damp", "dare", "dark", "dart", "dash", "data", "dawn", // 0x68
-    "days", "dead", "deaf", "deal", "dear", "deck", "deed", "deem", // 0x70
-    "deep", "deer", "demo", "dent", "deny", "desk", "dial", "dice", // 0x78
-    "diet", "dine", "dirt", "disc", "dish", "dock", "does", "dome", // 0x80
-    "done", "door", "dose", "down", "drag", "draw", "drip", "drop", // 0x88
-    "drum", "dual", "duck", "dude", "duel", "duet", "duke", "dull", // 0x90
-    "dune", "dusk", "dust", "duty", "each", "earn", "ease", "east", // 0x98
-    "easy", "edge", "edit", "else", "emit", "ends", "envy", "epic", // 0xA0
-    "even", "evil", "exam", "exit", "face", "fact", "fade", "fail", // 0xA8
-    "fair", "fake", "fall", "fame", "fang", "farm", "fast", "fate", // 0xB0
-    "fawn", "fear", "feat", "feed", "feel", "fell", "felt", "fern", // 0xB8
-    "file", "fill", "film", "find", "fine", "fire", "firm", "fish", // 0xC0
-    "fist", "five", "flag", "flat", "fled", "flew", "flex", "flip", // 0xC8
-    "flow", "foam", "fold", "folk", "fond", "font", "food", "foot", // 0xD0
-    "fork", "form", "fort", "foul", "four", "free", "frog", "from", // 0xD8
-    "fuel", "full", "fund", "fury", "fuse", "gait", "gale", "game", // 0xE0
-    "gang", "gate", "gave", "gaze", "gear", "gene", "gift", "gild", // 0xE8
-    "girl", "give", "glad", "glow", "glue", "goat", "goes", "gold", // 0xF0
-    "golf", "gone", "good", "grab", "gray", "grew", "grid", "grim", // 0xF8
+    "abet", "able", "acre", "agog", "ague", "ahoy", "aids", "alas", // 0x00
+    "also", "amen", "ammo", "aped", "area", "atom", "avid", "ayes", // 0x08
+    "bait", "balk", "bane", "baud", "bawl", "beau", "bees", "beta", // 0x10
+    "blot", "boar", "bogy", "boys", "bred", "brig", "buff", "bugs", // 0x18
+    "buoy", "cake", "calf", "cash", "chad", "chew", "chit", "chum", // 0x20
+    "clan", "clip", "cloy", "club", "coat", "coda", "come", "cool", // 0x28
+    "cozy", "dank", "deaf", "deem", "deft", "dewy", "dirt", "disk", // 0x30
+    "dons", "doom", "dour", "down", "draw", "dual", "dubs", "duct", // 0x38
+    "duly", "dupe", "ease", "eats", "edit", "eyed", "fair", "fast", // 0x40
+    "feel", "fens", "file", "fish", "flee", "flow", "foam", "foes", // 0x48
+    "font", "fore", "from", "full", "fuse", "gall", "gape", "gems", // 0x50
+    "gent", "gibe", "gins", "glib", "glut", "gone", "gram", "grid", // 0x58
+    "guru", "halt", "harm", "haul", "have", "hazy", "hear", "help", // 0x60
+    "herb", "high", "hind", "hips", "hobo", "hold", "hoop", "hope", // 0x68
+    "huge", "hulk", "hums", "hung", "iced", "info", "iota", "isle", // 0x70
+    "item", "jaws", "jigs", "jive", "john", "jolt", "kale", "keen", // 0x78
+    "king", "kite", "labs", "lacy", "lamb", "lard", "lead", "lied", // 0x80
+    "lily", "line", "list", "loft", "logs", "loon", "maid", "mart", // 0x88
+    "mate", "mean", "melt", "mend", "mere", "mike", "mole", "moor", // 0x90
+    "most", "muck", "mush", "nail", "name", "nary", "need", "nest", // 0x98
+    "node", "nook", "oils", "ones", "ours", "oust", "oval", "over", // 0xA0
+    "pads", "peck", "pegs", "pies", "pill", "pixy", "plop", "polo", // 0xA8
+    "pomp", "posh", "prod", "pulp", "pure", "rage", "rams", "rang", // 0xB0
+    "reek", "rhea", "ribs", "rice", "roll", "rosy", "rump", "rune", // 0xB8
+    "rusk", "ruts", "sago", "sans", "scan", "seep", "sell", "shot", // 0xC0
+    "silt", "sirs", "skim", "slap", "slit", "smog", "snow", "snub", // 0xC8
+    "sock", "song", "spat", "spew", "stay", "sued", "sunk", "tags", // 0xD0
+    "tamp", "team", "tern", "thaw", "thud", "tick", "tint", "tire", // 0xD8
+    "tony", "tops", "tort", "tray", "trim", "twin", "unit", "used", // 0xE0
+    "vain", "veto", "vise", "void", "vote", "wack", "wade", "wand", // 0xE8
+    "warn", "wasp", "wavy", "ways", "weds", "wept", "wham", "whir", // 0xF0
+    "wink", "wipe", "wits", "work", "wren", "yawn", "yeah", "yoke", // 0xF8
 ];
 
 #[derive(Debug)]
@@ -207,5 +209,32 @@ mod tests {
     fn is_valid_word_rejects_unknown() {
         assert!(!is_valid_word("xyzzy"));
         assert!(!is_valid_word(""));
+    }
+
+    #[test]
+    fn wordlist_min_hamming_distance_is_2() {
+        for i in 0..WORDLIST.len() {
+            for j in (i + 1)..WORDLIST.len() {
+                let a = WORDLIST[i].as_bytes();
+                let b = WORDLIST[j].as_bytes();
+                assert_eq!(
+                    a.len(),
+                    b.len(),
+                    "length mismatch: {} vs {}",
+                    WORDLIST[i],
+                    WORDLIST[j]
+                );
+                let dist: usize = a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
+                assert!(
+                    dist >= 2,
+                    "Hamming distance {} < 2 between {:?} (0x{:02X}) and {:?} (0x{:02X})",
+                    dist,
+                    WORDLIST[i],
+                    i,
+                    WORDLIST[j],
+                    j
+                );
+            }
+        }
     }
 }
