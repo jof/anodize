@@ -599,10 +599,24 @@ fn write_session_inner(
     close_track_session(&sg, CloseTarget::Track).context("CLOSE TRACK")?;
     tracing::info!("write_session_inner: CLOSE TRACK done");
 
-    step(progress, "CLOSE SESSION — committing session boundary…");
-    tracing::info!(is_final, "write_session_inner: CLOSE SESSION");
-    close_track_session(&sg, CloseTarget::Session).context("CLOSE SESSION")?;
-    tracing::info!("write_session_inner: CLOSE SESSION done");
+    // When is_final=true, close the disc (finalize) so no further sessions
+    // can be written.  For BD-R this is the only way to finalize — page 0x05
+    // MultiSession is CD/DVD only.  For CD-R/DVD-R, this acts as belt-and-
+    // suspenders alongside the FinalSession write parameter set earlier.
+    let close = if is_final {
+        CloseTarget::Disc
+    } else {
+        CloseTarget::Session
+    };
+    let label = if is_final {
+        "CLOSE DISC — finalizing…"
+    } else {
+        "CLOSE SESSION — committing session boundary…"
+    };
+    step(progress, label);
+    tracing::info!(is_final, ?close, "write_session_inner: closing");
+    close_track_session(&sg, close).context("CLOSE SESSION/DISC")?;
+    tracing::info!("write_session_inner: close done");
 
     step(progress, "Session committed successfully.");
     tracing::info!("write_session_inner: session write complete");
