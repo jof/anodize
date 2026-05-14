@@ -61,8 +61,6 @@ after a system crash or unexpected power loss.
   operator-supplied explanation of the incongruity so the discrepancy is
   permanently recorded.
 
-
-
 # Vestigial code removal: no audit log on shuttle
 
 There should be no audit log on the shuttle. It doesn't make any sense that it should only be on the CD drive but I think during development sometimes it did that. There shouldn't be an audit log on the shuttle; this is holdovers from my past usage of this shuttle stick.
@@ -75,41 +73,6 @@ It seems that during the InitRoot ceremony process while initializing the shares
 # Disk detection feedback
 
 When performing the disk detection operations, the initial spin-up operation can be pretty slow. So we should give some feedback when we give some of the SG and SCSI read commands that we're waiting for a response.
-
-# BD-R subsequent session write failures
-
-WRITE(10) (SCSI opcode 0x2A) fails on the second session write to physical BD-R
-(BUFFALO USB drive, Verbatim BD-R media). Session 1 writes, syncs, and closes
-successfully (320 blocks at LBA 0). Track 2 starts at LBA 320 but is completely
-blank — the second write never landed a single sector.
-
-Disc examination (drutil trackinfo) confirms:
-  - Track 1: session 1, LBA 0–319, closed, valid ISO 9660 with intent audit log
-  - Track 2: session 2, LBA 320, blank=true, NWA=320, 12M free blocks
-  - Disc status: incomplete/appendable
-
-Hypotheses (in order of likelihood):
-
-1. Drive not ready after session close. After CLOSE SESSION (0x5B) completes for
-   session 1, disc_sync immediately spawns a new write_session thread. The BUFFALO
-   USB firmware may still be physically writing the session lead-out/lead-in and
-   updating the Disc Management Structure. The next WRITE(10) arrives while the
-   drive is busy and gets CHECK CONDITION (likely sense 02h/04h/08h — NOT READY,
-   LONG WRITE IN PROGRESS). Fix: add a TEST UNIT READY (0x00) polling loop with
-   backoff at the start of write_session_inner before issuing any writes.
-
-2. Missing MODE SELECT page 0x05 for physical BD-R. The code skips mode page 0x05
-   for BD-R (because cdemu had issues), but the physical drive's GET CONFIGURATION
-   lists Write Parameters Mode Page (05h) as a supported feature. Without setting
-   MultiSession::Open, the drive may default to single-session behavior and reject
-   writes after the first session close. Fix: conditionally set page 0x05 on
-   physical drives, or try-and-fallback.
-
-3. ISO LBA addressing bug (read-back issue, not write failure). build_iso hardcodes
-   all internal LBAs from 0 (root_dir_lba=20, etc.). For session 2 at disc LBA 320,
-   the PVD points to absolute LBA 20 (session 1 territory). Even if the write
-   succeeds, mounting session 2 would show session 1's directory tree. build_iso
-   needs an lba_offset parameter so internal LBAs are disc-absolute.
 
 
 # Retry logic on disc write failures
