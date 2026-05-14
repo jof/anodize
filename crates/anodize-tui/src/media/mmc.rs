@@ -421,6 +421,12 @@ pub fn profile_is_rewritable(profile: u16) -> bool {
     REWRITABLE_PROFILES.contains(&profile)
 }
 
+/// True for CD-family profiles (CD-ROM, CD-R, CD-RW).  CD tracks may have a
+/// 150-sector (2-second) pregap before the data area; DVD and BD do not.
+pub fn profile_is_cd(profile: u16) -> bool {
+    matches!(profile, 0x0008 | 0x0009 | 0x000A)
+}
+
 /// Maximum number of SAO sessions for a given MMC profile code.
 /// Defaults to 99 (CD-R limit) for unknown/unrecognised profiles.
 pub fn max_sessions_for_profile(profile: u16) -> u16 {

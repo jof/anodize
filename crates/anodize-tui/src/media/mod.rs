@@ -26,10 +26,10 @@ use anyhow::{Context, Result};
 use nix::mount::{mount, umount2, MntFlags, MsFlags};
 
 use mmc::{
-    close_track_session, get_current_profile, max_sessions_for_profile, profile_is_rewritable,
-    profile_name, read_disc_info, read_sectors, read_track_info, reserve_track, resolve_nwa,
-    send_opc, set_write_parameters, synchronize_cache, wait_drive_ready, write_sectors,
-    CloseTarget, DiscStatus, MultiSession, WriteParams, WriteType,
+    close_track_session, get_current_profile, max_sessions_for_profile, profile_is_cd,
+    profile_is_rewritable, profile_name, read_disc_info, read_sectors, read_track_info,
+    reserve_track, resolve_nwa, send_opc, set_write_parameters, synchronize_cache,
+    wait_drive_ready, write_sectors, CloseTarget, DiscStatus, MultiSession, WriteParams, WriteType,
 };
 use sgdev::{SgDev, CDS_DISC_OK};
 
@@ -332,6 +332,7 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
     // Read sessions from tracks.  Probe tracks 1..255 instead of
     // relying on the disc-info session count, which can under-report
     // on cdemu writable-load discs.
+    let is_cd = profile_is_cd(profile);
     let mut sessions: Vec<SessionEntry> = Vec::new();
     if info.status != DiscStatus::Blank {
         for track_num in 1..=255u8 {
@@ -342,21 +343,23 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
             if track.blank {
                 break; // reached the blank/invisible track — no more data
             }
-            // The track may have a 150-sector pregap (CD Red Book style)
-            // before the actual ISO data.  Try reading from the data area
-            // first (skip pregap), then fall back to reading from track start.
+            // CD-R tracks may have a 150-sector (2-second) Red Book pregap
+            // before the data area.  DVD and BD do not have pregaps.  Only
+            // attempt the pregap-skip probe on CD profiles to avoid issuing
+            // a wasteful (and potentially confusing) extra READ on BD/DVD.
             let data_sectors = track.size_sectors.max(1) as usize;
             let candidates: &[(u32, usize)] = if track.start_lba >= 0x8000_0000 {
                 // Negative LBA (e.g. -150): data starts at absolute LBA 0
                 let gap = 0u32.wrapping_sub(track.start_lba);
                 &[(0u32, data_sectors.saturating_sub(gap as usize).max(1))]
-            } else if data_sectors > 150 {
-                // Positive LBA: try with 150-sector pregap skip, then without
+            } else if is_cd && data_sectors > 150 {
+                // CD: try with 150-sector pregap skip, then without
                 &[
                     (track.start_lba + 150, data_sectors - 150),
                     (track.start_lba, data_sectors),
                 ]
             } else {
+                // BD-R / DVD-R / small CD tracks: read from track start directly
                 &[(track.start_lba, data_sectors)]
             };
             let mut parsed = false;
