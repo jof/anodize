@@ -77,10 +77,6 @@ At the share input screen, it's possible that the final word has a prefix which 
 It should look more like a text editor where you can go back edit the text and it will auto-complete as you type. In case of an error or invalid input of a share, rather than emptying the complete input, it should just highlight the invalid input and allow the user to go back and edit the text to correct it.
 
 
-# Remove "initialize by label" option from InitRoot ceremony
-
-Remove the "initialize by label" option from the InitRoot ceremony. This was added originally, thinking that this might take over some already-initialized HSMs, but it's not really needed and is confusing.
-
 # Self-signed certificate fingerprint display
 
 For the certificate preview modal, it says compare this fingerprint against your paper checklist, but when we're initializing the root CA that doesn't really make any sense.

@@ -63,7 +63,6 @@ pub struct DiscContext {
     pub burn_started: Option<Instant>,
     pub sessions_remaining: Option<u16>,
     pub intent_session_dir_name: Option<String>,
-    pub pending_key_action: Option<u8>, // 1=generate, 2=find-existing
     pub pending_intent_session: Option<SessionEntry>,
     pub session_state: Option<SessionState>,
 }
@@ -78,7 +77,6 @@ impl DiscContext {
             burn_started: None,
             sessions_remaining: None,
             intent_session_dir_name: None,
-            pending_key_action: None,
             pending_intent_session: None,
             session_state: None,
         }
@@ -612,11 +610,9 @@ impl App {
                     if input.is_complete() {
                         self.sss.share_input = None;
                         self.sss.shares = None;
-                        // All shares verified → proceed to HSM key generation
-                        self.ceremony.state = CeremonyPhase::Planning(PlanningState::KeyAction);
-                        self.set_status(
-                            "All shares verified. [1] Generate root keypair  [2] Use existing key",
-                        );
+                        // All shares verified → generate root keypair
+                        self.set_status("All shares verified. Writing intent to disc…");
+                        self.do_write_intent();
                     }
                 }
                 return Action::Noop;
@@ -918,10 +914,6 @@ impl App {
             // Ceremony operations
             Action::SelectOperation(op) => {
                 self.do_select_operation(op);
-            }
-            Action::SelectKeyAction(n) => {
-                self.disc.pending_key_action = Some(n);
-                self.do_write_intent();
             }
             Action::SelectCertProfile(idx) => {
                 self.data.selected_profile_idx = Some(idx);

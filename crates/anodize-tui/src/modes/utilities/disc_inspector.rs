@@ -732,7 +732,6 @@ mod tests {
             burn_started: None,
             sessions_remaining: Some(10),
             intent_session_dir_name: None,
-            pending_key_action: None,
             pending_intent_session: None,
             session_state: Some(SessionState {
                 version: 1,

@@ -16,7 +16,6 @@ pub enum PlanningState {
     CustodianSetup,
     ShareReveal,
     ShareVerify,
-    KeyAction,
     // SignCsr
     LoadCsr,
     CsrPreview,
@@ -133,8 +132,7 @@ impl CeremonyMode {
             // 0 — Select
             CeremonyPhase::OperationSelect => 0,
             // 1 — Plan (operation-specific configuration)
-            CeremonyPhase::Planning(PlanningState::KeyAction)
-            | CeremonyPhase::Planning(PlanningState::LoadCsr)
+            CeremonyPhase::Planning(PlanningState::LoadCsr)
             | CeremonyPhase::Planning(PlanningState::CsrPreview)
             | CeremonyPhase::Planning(PlanningState::RevokeSelect)
             | CeremonyPhase::Planning(PlanningState::RevokeInput)
@@ -170,7 +168,6 @@ impl CeremonyMode {
     pub fn render_with_app(&self, frame: &mut Frame, area: Rect, app: &crate::app::App) {
         let title = match self.state {
             CeremonyPhase::OperationSelect => "Select Operation",
-            CeremonyPhase::Planning(PlanningState::KeyAction) => "Key Management",
             CeremonyPhase::Commit => "Committing Intent to Disc\u{2026}",
             CeremonyPhase::PostCommitError => "Post-Commit Error",
             CeremonyPhase::Execute => "Certificate Preview \u{2014} VERIFY FINGERPRINT",
@@ -292,24 +289,6 @@ impl CeremonyMode {
                     "  [6]  Migrate disc           (copy all sessions to new disc)".into(),
                     "  [7]  Key backup             (pair HSMs + backup signing key)".into(),
                     "  [8]  Validate disc           (verify integrity + HSM audit)".into(),
-                ]
-            }
-
-            CeremonyPhase::Planning(PlanningState::KeyAction) => {
-                let label = app
-                    .profile
-                    .as_ref()
-                    .map(|p| p.hsm.key_label.as_str())
-                    .unwrap_or("?");
-                vec![
-                    String::new(),
-                    format!("  Key label: {label:?}"),
-                    String::new(),
-                    "  [1]  Generate new P-384 keypair (fresh ceremony)".into(),
-                    "  [2]  Use existing key by label  (resume)".into(),
-                    String::new(),
-                    "  Selecting either option writes an intent record to disc".into(),
-                    "  before using the HSM. Do not remove the disc.".into(),
                 ]
             }
 
@@ -878,12 +857,6 @@ impl Component for CeremonyMode {
                 KeyCode::Char('6') => Action::SelectOperation(Operation::MigrateDisc),
                 KeyCode::Char('7') => Action::SelectOperation(Operation::KeyBackup),
                 KeyCode::Char('8') => Action::SelectOperation(Operation::ValidateDisc),
-                _ => Action::Noop,
-            },
-
-            CeremonyPhase::Planning(PlanningState::KeyAction) => match key.code {
-                KeyCode::Char('1') => Action::SelectKeyAction(1),
-                KeyCode::Char('2') => Action::SelectKeyAction(2),
                 _ => Action::Noop,
             },
 

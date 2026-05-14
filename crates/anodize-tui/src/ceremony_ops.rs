@@ -168,21 +168,8 @@ impl App {
     // ── Post-intent InitRoot: HSM bootstrap + keygen + cert build ─────────────
 
     pub(crate) fn post_intent_init_root(&mut self) -> Result<(), String> {
-        // For key generation (action 1) the token may not exist yet — open
-        // the first available slot.  For find-existing (action 2) the token
-        // must already exist so use the normal path.
-        if self.disc.pending_key_action == Some(1) {
-            self.do_bootstrap_hsm()?;
-        } else {
-            let pin = self.pin_buf.clone();
-            self.do_login_with_pin(&pin)?;
-        }
-
-        match self.disc.pending_key_action {
-            Some(1) => self.do_generate_and_build(),
-            Some(2) => self.do_find_and_build(),
-            _ => Err("Unknown key action".into()),
-        }
+        self.do_bootstrap_hsm()?;
+        self.do_generate_and_build()
     }
 
     // ── Intent burn tick ──────────────────────────────────────────────────────
@@ -1589,26 +1576,6 @@ impl App {
         self.do_build_cert()
     }
 
-    fn do_find_and_build(&mut self) -> Result<(), String> {
-        let label = match &self.profile {
-            Some(p) => p.hsm.key_label.clone(),
-            None => return Err("No profile".into()),
-        };
-        let key = {
-            let actor = match self.hw.actor.as_ref() {
-                Some(a) => a,
-                None => return Err("No HSM session".into()),
-            };
-            match actor.find_key(&label) {
-                Ok(k) => k,
-                Err(e) => return Err(format!("Key not found: {e}")),
-            }
-        };
-        self.hw.root_key = Some(key);
-        self.set_status(format!("Found existing key (label={label:?})"));
-        self.do_build_cert()
-    }
-
     fn do_build_cert(&mut self) -> Result<(), String> {
         let actor = match self.hw.actor.clone() {
             Some(a) => a,
@@ -2034,16 +2001,11 @@ impl App {
                         )
                     })
                     .unwrap_or_default();
-                let action_str = match self.disc.pending_key_action {
-                    Some(1) => "generate",
-                    Some(2) => "find-existing",
-                    _ => "unknown",
-                };
                 Some((
                     "cert.root.intent".into(),
                     serde_json::json!({
                         "operation": "sign-root-cert",
-                        "key_action": action_str,
+                        "key_action": "generate",
                         "cert_params": {
                             "subject": {
                                 "common_name": cn,
@@ -3054,7 +3016,6 @@ mod tests {
     fn test_app() -> crate::app::App {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.current_op = Some(Operation::InitRoot);
-        app.disc.pending_key_action = Some(1);
         app.pin_buf = hex::encode(vec![0u8; 32]);
         app
     }
