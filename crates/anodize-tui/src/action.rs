@@ -1,5 +1,5 @@
 /// Which CA operation is being performed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Operation {
     InitRoot,
     SignCsr,

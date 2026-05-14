@@ -1633,7 +1633,7 @@ impl App {
         self.data.cert_der = Some(cert_der);
         self.data.crl_der = Some(crl_der);
         self.ceremony.state = CeremonyPhase::Execute;
-        self.set_status("Certificate built. Verify fingerprint before writing.");
+        self.set_status("Certificate built. Record fingerprint before writing.");
         Ok(())
     }
 

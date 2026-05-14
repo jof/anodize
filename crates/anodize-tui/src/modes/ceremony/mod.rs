@@ -164,13 +164,29 @@ impl CeremonyMode {
         }
     }
 
+    /// Phase-bar title for the Execute phase, context-sensitive to operation.
+    pub fn execute_phase_title(op: Option<Operation>) -> &'static str {
+        match op {
+            Some(Operation::InitRoot) => "Certificate Preview \u{2014} RECORD FINGERPRINT",
+            _ => "Certificate Preview \u{2014} VERIFY FINGERPRINT",
+        }
+    }
+
+    /// Instruction text shown below the fingerprint on the Execute screen.
+    pub fn fingerprint_instruction(op: Option<Operation>) -> &'static str {
+        match op {
+            Some(Operation::InitRoot) => "  Record this fingerprint on your paper checklist.",
+            _ => "  Compare this fingerprint against your paper checklist.",
+        }
+    }
+
     /// Render with access to parent App state.
     pub fn render_with_app(&self, frame: &mut Frame, area: Rect, app: &crate::app::App) {
         let title = match self.state {
             CeremonyPhase::OperationSelect => "Select Operation",
             CeremonyPhase::Commit => "Committing Intent to Disc\u{2026}",
             CeremonyPhase::PostCommitError => "Post-Commit Error",
-            CeremonyPhase::Execute => "Certificate Preview \u{2014} VERIFY FINGERPRINT",
+            CeremonyPhase::Execute => Self::execute_phase_title(app.current_op),
             CeremonyPhase::BurningDisc => "Writing Session\u{2026}",
             CeremonyPhase::DiscDone => match app.current_op {
                 Some(Operation::InitRoot) => "Root Init Written",
@@ -434,7 +450,7 @@ impl CeremonyMode {
                     lines.push("  Initial CRL #1 (empty) will be included in this session.".into());
                 }
                 lines.push(String::new());
-                lines.push("  Compare this fingerprint against your paper checklist.".into());
+                lines.push(Self::fingerprint_instruction(app.current_op).into());
                 lines.push(String::new());
                 lines.push("  [1]  Proceed to disc write".into());
                 lines.push("  [Esc]  Abort".into());
@@ -997,5 +1013,63 @@ impl Component for CeremonyMode {
             .title_style(crate::theme::TITLE);
         let para = Paragraph::new("  (Ceremony mode)").block(block);
         frame.render_widget(para, area);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execute_title_init_root_says_record() {
+        let title = CeremonyMode::execute_phase_title(Some(Operation::InitRoot));
+        assert!(
+            title.contains("RECORD"),
+            "InitRoot should say RECORD, got: {title}"
+        );
+        assert!(
+            !title.contains("VERIFY"),
+            "InitRoot should not say VERIFY, got: {title}"
+        );
+    }
+
+    #[test]
+    fn execute_title_other_ops_says_verify() {
+        for op in [
+            Some(Operation::SignCsr),
+            Some(Operation::RevokeCert),
+            Some(Operation::IssueCrl),
+            None,
+        ] {
+            let title = CeremonyMode::execute_phase_title(op);
+            assert!(
+                title.contains("VERIFY"),
+                "Op {op:?} should say VERIFY, got: {title}"
+            );
+        }
+    }
+
+    #[test]
+    fn fingerprint_instruction_init_root_says_record() {
+        let text = CeremonyMode::fingerprint_instruction(Some(Operation::InitRoot));
+        assert!(
+            text.contains("Record"),
+            "InitRoot instruction should say Record, got: {text}"
+        );
+    }
+
+    #[test]
+    fn fingerprint_instruction_other_ops_says_compare() {
+        for op in [
+            Some(Operation::SignCsr),
+            Some(Operation::RevokeCert),
+            None,
+        ] {
+            let text = CeremonyMode::fingerprint_instruction(op);
+            assert!(
+                text.contains("Compare"),
+                "Op {op:?} should say Compare, got: {text}"
+            );
+        }
     }
 }
