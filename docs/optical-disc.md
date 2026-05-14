@@ -47,10 +47,11 @@ All disc operations use Linux SG_IO ioctls to send SCSI MMC commands directly to
 
 | Command | Opcode | Purpose |
 |---|---|---|
+| `TEST UNIT READY` | 0x00 | Drive readiness polling (TUR loop with backoff) |
 | `CDROM_DRIVE_STATUS` | 0x5326 | Disc presence check |
 | `GET CONFIGURATION` | 0x46 | Media type detection — **rejects** rewritable profiles (CD-RW, DVD-RW, BD-RE) |
-| `READ DISC INFORMATION` | 0x51 | Disc status (blank / incomplete / complete), session count, NWA |
-| `READ TRACK INFORMATION` | 0x52 | Per-track LBA and size for reading prior sessions |
+| `READ DISC INFORMATION` | 0x51 | Disc status (blank / incomplete / complete), session count, last track number |
+| `READ TRACK INFORMATION` | 0x52 | Per-track LBA, size, and NWA (via `last_track_l`) |
 | `READ(10)` | 0x28 | Read sectors to reconstruct prior session ISO images |
 | `SEND OPC INFORMATION` | 0x54 | Laser power calibration before writing |
 | `MODE SELECT 10` | 0x55 pg 0x05 | Set SAO write mode, open multi-session, BUFE on |
@@ -113,6 +114,36 @@ The TUI's `ClockCheck` screen displays the current UTC time and requires the ope
 2. Prompt operator to insert a blank disc (cdemu disc swap in dev).
 3. Write a single session containing all accumulated directories to the new disc.
 4. Session 0 on the new disc is flagged as a migration in the audit log.
+
+---
+
+## SCSI design choices and invariants
+
+### Drive readiness
+
+Every disc interaction (`scan_disc`, `write_session`) begins with a `TEST UNIT READY` (0x00) polling loop with exponential backoff (250 ms → 5 s, 60–120 s timeout). Physical USB drives (BUFFALO, Pioneer) can stay busy for tens of seconds after session close while writing lead-out or updating the Disc Management Structure. This mirrors `libburn`'s TUR pattern.
+
+### NWA resolution
+
+The Next Writable Address for each session is resolved via `READ TRACK INFORMATION` for the **last track number** reported by `READ DISC INFORMATION` (`last_track_l`). This is the most portable method and works on all tested drives.
+
+Fallback: if the `last_track_l` query fails, try track 0xFF ("invisible track" per Feature 0021h Incremental Streaming Writable). This is a CD-R era concept that USB bridge chipsets frequently reject — hence fallback, not primary.
+
+Validation: NWA must be > 0 on a non-blank disc. A zero NWA would mean overwriting session 1 — the code bails with a clear error rather than silently corrupting the archive.
+
+Reference: `libburn` (the canonical Linux burning library) never uses track 0xFF; it always queries by actual track number from `READ DISC INFORMATION`.
+
+### Profile-aware pregap handling
+
+CD-R tracks may have a 150-sector (2-second) Red Book pregap before the data area. `scan_disc` only attempts the pregap-skip read probe on CD profiles (0x0008–0x000A). BD-R and DVD-R do not have pregaps, so reading starts directly at the track start LBA — avoiding a wasteful (and potentially confusing) extra `READ(10)`.
+
+### Disc finalization
+
+When `is_final=true`, the session close uses `CLOSE TRACK SESSION` close function **0x03** (`CloseTarget::Disc`) instead of 0x02 (`CloseTarget::Session`). This is the only way to finalize BD-R, which skips MODE SELECT page 0x05 entirely. For CD-R/DVD-R it acts as belt-and-suspenders alongside the `MultiSession::FinalSession` write parameter. All current ceremony callers pass `is_final=false` — discs remain appendable throughout the ceremony lifecycle.
+
+### MODE SELECT page 0x05
+
+Write parameters (SAO mode, BUFE, multi-session state) are set via MODE SELECT page 0x05 for CD-R and DVD-R only. BD-R drives manage write parameters internally and typically reject or ignore page 0x05 — it is intentionally skipped for BD-R profiles.
 
 ---
 
