@@ -72,10 +72,6 @@ There should be no audit log on the shuttle. It doesn't make any sense that it s
 It seems that during the InitRoot ceremony process while initializing the shares, we pushed escape to go back and this state seems like we've picked a generation number and the custodians were set, but it hasn't been written to disk or HSM yet.
 
 
-# Self-signed certificate fingerprint display
-
-For the certificate preview modal, it says compare this fingerprint against your paper checklist, but when we're initializing the root CA that doesn't really make any sense.
-
 # Disk detection feedback
 
 When performing the disk detection operations, the initial spin-up operation can be pretty slow. So we should give some feedback when we give some of the SG and SCSI read commands that we're waiting for a response.
