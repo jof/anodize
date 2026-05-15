@@ -545,17 +545,20 @@ impl App {
                     == CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup)
             {
                 if let Some(ref mut setup) = self.sss.custodian_setup {
-                    setup.handle_key(key);
-                    if setup.aborted {
-                        self.sss.custodian_setup = None;
+                    // Intercept Esc before the component to gate behind
+                    // a confirmation dialog instead of immediate abort.
+                    if key.code == KeyCode::Esc {
                         let is_rekey = self.ceremony.state
                             == CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup);
-                        if is_rekey {
-                            return Action::RekeyAbort;
+                        let action = if is_rekey {
+                            Action::RekeyAbort
                         } else {
-                            return Action::InitRootAbort;
-                        }
+                            Action::InitRootAbort
+                        };
+                        self.show_abort_confirm(action);
+                        return Action::Noop;
                     }
+                    setup.handle_key(key);
                     if setup.confirmed {
                         let names = setup.names.clone();
                         let threshold = setup.threshold;
@@ -579,7 +582,8 @@ impl App {
         if self.mode == Mode::Ceremony {
             if self.ceremony.state == CeremonyPhase::Planning(PlanningState::ShareReveal) {
                 if key.code == KeyCode::Esc {
-                    return Action::InitRootAbort;
+                    self.show_abort_confirm(Action::InitRootAbort);
+                    return Action::Noop;
                 }
                 if let Some(ref mut reveal) = self.sss.share_reveal {
                     if reveal.handle_key(key) {
@@ -603,7 +607,8 @@ impl App {
             }
             if self.ceremony.state == CeremonyPhase::Planning(PlanningState::ShareVerify) {
                 if key.code == KeyCode::Esc {
-                    return Action::InitRootAbort;
+                    self.show_abort_confirm(Action::InitRootAbort);
+                    return Action::Noop;
                 }
                 if let Some(ref mut input) = self.sss.share_input {
                     input.handle_key(key);
@@ -621,10 +626,7 @@ impl App {
             // Quorum phase: collect shares → reconstruct PIN → HSM login → execute
             if self.ceremony.state == CeremonyPhase::Quorum {
                 if key.code == KeyCode::Esc {
-                    self.sss.share_input = None;
-                    self.current_op = None;
-                    self.ceremony.state = CeremonyPhase::OperationSelect;
-                    self.set_status("Quorum aborted.");
+                    self.show_abort_confirm(Action::CeremonyCancel);
                     return Action::Noop;
                 }
                 if let Some(ref mut input) = self.sss.share_input {
@@ -639,7 +641,8 @@ impl App {
             // RekeyShares: quorum input → reconstruct PIN
             if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RekeyQuorum) {
                 if key.code == KeyCode::Esc {
-                    return Action::RekeyAbort;
+                    self.show_abort_confirm(Action::RekeyAbort);
+                    return Action::Noop;
                 }
                 if let Some(ref mut input) = self.sss.share_input {
                     input.handle_key(key);
@@ -654,10 +657,7 @@ impl App {
             // KeyBackup: quorum input → reconstruct PIN → discover devices
             if self.ceremony.state == CeremonyPhase::Planning(PlanningState::BackupQuorum) {
                 if key.code == KeyCode::Esc {
-                    self.sss.share_input = None;
-                    self.current_op = None;
-                    self.ceremony.state = CeremonyPhase::OperationSelect;
-                    self.set_status("Backup aborted.");
+                    self.show_abort_confirm(Action::CeremonyCancel);
                     return Action::Noop;
                 }
                 if let Some(ref mut input) = self.sss.share_input {
@@ -676,9 +676,8 @@ impl App {
                     use crate::modes::utilities::backup::BackupPhase;
                     match self.utilities.backup.phase {
                         BackupPhase::SelectSource => {
-                            self.current_op = None;
-                            self.ceremony.state = CeremonyPhase::OperationSelect;
-                            self.set_status("Backup aborted.");
+                            self.show_abort_confirm(Action::CeremonyCancel);
+                            return Action::Noop;
                         }
                         _ => {
                             self.utilities.backup.go_back();
@@ -710,7 +709,8 @@ impl App {
 
             if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RekeyShareReveal) {
                 if key.code == KeyCode::Esc {
-                    return Action::RekeyAbort;
+                    self.show_abort_confirm(Action::RekeyAbort);
+                    return Action::Noop;
                 }
                 if let Some(ref mut reveal) = self.sss.share_reveal {
                     if reveal.handle_key(key) {
@@ -734,7 +734,8 @@ impl App {
             }
             if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RekeyShareVerify) {
                 if key.code == KeyCode::Esc {
-                    return Action::RekeyAbort;
+                    self.show_abort_confirm(Action::RekeyAbort);
+                    return Action::Noop;
                 }
                 if let Some(ref mut input) = self.sss.share_input {
                     input.handle_key(key);
@@ -796,7 +797,25 @@ impl App {
         // Delegate to the active mode's component
         match self.mode {
             Mode::Setup => self.setup.handle_key_event(key),
-            Mode::Ceremony => self.ceremony.handle_key_event(key),
+            Mode::Ceremony => {
+                let action = self.ceremony.handle_key_event(key);
+                // Gate full-ceremony-abort actions behind a confirmation
+                // dialog when the current phase warrants it.
+                if self.ceremony.needs_abort_confirmation() {
+                    match action {
+                        Action::CeremonyCancel
+                        | Action::InitRootAbort
+                        | Action::RekeyAbort
+                        | Action::RevokeSelectCancel => {
+                            self.show_abort_confirm(action);
+                            return Action::Noop;
+                        }
+                        _ => action,
+                    }
+                } else {
+                    action
+                }
+            }
             Mode::Utilities => self.utilities.handle_key_event(key),
         }
     }
@@ -1211,6 +1230,9 @@ impl App {
             }
 
             Action::CeremonyCancel => {
+                self.sss.share_input = None;
+                self.sss.share_reveal = None;
+                self.sss.custodian_setup = None;
                 self.current_op = None;
                 self.pending_burn_reconfirm = false;
                 self.ceremony.state = CeremonyPhase::OperationSelect;
@@ -1357,6 +1379,38 @@ impl App {
     /// Show a two-key confirmation dialog for a critical action.
     pub fn show_confirm(&mut self, title: impl Into<String>, body: Vec<String>, action: Action) {
         self.confirm_dialog = Some(ConfirmDialog::new(title, body, action));
+    }
+
+    /// Show a two-key confirmation dialog before aborting the active ceremony.
+    fn show_abort_confirm(&mut self, action: Action) {
+        let body = self.abort_confirm_body();
+        self.show_confirm("Abort Ceremony?", body, action);
+    }
+
+    /// Context-sensitive warning body for the abort confirmation dialog.
+    fn abort_confirm_body(&self) -> Vec<String> {
+        use CeremonyPhase::*;
+        use PlanningState::*;
+        match &self.ceremony.state {
+            Planning(ShareReveal)
+            | Planning(ShareVerify)
+            | Planning(RekeyShareReveal)
+            | Planning(RekeyShareVerify) => vec![
+                "Generated shares will be destroyed.".into(),
+                "Custodians who recorded shares must discard them.".into(),
+            ],
+            Quorum | Planning(RekeyQuorum) | Planning(BackupQuorum) | Execute | ClockReconfirm => {
+                vec![
+                    "HSM session and partially-reconstructed PIN".into(),
+                    "will be discarded.".into(),
+                ]
+            }
+            PostCommitError => vec![
+                "Intent was already written to disc.".into(),
+                "Aborting leaves an orphaned intent session.".into(),
+            ],
+            _ => vec!["All ceremony progress will be lost.".into()],
+        }
     }
 
     /// Show a quit-confirmation dialog (two-key: [1] then [Enter]).

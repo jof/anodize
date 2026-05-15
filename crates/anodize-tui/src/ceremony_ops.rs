@@ -3535,7 +3535,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_cancels_from_csr_preview() {
+    fn esc_opens_abort_confirm_from_csr_preview() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
@@ -3544,18 +3544,24 @@ mod tests {
             CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::CsrPreview);
 
         let action = app.handle_key_event(key(KeyCode::Esc));
-        app.update(action);
 
+        assert!(
+            matches!(action, Action::Noop),
+            "Esc should return Noop (dialog opened)"
+        );
+        assert!(
+            app.confirm_dialog.is_some(),
+            "Esc in CsrPreview should open abort confirmation dialog"
+        );
+        // Ceremony state should NOT have changed yet.
         assert_eq!(
             app.ceremony.state,
-            CeremonyPhase::OperationSelect,
-            "Esc in CsrPreview should return to OperationSelect"
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::CsrPreview),
         );
-        assert!(app.current_op.is_none());
     }
 
     #[test]
-    fn esc_cancels_from_clock_reconfirm() {
+    fn esc_opens_abort_confirm_from_clock_reconfirm() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
@@ -3563,13 +3569,13 @@ mod tests {
         app.ceremony.state = CeremonyPhase::ClockReconfirm;
 
         let action = app.handle_key_event(key(KeyCode::Esc));
-        app.update(action);
 
-        assert_eq!(
-            app.ceremony.state,
-            CeremonyPhase::OperationSelect,
-            "Esc in ClockReconfirm should return to OperationSelect"
+        assert!(matches!(action, Action::Noop));
+        assert!(
+            app.confirm_dialog.is_some(),
+            "Esc in ClockReconfirm should open abort confirmation dialog"
         );
+        assert_eq!(app.ceremony.state, CeremonyPhase::ClockReconfirm);
     }
 
     #[test]
@@ -3707,7 +3713,7 @@ mod tests {
     }
 
     #[test]
-    fn esc_from_stale_clock_reconfirm_clears_flag() {
+    fn abort_confirm_two_key_sequence_cancels_ceremony() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
@@ -3715,13 +3721,65 @@ mod tests {
         app.ceremony.state = CeremonyPhase::ClockReconfirm;
         app.current_op = Some(Operation::InitRoot);
 
+        // Esc opens the abort confirm dialog.
         let action = app.handle_key_event(key(KeyCode::Esc));
+        assert!(matches!(action, Action::Noop));
+        assert!(app.confirm_dialog.is_some());
+
+        // Press [1] — first key of two-key confirm.
+        let action = app.handle_key_event(key(KeyCode::Char('1')));
+        assert!(matches!(action, Action::Noop));
+        assert!(app.confirm_dialog.is_some(), "dialog should still be open");
+
+        // Press [Enter] — second key fires the abort action.
+        let action = app.handle_key_event(key(KeyCode::Enter));
         app.update(action);
 
         assert!(
             !app.pending_burn_reconfirm,
             "CeremonyCancel should clear pending_burn_reconfirm"
         );
+        assert_eq!(app.ceremony.state, CeremonyPhase::OperationSelect);
+        assert!(app.confirm_dialog.is_none());
+    }
+
+    #[test]
+    fn abort_confirm_esc_dismisses_dialog() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.mode = crate::action::Mode::Ceremony;
+        app.setup_complete = true;
+        app.ceremony.state =
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::ShareReveal);
+
+        // Esc opens the abort confirm dialog.
+        let _ = app.handle_key_event(key(KeyCode::Esc));
+        assert!(app.confirm_dialog.is_some());
+
+        // Esc on the dialog dismisses it without aborting.
+        let action = app.handle_key_event(key(KeyCode::Esc));
+        assert!(matches!(action, Action::Noop));
+        assert!(app.confirm_dialog.is_none(), "dialog should be dismissed");
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::ShareReveal),
+            "ceremony should continue after dismissing dialog"
+        );
+    }
+
+    #[test]
+    fn validate_report_esc_exits_without_dialog() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.mode = crate::action::Mode::Ceremony;
+        app.setup_complete = true;
+        app.current_op = Some(Operation::ValidateDisc);
+        app.ceremony.state =
+            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::ValidateReport);
+
+        let action = app.handle_key_event(key(KeyCode::Esc));
+        app.update(action);
+
+        // ValidateReport is read-only — Esc should cancel directly, no dialog.
+        assert!(app.confirm_dialog.is_none());
         assert_eq!(app.ceremony.state, CeremonyPhase::OperationSelect);
     }
 

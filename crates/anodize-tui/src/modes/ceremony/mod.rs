@@ -116,6 +116,22 @@ impl CeremonyMode {
         )
     }
 
+    /// Whether aborting from the current phase requires a two-key confirmation
+    /// dialog.  Returns `false` for phases that are safe to leave freely
+    /// (menu, completion screens, auto-advance, read-only reports).
+    pub fn needs_abort_confirmation(&self) -> bool {
+        !matches!(
+            self.state,
+            CeremonyPhase::OperationSelect
+                | CeremonyPhase::Done
+                | CeremonyPhase::DiscDone
+                | CeremonyPhase::Commit
+                | CeremonyPhase::BurningDisc
+                | CeremonyPhase::Planning(PlanningState::ValidateReport)
+                | CeremonyPhase::Planning(PlanningState::ValidateHsmResult)
+        )
+    }
+
     pub fn set_state_csr_preview(&mut self) {
         self.state = CeremonyPhase::Planning(PlanningState::CsrPreview);
     }

@@ -65,10 +65,6 @@ after a system crash or unexpected power loss.
 
 There should be no audit log on the shuttle. It doesn't make any sense that it should only be on the CD drive but I think during development sometimes it did that. There shouldn't be an audit log on the shuttle; this is holdovers from my past usage of this shuttle stick.
 
-## Ceremonies should resist accidental cancellation
-
-It seems that during the InitRoot ceremony process while initializing the shares, we pushed escape to go back and this state seems like we've picked a generation number and the custodians were set, but it hasn't been written to disk or HSM yet.
-
 
 ## Disk detection feedback
 
