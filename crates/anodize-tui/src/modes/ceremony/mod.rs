@@ -1060,11 +1060,7 @@ mod tests {
 
     #[test]
     fn fingerprint_instruction_other_ops_says_compare() {
-        for op in [
-            Some(Operation::SignCsr),
-            Some(Operation::RevokeCert),
-            None,
-        ] {
+        for op in [Some(Operation::SignCsr), Some(Operation::RevokeCert), None] {
             let text = CeremonyMode::fingerprint_instruction(op);
             assert!(
                 text.contains("Compare"),

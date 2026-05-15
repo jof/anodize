@@ -46,7 +46,7 @@ time           = { version = "0.3", features = ["formatting", "macros", "parsing
 thiserror      = "2"
 anyhow         = "1"
 # System / ioctl
-nix            = { version = "0.29", features = ["mount", "ioctl", "fs", "reboot", "signal"] }
+nix            = { version = "0.29", features = ["ioctl", "fs", "reboot", "signal"] }
 # Logging
 tracing        = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

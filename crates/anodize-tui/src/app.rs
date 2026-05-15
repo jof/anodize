@@ -815,7 +815,18 @@ impl App {
 
     /// Background polling for disc/shuttle state + burn completion.
     fn background_tick(&mut self) {
-        // Shuttle scan during WaitShuttle
+        // Always update shuttle presence for the status bar.
+        // The shuttle is systemd-managed; we just stat the sentinel file.
+        let shuttle_present = self.shuttle_mount.join("profile.toml").is_file();
+        if shuttle_present {
+            if self.hw.shuttle_state == HwState::Absent {
+                self.hw.shuttle_state = HwState::Ready("mounted".into());
+            }
+        } else {
+            self.hw.shuttle_state = HwState::Absent;
+        }
+
+        // Full shuttle scan (profile load) during WaitShuttle
         if self.mode == Mode::Setup && self.setup.phase == SetupPhase::WaitShuttle {
             self.tick_wait_shuttle();
         }

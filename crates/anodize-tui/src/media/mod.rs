@@ -1,6 +1,8 @@
-//! Ceremony device management — USB mounting and optical disc session lifecycle.
+//! Ceremony device management — shuttle USB access and optical disc session lifecycle.
 //!
-//! USB mounting uses nix::mount::mount(2) directly (requires CAP_SYS_ADMIN).
+//! The shuttle USB (labelled ANODIZE) is mounted/unmounted by systemd
+//! (mount-anodize-shuttle.service + BindsTo= the udev device unit).
+//! The ceremony binary is a pure consumer of /run/anodize/shuttle/.
 //! Disc operations use SG_IO MMC commands via the sgdev/mmc modules.
 //! No external tool subprocesses.
 
@@ -23,7 +25,6 @@ pub enum BurnProgress {
 }
 
 use anyhow::{Context, Result};
-use nix::mount::{mount, umount2, MntFlags, MsFlags};
 
 use mmc::{
     close_track_session, get_current_profile, max_sessions_for_profile, profile_is_cd,
@@ -33,49 +34,7 @@ use mmc::{
 };
 use sgdev::{SgDev, CDS_DISC_OK};
 
-// ── USB discovery and mounting ────────────────────────────────────────────────
-
-/// Scan /sys/block/sd* and enumerate all sd* block devices and their partitions.
-/// Returns device paths like /dev/sda, /dev/sda1, /dev/sdb1, etc.
-///
-/// The removable=1 sysfs check is intentionally omitted: QEMU usb-storage may report
-/// removable=0 depending on kernel/QEMU version, and the profile.toml presence check
-/// in find_profile_usb() is the real discriminator — any drive without it is unmounted
-/// immediately and has no further effect.
-pub fn scan_usb_partitions() -> Vec<PathBuf> {
-    let mut result = Vec::new();
-    let Ok(entries) = std::fs::read_dir("/sys/block") else {
-        return result;
-    };
-
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if !name_str.starts_with("sd") {
-            continue;
-        }
-
-        // Look for partition sub-entries (sda1, sda2, …)
-        let block_dir = entry.path();
-        if let Ok(sub) = std::fs::read_dir(&block_dir) {
-            let mut has_parts = false;
-            for sub_entry in sub.flatten() {
-                let sub_name = sub_entry.file_name();
-                let sub_str = sub_name.to_string_lossy();
-                if sub_str.starts_with(name_str.as_ref()) && sub_str.len() > name_str.len() {
-                    result.push(PathBuf::from(format!("/dev/{sub_str}")));
-                    has_parts = true;
-                }
-            }
-            // If no partitions found, add the raw device itself
-            if !has_parts {
-                result.push(PathBuf::from(format!("/dev/{name_str}")));
-            }
-        }
-    }
-
-    result
-}
+// ── USB diagnostics ──────────────────────────────────────────────────────────
 
 /// Return a human-readable summary of sd* devices visible in /sys/block, including
 /// their removable flag value. Used by the TUI to show the operator what's happening
@@ -113,111 +72,19 @@ pub fn usb_scan_diagnostics() -> String {
     }
 }
 
-/// Mount a USB partition (vfat, then ext4 on failure) at `mountpoint`.
-/// Creates the mountpoint directory if absent.
-/// Requires CAP_SYS_ADMIN (granted via NixOS security.wrappers capability).
-pub fn mount_usb(dev: &Path, mountpoint: &Path) -> Result<()> {
-    std::fs::create_dir_all(mountpoint)
-        .with_context(|| format!("create mountpoint {}", mountpoint.display()))?;
-
-    // Security flags: no exec, no suid, no dev
-    let flags = MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV;
-
-    // Try vfat first (most USB sticks), then ext4
-    let err_vfat = mount(Some(dev), mountpoint, Some("vfat"), flags, None::<&str>);
-    if err_vfat.is_ok() {
-        return Ok(());
-    }
-    mount(Some(dev), mountpoint, Some("ext4"), flags, None::<&str>).with_context(|| {
-        format!(
-            "mount {} at {} (tried vfat and ext4)",
-            dev.display(),
-            mountpoint.display()
-        )
-    })?;
-    Ok(())
-}
-
-/// Unmount `mountpoint` (lazy detach — safe even if files are open).
-pub fn unmount(mountpoint: &Path) -> Result<()> {
-    umount2(mountpoint, MntFlags::MNT_DETACH)
-        .with_context(|| format!("umount {}", mountpoint.display()))?;
-    Ok(())
-}
-
-/// Try mounting each candidate partition in turn.
-/// Returns `(profile_path, dev_path)` on the first partition that contains a profile.toml.
-/// Unmounts all partitions that did not contain a profile.
-/// The winning partition is left mounted at `mountpoint`.
-///
-/// Returns `Err` if every candidate failed to mount (mount errors surface this way).
-/// Returns `Ok(None)` if at least one candidate mounted successfully but none had `profile.toml`.
-pub fn find_profile_usb(
-    candidates: &[PathBuf],
-    mountpoint: &Path,
-) -> Result<Option<(PathBuf, PathBuf)>> {
-    let mut any_mounted = false;
-    let mut mount_errors: Vec<String> = Vec::new();
-
-    for dev in candidates {
-        // Skip devices whose /dev node doesn't exist yet (avoids kernel "Can't open
-        // blockdev" spam when /sys/block/sd* appears before udev creates the node)
-        if !dev.exists() {
-            tracing::debug!(
-                "find_profile_usb: {} does not exist, skipping",
-                dev.display()
-            );
-            continue;
-        }
-        match mount_usb(dev, mountpoint) {
-            Err(e) => {
-                tracing::debug!("find_profile_usb: mount {} failed: {e:#}", dev.display());
-                mount_errors.push(format!("{}: {e:#}", dev.display()));
-                continue;
-            }
-            Ok(()) => {
-                any_mounted = true;
-                // Log mountpoint contents for debugging
-                if let Ok(entries) = std::fs::read_dir(mountpoint) {
-                    let names: Vec<String> = entries
-                        .flatten()
-                        .map(|e| e.file_name().to_string_lossy().into_owned())
-                        .collect();
-                    tracing::info!(
-                        "find_profile_usb: mounted {} at {}, contents: {:?}",
-                        dev.display(),
-                        mountpoint.display(),
-                        names
-                    );
-                }
-            }
-        }
-        let profile = mountpoint.join("profile.toml");
-        if profile.exists() {
-            return Ok(Some((profile, dev.clone())));
-        }
-        tracing::debug!(
-            "find_profile_usb: no profile.toml at {}",
-            mountpoint.display()
-        );
-        let _ = unmount(mountpoint);
-    }
-
-    if !any_mounted && !mount_errors.is_empty() {
-        anyhow::bail!("{}", mount_errors.join("; "));
-    }
-    Ok(None)
-}
-
 // ── Shuttle mount verification ─────────────────────────────────────────────────
 
-/// Verify that `mountpoint` is an active mount (listed in `/proc/mounts`).
+/// Verify that `mountpoint` is an active, readable mount.
 ///
-/// Returns `Ok(())` if the mountpoint appears in `/proc/mounts`, or `Err` with a
-/// human-readable message if the mount is stale or missing.  This catches the
-/// case where a previous ceremony session mounted the shuttle USB but a later
-/// session (or a concurrent debug mount at a different path) left the original
-/// mountpoint as a plain directory that silently swallows writes.
+/// Checks two conditions:
+/// 1. The mountpoint appears in `/proc/mounts`.
+/// 2. `profile.toml` is readable on the mounted filesystem.
+///
+/// Condition 2 catches "zombie mounts": when a USB device is physically
+/// yanked, the kernel keeps the VFS mount entry in `/proc/mounts` but the
+/// backing block device is gone.  All file access returns ENOENT even
+/// though the mount entry persists.  Hardware testing (NixOS 25.11,
+/// kernel 6.x, vfat) confirmed this behaviour.
 pub fn verify_shuttle_mount(mountpoint: &Path) -> Result<()> {
     if !mountpoint.exists() {
         anyhow::bail!("shuttle mountpoint {} does not exist", mountpoint.display());
@@ -231,22 +98,40 @@ pub fn verify_shuttle_mount(mountpoint: &Path) -> Result<()> {
         .unwrap_or_else(|_| mountpoint.to_path_buf());
     let target_str = target.to_string_lossy();
 
+    let mut found_in_mounts = false;
     for line in mounts.lines() {
         // /proc/mounts format: device mountpoint fstype options dump pass
         let mut fields = line.split_whitespace();
         let _dev = fields.next();
         if let Some(mp) = fields.next() {
             if mp == target_str.as_ref() {
-                return Ok(());
+                found_in_mounts = true;
+                break;
             }
         }
     }
 
-    anyhow::bail!(
-        "shuttle path {} is not an active mount — USB may have been \
-         unmounted or remounted elsewhere. Re-insert the shuttle USB.",
-        mountpoint.display()
-    );
+    if !found_in_mounts {
+        anyhow::bail!(
+            "shuttle path {} is not an active mount — USB may have been \
+             unmounted or remounted elsewhere. Re-insert the shuttle USB.",
+            mountpoint.display()
+        );
+    }
+
+    // Zombie mount detection: the mount entry exists in /proc/mounts but
+    // the backing block device was physically removed.  Stat a file that
+    // must always be present on a valid shuttle.
+    let probe = mountpoint.join("profile.toml");
+    if probe.metadata().is_err() {
+        anyhow::bail!(
+            "shuttle mount {} appears in /proc/mounts but profile.toml is \
+             not readable — USB was likely removed. Re-insert the shuttle USB.",
+            mountpoint.display()
+        );
+    }
+
+    Ok(())
 }
 
 /// Write `data` to `path`, then fsync the file to ensure the data actually

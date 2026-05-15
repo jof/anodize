@@ -28,42 +28,38 @@ impl App {
     // ── Shuttle scan tick ─────────────────────────────────────────────────────
 
     pub(crate) fn tick_wait_shuttle(&mut self) {
-        let diagnostics = media::usb_scan_diagnostics();
-        let candidates = media::scan_usb_partitions();
-        if candidates.is_empty() {
-            self.set_status(format!("Scanning… {diagnostics}"));
+        // The shuttle USB is mounted/unmounted by systemd
+        // (mount-anodize-shuttle.service + BindsTo= the udev device).
+        // We just check whether profile.toml is readable at the known path.
+        let profile_path = self.shuttle_mount.join("profile.toml");
+        if !profile_path.is_file() {
+            self.hw.shuttle_state = HwState::Absent;
+            let diagnostics = media::usb_scan_diagnostics();
+            self.set_status(format!(
+                "Waiting for shuttle USB… ({diagnostics}) — insert USB with profile.toml."
+            ));
             return;
         }
-        match media::find_profile_usb(&candidates, &self.shuttle_mount) {
-            Ok(Some((profile_path, dev_path))) => {
-                let _ = dev_path;
-                #[cfg(feature = "dev-softhsm-usb")]
-                if let Err(e) = configure_softhsm_from_shuttle(&self.shuttle_mount) {
-                    self.set_status(format!("SoftHSM2 USB setup failed: {e}"));
-                    let _ = media::unmount(&self.shuttle_mount);
-                    return;
-                }
-                let raw_bytes = std::fs::read(&profile_path).unwrap_or_default();
-                match load_profile(&profile_path) {
-                    Ok(profile) => {
-                        self.profile = Some(profile);
-                        self.profile_toml_bytes = Some(raw_bytes);
-                        self.setup.phase = SetupPhase::ProfileLoaded;
-                        self.set_status("Profile loaded from USB.");
-                    }
-                    Err(e) => {
-                        self.set_status(format!("Profile parse error: {e}"));
-                        let _ = media::unmount(&self.shuttle_mount);
-                    }
-                }
-            }
-            Ok(None) => {
-                self.set_status(format!(
-                    "No profile.toml found ({diagnostics}) — insert USB with profile.toml."
-                ));
+
+        #[cfg(feature = "dev-softhsm-usb")]
+        if let Err(e) = configure_softhsm_from_shuttle(&self.shuttle_mount) {
+            self.hw.shuttle_state = HwState::Error(format!("SoftHSM2: {e}"));
+            self.set_status(format!("SoftHSM2 USB setup failed: {e}"));
+            return;
+        }
+
+        let raw_bytes = std::fs::read(&profile_path).unwrap_or_default();
+        match load_profile(&profile_path) {
+            Ok(profile) => {
+                self.hw.shuttle_state = HwState::Ready("mounted".into());
+                self.profile = Some(profile);
+                self.profile_toml_bytes = Some(raw_bytes);
+                self.setup.phase = SetupPhase::ProfileLoaded;
+                self.set_status("Profile loaded from USB.");
             }
             Err(e) => {
-                self.set_status(format!("Mount failed ({diagnostics}): {e}"));
+                self.hw.shuttle_state = HwState::Error(format!("parse: {e}"));
+                self.set_status(format!("Profile parse error: {e}"));
             }
         }
     }
@@ -1393,11 +1389,18 @@ impl App {
     // ── Mode 2: Load CSR ──────────────────────────────────────────────────────
 
     fn do_load_csr(&mut self) {
+        // Shuttle mount lifecycle is managed by systemd (BindsTo= the udev
+        // device).  If the USB was yanked and reinserted, systemd unmounts
+        // and remounts automatically — no stale/zombie mounts.  A simple
+        // file read is the correct check.
         let csr_path = self.shuttle_mount.join("csr.der");
         let csr_bytes = match std::fs::read(&csr_path) {
             Ok(b) => b,
             Err(e) => {
-                self.set_status(format!("Cannot read csr.der from USB: {e}"));
+                self.set_status(format!(
+                    "Cannot read csr.der from shuttle: {e} — \
+                     ensure csr.der is on the USB and re-insert it."
+                ));
                 self.current_op = None;
                 return;
             }
@@ -2687,11 +2690,11 @@ impl App {
             _ => {}
         }
 
-        // Verify the shuttle USB is still mounted before writing.
+        // Verify the shuttle USB is still mounted (systemd manages the lifecycle).
         if let Err(e) = media::verify_shuttle_mount(&shuttle) {
             tracing::error!("Shuttle mount check failed: {e:#}");
             self.set_status(format!(
-                "Shuttle mount is stale: {e:#} — re-insert shuttle USB and retry."
+                "Shuttle USB not available: {e:#} — re-insert shuttle USB and retry."
             ));
             return;
         }

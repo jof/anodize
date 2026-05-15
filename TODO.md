@@ -79,12 +79,6 @@ When performing the disk detection operations, the initial spin-up operation can
 Additionally: if the write fails, the TUI should offer a retry option or at minimum
 block the user from returning to the ceremony menu (preventing silent data loss).
 
-## anodize-shuttle: hot-inserted CSR not detected
-
-If the shuttle USB drive is inserted without a `csr.der` file, removed after
-boot, and then reinserted with a `csr.der` file present, the system does not
-pick it up.  A full reboot is required.  The shuttle/CSR detection path should
-re-scan on media change or provide a manual rescan action.
 
 ## anodize-shuttle CLI: `--device` help references nonexistent `lint --list-usb`
 

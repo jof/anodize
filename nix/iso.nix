@@ -173,12 +173,10 @@ in
 
   # ── Capability wrappers ────────────────────────────────────────────────────
 
-  # The ceremony binary mounts USB sticks internally via nix::mount::mount().
   # The sentinel binary calls reboot(2) for the power-off option.
   # Minimal capability wrappers — no setuid bit.
   security.wrappers.anodize-ceremony = {
     source       = "${anodize-ceremony}/bin/anodize-ceremony";
-    capabilities = "cap_sys_admin=ep";
     owner        = "root";
     group        = "wheel";
     permissions  = "u+rx,g+rx";
@@ -199,13 +197,39 @@ in
     SUBSYSTEM=="usb", ATTR{idVendor}=="1050", MODE="0660", GROUP="wheel"
     # Optical drives — grant the wheel group rw access for SG_IO disc writes.
     SUBSYSTEM=="block", KERNEL=="sr[0-9]*", MODE="0660", GROUP="wheel"
+    # Shuttle USB — create a stable symlink when a vfat partition with the
+    # ANODIZE volume label appears.  TAG+="systemd" lets systemd track the
+    # device unit (dev-anodize\x2dshuttle.device) so BindsTo= works.
+    SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="ANODIZE", SYMLINK+="anodize-shuttle", TAG+="systemd", MODE="0660", GROUP="wheel"
   '';
+
+  # ── Shuttle USB: event-driven mount via systemd ────────────────────────────
+  #
+  # When udev creates /dev/anodize-shuttle (ANODIZE-labelled vfat partition),
+  # systemd starts this service and mounts it at /run/anodize/shuttle.
+  # BindsTo= means: when the device disappears (USB yanked), systemd runs
+  # ExecStop and cleanly unmounts — no zombie mounts, no polling needed.
+  # The ceremony binary is a pure consumer of /run/anodize/shuttle/.
+  systemd.services."mount-anodize-shuttle" = {
+    description = "Mount ANODIZE shuttle USB at /run/anodize/shuttle";
+    bindsTo  = [ "dev-anodize\\x2dshuttle.device" ];
+    after    = [ "dev-anodize\\x2dshuttle.device" ];
+    # Start automatically when the device appears.
+    wantedBy = [ "dev-anodize\\x2dshuttle.device" ];
+    serviceConfig = {
+      Type            = "oneshot";
+      RemainAfterExit = true;
+      ExecStart       = "${pkgs.util-linux}/bin/mount -o noexec,nosuid,nodev /dev/anodize-shuttle /run/anodize/shuttle";
+      ExecStop        = "${pkgs.util-linux}/bin/umount /run/anodize/shuttle";
+    };
+  };
 
   # ── tmpfiles: runtime directories for the ceremony binary ─────────────────
 
   systemd.tmpfiles.rules = [
     "d /run/anodize         0755 ceremony users -"
     "d /run/anodize/usb     0700 ceremony users -"
+    "d /run/anodize/shuttle 0755 ceremony users -"
     "d /run/anodize/staging 0700 ceremony users -"
   ];
 

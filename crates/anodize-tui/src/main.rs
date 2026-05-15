@@ -25,8 +25,8 @@ use clap::Parser;
 #[derive(Parser)]
 #[command(name = "anodize-ceremony", about = "Root CA key ceremony")]
 struct Cli {
-    /// Mount point for shuttle USB stick (created if absent).
-    #[arg(long, default_value = "/tmp/anodize-shuttle")]
+    /// Mount point for shuttle USB stick (managed by systemd mount-anodize-shuttle.service).
+    #[arg(long, default_value = "/run/anodize/shuttle")]
     shuttle_mount: PathBuf,
 
     /// Skip optical disc burn; write disc artifacts to /tmp/anodize-staging instead.
@@ -98,10 +98,6 @@ fn main() -> Result<()> {
 
     // Cleanup (Tui::Drop also handles this, but be explicit)
     tui.exit()?;
-
-    // Unmount shuttle if still mounted (so the next ceremony session can re-mount)
-    let _ = media::unmount(&app.shuttle_mount);
-
     Ok(())
 }
 

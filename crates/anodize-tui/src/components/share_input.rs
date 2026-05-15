@@ -415,7 +415,10 @@ impl ShareInput {
                     )));
                 } else {
                     lines.push(Line::from(Span::styled(
-                        format!("  ✓ {} words entered. Review and press [Enter] to submit.", self.expected_words),
+                        format!(
+                            "  ✓ {} words entered. Review and press [Enter] to submit.",
+                            self.expected_words
+                        ),
                         Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
@@ -521,12 +524,8 @@ impl ShareInput {
                 index,
             } => {
                 lines.push(Line::from(Span::styled(
-                    format!(
-                        "  ✘ COMMITMENT MISMATCH: #{index} {custodian_name} — share rejected"
-                    ),
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    format!("  ✘ COMMITMENT MISMATCH: #{index} {custodian_name} — share rejected"),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(Span::styled(
                     "    Check each word carefully and correct any errors.",
