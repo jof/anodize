@@ -61,20 +61,42 @@ after a system crash or unexpected power loss.
   operator-supplied explanation of the incongruity so the discrepancy is
   permanently recorded.
 
-# Vestigial code removal: no audit log on shuttle
+## Vestigial code removal: no audit log on shuttle
 
 There should be no audit log on the shuttle. It doesn't make any sense that it should only be on the CD drive but I think during development sometimes it did that. There shouldn't be an audit log on the shuttle; this is holdovers from my past usage of this shuttle stick.
 
-# Ceremonies should resist accidental cancellation
+## Ceremonies should resist accidental cancellation
 
 It seems that during the InitRoot ceremony process while initializing the shares, we pushed escape to go back and this state seems like we've picked a generation number and the custodians were set, but it hasn't been written to disk or HSM yet.
 
 
-# Disk detection feedback
+## Disk detection feedback
 
 When performing the disk detection operations, the initial spin-up operation can be pretty slow. So we should give some feedback when we give some of the SG and SCSI read commands that we're waiting for a response.
 
 
-# Retry logic on disc write failures
+## Retry logic on disc write failures
 Additionally: if the write fails, the TUI should offer a retry option or at minimum
 block the user from returning to the ceremony menu (preventing silent data loss).
+
+## anodize-shuttle: hot-inserted CSR not detected
+
+If the shuttle USB drive is inserted without a `csr.der` file, removed after
+boot, and then reinserted with a `csr.der` file present, the system does not
+pick it up.  A full reboot is required.  The shuttle/CSR detection path should
+re-scan on media change or provide a manual rescan action.
+
+## anodize-shuttle CLI: `--device` help references nonexistent `lint --list-usb`
+
+The `--device` flag help text says "Use `anodize-shuttle lint --list-usb` or
+`diskutil list` to find it", but `lint --list-usb` doesn't exist (see also
+the `list-usb` TODO above).  Implement the subcommand.
+
+## Rekey abort after share reveal still commits to HSM
+
+Aborting the RekeyShares ceremony after all Shamir shares have been revealed
+(but before the operator confirms transcription on the last share) still
+appears to complete the rekey on the HSM and/or state.json.  The ceremony should either:
+- defer the irreversible HSM operation until after all confirmations, or
+- detect the incomplete confirmation and roll back / warn the operator that
+  the new shares are now live despite the abort.
