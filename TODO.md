@@ -80,12 +80,6 @@ Additionally: if the write fails, the TUI should offer a retry option or at mini
 block the user from returning to the ceremony menu (preventing silent data loss).
 
 
-## anodize-shuttle CLI: `--device` help references nonexistent `lint --list-usb`
-
-The `--device` flag help text says "Use `anodize-shuttle lint --list-usb` or
-`diskutil list` to find it", but `lint --list-usb` doesn't exist (see also
-the `list-usb` TODO above).  Implement the subcommand.
-
 ## Rekey abort after share reveal still commits to HSM
 
 Aborting the RekeyShares ceremony after all Shamir shares have been revealed

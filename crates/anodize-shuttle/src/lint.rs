@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result};
 use clap::Args;
@@ -8,12 +9,17 @@ use sha2::{Digest, Sha256};
 #[derive(Args)]
 pub struct LintArgs {
     /// Path to the mounted shuttle USB volume (e.g. /Volumes/ANODIZE or /mnt/usb).
-    #[arg(long, short = 'p')]
-    path: PathBuf,
+    /// Required unless --list-usb is given.
+    #[arg(long, short = 'p', required_unless_present = "list_usb")]
+    path: Option<PathBuf>,
 
     /// Show detailed file information (sizes, hashes).
     #[arg(long)]
     verbose: bool,
+
+    /// List attached USB block devices and exit.
+    #[arg(long)]
+    list_usb: bool,
 }
 
 /// Files that are part of the shuttle specification.
@@ -71,7 +77,11 @@ const OPERATIONS: &[OperationSpec] = &[
 ];
 
 pub fn run(args: LintArgs) -> Result<()> {
-    let root = &args.path;
+    if args.list_usb {
+        return list_usb_devices();
+    }
+
+    let root = args.path.as_ref().expect("clap ensures --path is present");
     if !root.exists() {
         anyhow::bail!("Path does not exist: {}", root.display());
     }
@@ -422,4 +432,78 @@ fn sha256_fingerprint(data: &[u8]) -> String {
 fn file_sha256(path: &Path) -> Result<String> {
     let data = std::fs::read(path)?;
     Ok(sha256_fingerprint(&data))
+}
+
+fn list_usb_devices() -> Result<()> {
+    if cfg!(target_os = "macos") {
+        // diskutil list shows all attached disks and their partitions.
+        let output = Command::new("diskutil")
+            .arg("list")
+            .output()
+            .context("failed to run `diskutil list`")?;
+        std::io::Write::write_all(&mut std::io::stdout(), &output.stdout)?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("diskutil list failed: {stderr}");
+        }
+    } else {
+        // Linux: get JSON from lsblk, filter to USB-transport devices.
+        let output = Command::new("lsblk")
+            .args([
+                "-J",
+                "-p",
+                "-o",
+                "NAME,SIZE,TYPE,TRAN,LABEL,MOUNTPOINT,SERIAL,VENDOR,MODEL",
+            ])
+            .output()
+            .context("failed to run `lsblk`")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("lsblk failed: {stderr}");
+        }
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&output.stdout).context("parse lsblk JSON")?;
+        let devices = parsed["blockdevices"]
+            .as_array()
+            .context("unexpected lsblk output")?;
+
+        let mut found = false;
+        for dev in devices {
+            if dev["tran"].as_str().unwrap_or_default() != "usb" {
+                continue;
+            }
+            found = true;
+            let name = dev["name"].as_str().unwrap_or("?");
+            let size = dev["size"].as_str().unwrap_or("?");
+            let vendor = dev["vendor"].as_str().unwrap_or("").trim();
+            let model = dev["model"].as_str().unwrap_or("").trim();
+            let serial = dev["serial"].as_str().unwrap_or("");
+            println!("{name}  {size}  {vendor} {model}  serial={serial}");
+
+            // Show partitions and their labels/mount points.
+            if let Some(children) = dev["children"].as_array() {
+                for child in children {
+                    let cname = child["name"].as_str().unwrap_or("?");
+                    let csize = child["size"].as_str().unwrap_or("?");
+                    let label = child["label"].as_str().unwrap_or("");
+                    let mount = child["mountpoint"].as_str().unwrap_or("");
+                    let label_str = if label.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  label={label}")
+                    };
+                    let mount_str = if mount.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  mounted={mount}")
+                    };
+                    println!("  {cname}  {csize}{label_str}{mount_str}");
+                }
+            }
+        }
+        if !found {
+            println!("No USB block devices found.");
+        }
+    }
+    Ok(())
 }
