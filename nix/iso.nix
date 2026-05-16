@@ -82,6 +82,42 @@ in
   networking.firewall.enable = false;
   networking.wireless.enable = false;
 
+  # ── Console rendering (kmscon) ───────────────────────────────────────────────
+  #
+  # kmscon replaces the default Linux VT console on tty1 with a userspace
+  # terminal that uses FreeType for font rendering.  This gives full Unicode
+  # coverage (check marks, arrows, geometric shapes, em-dashes, box drawing,
+  # braille spinners) via a TrueType font — no 512-glyph PSF limit.
+  #
+  # kmscon requires KMS/DRM — 'nomodeset' is NOT set in boot.kernelParams.
+  # On EFI systems without a native GPU driver, the kernel's simpledrm
+  # driver (built-in since 5.14) provides a basic KMS device from the EFI
+  # framebuffer, so kmscon still works.
+  #
+  # Terminus PSF is kept as console.font for early boot messages (before
+  # kmscon starts) and as a fallback if KMS initialization fails.
+  console = {
+    font = "ter-u22n";
+    packages = [ pkgs.terminus_font ];
+  };
+
+  services.kmscon = {
+    enable = true;
+    hwRender = false;   # software rendering (pixman) — works on all hardware
+    autologinUser = "ceremony";
+    extraConfig = ''
+      font-name=DejaVu Sans Mono
+      font-size=14
+      no-hotkeys
+      no-session-control
+    '';
+  };
+
+  # DejaVu provides broad Unicode coverage for kmscon's FreeType renderer:
+  # Latin, Cyrillic, Greek, arrows, geometric shapes, dingbats (✓✘✗),
+  # mathematical symbols, box drawing, block elements, braille patterns.
+  fonts.packages = [ pkgs.dejavu_fonts ];
+
   # ── Storage: ephemeral RAM only ────────────────────────────────────────────
 
   # All writes go to tmpfs; nothing survives a reboot.
@@ -89,17 +125,18 @@ in
 
   # ── Boot ──────────────────────────────────────────────────────────────────
 
-  # nomodeset: disables KMS/DRM so the kernel uses the basic efifb/vesa
-  # framebuffer.  Verbose boot is intentional; the sentinel clears the screen
-  # (ESC-c in ceremony-shell) when it takes over.
+  # KMS/DRM is required for kmscon (the userspace VT replacement).  We do
+  # NOT set 'nomodeset' — the kernel loads a DRM driver (or simpledrm on
+  # EFI systems without a native GPU driver).  Verbose boot is intentional;
+  # the sentinel clears the screen (ESC-c in ceremony-shell) when it takes
+  # over.
   # console=tty0: kernel messages go to the EFI framebuffer (tty1).
   # console=ttyS0,115200: kernel messages also go to the serial port;
   #   listing ttyS0 last makes it the primary console so
   #   systemd-getty-generator activates serial-getty@ttyS0.service.
-  boot.kernelParams = [ "nomodeset" "console=tty0" "console=ttyS0,115200n8" ];
+  boot.kernelParams = [ "console=tty0" "console=ttyS0,115200n8" ];
 
-  # Disable the graphical Plymouth boot splash — irrelevant for an appliance
-  # and would require a framebuffer driver that nomodeset prevents loading.
+  # Disable the graphical Plymouth boot splash — irrelevant for an appliance.
   boot.plymouth.enable = false;
 
   # Boot immediately without showing the GRUB menu — there is exactly one
@@ -258,7 +295,7 @@ in
   systemd.services.suppress-console-printk = {
     description = "Suppress kernel console messages for TUI";
     wantedBy    = [ "getty.target" ];
-    before      = [ "getty@tty1.service" "serial-getty@ttyS0.service" ];
+    before      = [ "kmsconvt@tty1.service" "getty@tty1.service" "serial-getty@ttyS0.service" ];
     serviceConfig = {
       Type            = "oneshot";
       RemainAfterExit = true;
@@ -266,9 +303,10 @@ in
     };
   };
 
-  # ── Auto-login → sentinel (tty1) ──────────────────────────────────────────
+  # ── Auto-login → sentinel ───────────────────────────────────────────────────
 
-  # Getty on tty1 auto-logs in as ceremony → exec's ceremonyShell immediately.
+  # kmscon handles auto-login on VTs (services.kmscon.autologinUser above).
+  # Getty auto-login is still needed for the serial console.
   services.getty.autologinUser = "ceremony";
 
   # Suppress the "Run 'nixos-help' for the NixOS manual." line that getty
@@ -308,8 +346,11 @@ in
     };
   };
 
-  # Same rate-limit override for the VT getty so tty1 also restarts forever.
+  # Same rate-limit override for the VT console so tty1 also restarts forever.
+  # kmscon replaces getty on VTs, but keep the getty override too in case
+  # kmscon fails to start and systemd falls back to getty.
   systemd.services."getty@tty1".unitConfig.StartLimitIntervalSec = 0;
+  systemd.services."kmsconvt@tty1".unitConfig.StartLimitIntervalSec = 0;
 
   # ── Disable unnecessary services ──────────────────────────────────────────
 
