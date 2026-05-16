@@ -712,7 +712,7 @@ mod tests {
 
         // Enter all words except corrupt the first one
         // Type a wrong first word (use a valid word that's wrong for the share)
-        let wrong_word = if words[0] == "able" { "acid" } else { "able" };
+        let wrong_word = if words[0] == "able" { "abet" } else { "able" };
         type_word(&mut input, wrong_word);
         input.handle_key(key(KeyCode::Char(' ')));
         for &w in &words[1..words.len() - 1] {
