@@ -84,3 +84,25 @@ appears to complete the rekey on the HSM and/or state.json.  The ceremony should
 - defer the irreversible HSM operation until after all confirmations, or
 - detect the incomplete confirmation and roll back / warn the operator that
   the new shares are now live despite the abort.
+
+# Burn Session Logs
+
+When in the writing phase of the ceremony, there is a one-line log of disc write progress that gets overwritten. It would be better to have a multi-line log that shows the progress and also shows any errors that occur.
+
+# Share Input Validation
+
+When entering shares, after a valid size share is entered, users still need to press enter to submit it, so that the screen doesn't just change unexpectedly. However, when all the words are entered, there should be some automatic share validation that gives colored feedback to the display. users still need to hit enter, but we may as well validate the checksum and give visual feedback.
+
+## Write Certificate to Disc validation modal
+
+The validation modal that appears before writing the validation/certificate is superfluous -- we always want to make the confirmation write if the change already happened. Just begin the write after confirming the previous modal.
+
+## Init root shuttle permissions
+
+Writing to the shuttle after doing an init root ceremony fails with: "Shuttle write failed (root.crt): create /run/anodize/shuttle/root.crt: Permission denied (os error 13)"
+
+We need to consider the permissions model for the new systemd managed mount, which changed recently.
+
+## Root Init Written -- Ctrl-C keybinding clash
+
+In the screen after doing an init root ceremony, the Ctrl-C keybinding (to "quit without shuttle copy") is clashing with the Ctrl-C (to exit).
