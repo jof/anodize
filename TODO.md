@@ -89,10 +89,6 @@ appears to complete the rekey on the HSM and/or state.json.  The ceremony should
 
 When in the writing phase of the ceremony, there is a one-line log of disc write progress that gets overwritten. It would be better to have a multi-line log that shows the progress and also shows any errors that occur.
 
-# Share Input Validation
-
-When entering shares, after a valid size share is entered, users still need to press enter to submit it, so that the screen doesn't just change unexpectedly. However, when all the words are entered, there should be some automatic share validation that gives colored feedback to the display. users still need to hit enter, but we may as well validate the checksum and give visual feedback.
-
 ## Write Certificate to Disc validation modal
 
 The validation modal that appears before writing the validation/certificate is superfluous -- we always want to make the confirmation write if the change already happened. Just begin the write after confirming the previous modal.
