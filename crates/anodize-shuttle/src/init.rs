@@ -196,12 +196,12 @@ fn format_device(device: &str, volume_label: &str) -> Result<()> {
         eprintln!("Formatting {device} as FAT32 ({volume_label})...");
 
         // Try to unmount first (ignore errors if not mounted)
-        let _ = Command::new("umount").arg(device).status();
+        let _ = Command::new("sudo").args(["umount", device]).status();
 
         // Create partition table + partition (use sfdisk for simplicity)
         let sfdisk_input = "type=0c\n"; // FAT32 LBA
-        let mut sfdisk = Command::new("sfdisk")
-            .arg(device)
+        let mut sfdisk = Command::new("sudo")
+            .args(["sfdisk", device])
             .stdin(std::process::Stdio::piped())
             .spawn()
             .context("sfdisk")?;
@@ -217,8 +217,8 @@ fn format_device(device: &str, volume_label: &str) -> Result<()> {
         // Determine partition device (device + "1")
         let part_dev = format!("{device}1");
 
-        let status = Command::new("mkfs.vfat")
-            .args(["-F", "32", "-n", volume_label, &part_dev])
+        let status = Command::new("sudo")
+            .args(["mkfs.vfat", "-F", "32", "-n", volume_label, &part_dev])
             .status()
             .context("mkfs.vfat")?;
         if !status.success() {
@@ -260,10 +260,29 @@ fn mount_device(device: &str) -> Result<PathBuf> {
     } else {
         // Linux: mount manually
         let mount_point = PathBuf::from("/mnt/anodize-shuttle");
-        std::fs::create_dir_all(&mount_point)?;
+        let status = Command::new("sudo")
+            .args(["mkdir", "-p", &mount_point.to_string_lossy().to_string()])
+            .status()
+            .context("mkdir mount point")?;
+        if !status.success() {
+            bail!("mkdir mount point failed (exit {})", status);
+        }
         let part_dev = format!("{device}1");
-        let status = Command::new("mount")
-            .args([&part_dev, &mount_point.to_string_lossy().to_string()])
+        let uid = String::from_utf8(Command::new("id").arg("-u").output()?.stdout)?
+            .trim()
+            .to_string();
+        let gid = String::from_utf8(Command::new("id").arg("-g").output()?.stdout)?
+            .trim()
+            .to_string();
+        let mount_opts = format!("uid={uid},gid={gid}");
+        let status = Command::new("sudo")
+            .args([
+                "mount",
+                "-o",
+                &mount_opts,
+                &part_dev,
+                &mount_point.to_string_lossy().to_string(),
+            ])
             .status()
             .context("mount")?;
         if !status.success() {
@@ -283,7 +302,9 @@ impl Drop for UnmountGuard {
                 .args(["unmount", &self.0.to_string_lossy()])
                 .status();
         } else {
-            let _ = Command::new("umount").arg(&self.0).status();
+            let _ = Command::new("sudo")
+                .args(["umount", &self.0.to_string_lossy().to_string()])
+                .status();
         }
     }
 }
