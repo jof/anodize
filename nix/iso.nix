@@ -116,7 +116,7 @@ in
   # DejaVu provides broad Unicode coverage for kmscon's FreeType renderer:
   # Latin, Cyrillic, Greek, arrows, geometric shapes, dingbats (✓✘✗),
   # mathematical symbols, box drawing, block elements, braille patterns.
-  fonts.packages = [ pkgs.dejavu_fonts ];
+  fonts.packages = [ pkgs.dejavu_fonts pkgs.noto-fonts-monochrome-emoji ];
 
   # ── Storage: ephemeral RAM only ────────────────────────────────────────────
 

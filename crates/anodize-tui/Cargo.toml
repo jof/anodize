@@ -53,6 +53,7 @@ x509-cert.workspace = true
 nix.workspace = true
 time.workspace = true
 spki.workspace = true
+unicode-width = "0.2"
 
 [dev-dependencies]
 p256.workspace = true

@@ -146,7 +146,7 @@ impl ShareReveal {
         for (i, ns) in self.shares.iter().enumerate() {
             if i < self.current {
                 lines.push(Line::from(vec![
-                    Span::styled("  ✓ ", green),
+                    Span::styled("  ✅ ", green),
                     Span::styled(
                         format!("Share #{} — {}", ns.index, ns.custodian_name),
                         green,
@@ -155,12 +155,12 @@ impl ShareReveal {
             } else if i == self.current && !self.all_revealed() {
                 let (marker, style) = if self.revealed[i] {
                     (
-                        "  ⚠ ",
+                        "  🚨 ",
                         Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                     )
                 } else {
                     (
-                        "  ▸ ",
+                        "  👉 ",
                         Style::default()
                             .fg(Color::Yellow)
                             .add_modifier(Modifier::BOLD),
@@ -180,7 +180,7 @@ impl ShareReveal {
                 ]));
             } else {
                 lines.push(Line::from(vec![
-                    Span::styled("  ○ ", dim),
+                    Span::styled("  💤 ", dim),
                     Span::styled(format!("Share #{} — {}", ns.index, ns.custodian_name), dim),
                 ]));
             }

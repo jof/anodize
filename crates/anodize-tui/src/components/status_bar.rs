@@ -4,6 +4,7 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::Widget,
 };
+use unicode_width::UnicodeWidthStr;
 
 /// Connection/presence state for a hardware peripheral.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,37 +87,37 @@ fn render_hw_entry(
 
     let (dot, dot_style, detail) = match state {
         HwState::Absent => (
-            "○",
+            "⚫",
             Style::default().fg(Color::DarkGray).bg(Color::Black),
             "not detected".to_string(),
         ),
         HwState::Present(info) => (
-            "●",
+            "🟡",
             Style::default().fg(Color::Yellow).bg(Color::Black),
             info.clone(),
         ),
         HwState::Ready(info) => (
-            "●",
+            "🟢",
             Style::default().fg(Color::Green).bg(Color::Black),
             info.clone(),
         ),
         HwState::Error(msg) => (
-            "✘",
+            "🔴",
             Style::default().fg(Color::Red).bg(Color::Black),
             msg.clone(),
         ),
     };
 
     let full = format!("{}: {} {}", label, dot, detail);
-    if *x + full.len() as u16 > max_x {
+    if *x + full.width() as u16 > max_x {
         return;
     }
 
     let prefix = format!("{}: ", label);
     buf.set_string(*x, y, &prefix, label_style);
-    *x += prefix.len() as u16;
+    *x += prefix.width() as u16;
     buf.set_string(*x, y, dot, dot_style);
-    *x += dot.len() as u16 + 1;
+    *x += dot.width() as u16 + 1;
     buf.set_string(
         *x,
         y,

@@ -4,6 +4,7 @@ use ratatui::{
     style::{Color, Style},
     widgets::Widget,
 };
+use unicode_width::UnicodeWidthStr;
 
 /// Status of a single phase step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,7 +23,7 @@ pub struct PhaseStep {
 
 /// Second-level bar showing workflow steps for the current mode.
 ///
-/// Renders as: ✓ Clock │ ✓ USB │ → Profile │ ○ PIN │ ○ Disc
+/// Renders as: ✅ Clock │ ✅ USB │ 👉 Profile │ ○ PIN │ ○ Disc
 pub struct PhaseBar<'a> {
     pub steps: &'a [PhaseStep],
 }
@@ -41,8 +42,8 @@ impl Widget for PhaseBar<'_> {
         let mut x = area.left() + 1;
         for (i, step) in self.steps.iter().enumerate() {
             let (icon, icon_style) = match step.status {
-                PhaseStatus::Completed => ("✓", Style::default().fg(Color::Green).bg(Color::Black)),
-                PhaseStatus::Active => ("→", Style::default().fg(Color::Yellow).bg(Color::Black)),
+                PhaseStatus::Completed => ("✅", Style::default().bg(Color::Black)),
+                PhaseStatus::Active => ("👉", Style::default().bg(Color::Black)),
                 PhaseStatus::Pending => {
                     ("○", Style::default().fg(Color::DarkGray).bg(Color::Black))
                 }
@@ -55,17 +56,15 @@ impl Widget for PhaseBar<'_> {
             };
 
             let entry = format!("{} {}", icon, step.label);
-            if x + entry.len() as u16 + 3 > area.right() {
+            if x + entry.width() as u16 + 3 > area.right() {
                 break;
             }
 
             buf.set_string(x, area.top(), icon, icon_style);
-            x += icon.len() as u16 + 1; // icon width (may be >1 for unicode) + space
-                                        // Recalculate: icon was already rendered above, now render label
-                                        // Actually re-do cleanly:
+            x += icon.width() as u16 + 1; // icon display width + space
             let label = step.label;
             buf.set_string(x, area.top(), label, label_style);
-            x += label.len() as u16;
+            x += label.width() as u16;
 
             // Separator
             if i < self.steps.len() - 1 {
@@ -76,7 +75,7 @@ impl Widget for PhaseBar<'_> {
                     sep,
                     Style::default().fg(Color::DarkGray).bg(Color::Black),
                 );
-                x += sep.len() as u16;
+                x += sep.width() as u16;
             }
         }
     }
