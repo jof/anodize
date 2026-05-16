@@ -66,10 +66,6 @@ after a system crash or unexpected power loss.
 There should be no audit log on the shuttle. It doesn't make any sense that it should only be on the CD drive but I think during development sometimes it did that. There shouldn't be an audit log on the shuttle; this is holdovers from my past usage of this shuttle stick.
 
 
-## Disk detection feedback
-
-When performing the disk detection operations, the initial spin-up operation can be pretty slow. So we should give some feedback when we give some of the SG and SCSI read commands that we're waiting for a response.
-
 
 ## Retry logic on disc write failures
 Additionally: if the write fails, the TUI should offer a retry option or at minimum

@@ -733,6 +733,7 @@ mod tests {
             sessions_remaining: Some(10),
             intent_session_dir_name: None,
             pending_intent_session: None,
+            disc_scan_rx: None,
             session_state: Some(SessionState {
                 version: 1,
                 root_cert_sha256: "abcdef".into(),

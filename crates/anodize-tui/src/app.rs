@@ -65,6 +65,15 @@ pub struct DiscContext {
     pub intent_session_dir_name: Option<String>,
     pub pending_intent_session: Option<SessionEntry>,
     pub session_state: Option<SessionState>,
+    /// Background disc scan result channel.  `Some` while a scan thread is
+    /// running; the tick handler polls `try_recv` so the TUI stays responsive.
+    pub disc_scan_rx: Option<Receiver<DiscScanBatch>>,
+}
+
+/// Result bundle from a background disc-scan thread.
+pub struct DiscScanBatch {
+    pub drives: Vec<PathBuf>,
+    pub scans: Vec<(PathBuf, Result<crate::media::DiscScan, String>)>,
 }
 
 impl DiscContext {
@@ -79,6 +88,7 @@ impl DiscContext {
             intent_session_dir_name: None,
             pending_intent_session: None,
             session_state: None,
+            disc_scan_rx: None,
         }
     }
 }

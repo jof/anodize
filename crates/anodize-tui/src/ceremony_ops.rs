@@ -80,10 +80,44 @@ impl App {
             return;
         }
 
-        let drives = media::scan_optical_drives();
+        // Check for a pending background scan result.
+        if let Some(ref rx) = self.disc.disc_scan_rx {
+            match rx.try_recv() {
+                Ok(batch) => {
+                    self.disc.disc_scan_rx = None;
+                    self.process_disc_scan(batch, need_blank);
+                    return;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    return; // scan still running — TUI stays responsive
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    tracing::error!("disc scan thread panicked or dropped sender");
+                    self.disc.disc_scan_rx = None;
+                    // fall through to spawn a new scan
+                }
+            }
+        }
+
+        // No scan in flight — spawn one in a background thread.
+        let (tx, rx) = mpsc::channel();
+        self.disc.disc_scan_rx = Some(rx);
+        self.set_status("Scanning optical drive…");
+        std::thread::spawn(move || {
+            let drives = media::scan_optical_drives();
+            let scans: Vec<_> = drives
+                .iter()
+                .map(|dev| (dev.clone(), media::scan_disc(dev)))
+                .collect();
+            let _ = tx.send(crate::app::DiscScanBatch { drives, scans });
+        });
+    }
+
+    /// Process results from a completed background disc scan.
+    fn process_disc_scan(&mut self, batch: crate::app::DiscScanBatch, need_blank: bool) {
         let mut rw_rejection: Option<String> = None;
-        for dev in &drives {
-            match media::scan_disc(dev) {
+        for (dev, result) in batch.scans {
+            match result {
                 Ok(scan) => {
                     let n = scan.sessions.len();
                     let cap_summary = &scan.capacity_summary;
@@ -151,7 +185,7 @@ impl App {
         self.hw.disc_state = HwState::Absent;
         if let Some(msg) = rw_rejection {
             self.set_status(msg);
-        } else if drives.is_empty() {
+        } else if batch.drives.is_empty() {
             self.set_status("No optical drive detected. Insert drive and disc.");
         } else {
             self.set_status(
@@ -3991,6 +4025,151 @@ mod tests {
             app.hw.disc_state,
             HwState::Absent,
             "ConfirmMigrate should reset disc_state to Absent"
+        );
+    }
+
+    // ── Async disc scan tests ─────────────────────────────────────────
+
+    #[test]
+    fn tick_wait_disc_spawns_scan_and_shows_scanning_status() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
+        assert!(app.disc.disc_scan_rx.is_none());
+
+        // First tick spawns a background scan thread.
+        app.tick_wait_disc(false);
+
+        assert!(
+            app.disc.disc_scan_rx.is_some(),
+            "tick_wait_disc should start a background scan"
+        );
+        assert!(
+            app.status.contains("Scanning"),
+            "status should mention scanning, got: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn tick_wait_disc_returns_early_while_scan_in_flight() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
+        // Pre-populate with a channel that will never send.
+        let (_tx, rx) = std::sync::mpsc::channel::<crate::app::DiscScanBatch>();
+        app.disc.disc_scan_rx = Some(rx);
+        app.set_status("before");
+
+        app.tick_wait_disc(false);
+
+        // Should return without changing status (channel is empty).
+        assert_eq!(
+            app.status, "before",
+            "should not change status while scan is pending"
+        );
+        assert!(
+            app.disc.disc_scan_rx.is_some(),
+            "disc_scan_rx should remain set"
+        );
+    }
+
+    #[test]
+    fn tick_wait_disc_processes_scan_result_from_channel() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
+
+        // Feed a pre-built scan result through the channel.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::app::DiscScanBatch {
+            drives: vec![PathBuf::from("/dev/sr0")],
+            scans: vec![(
+                PathBuf::from("/dev/sr0"),
+                Ok(crate::media::DiscScan {
+                    sessions: Vec::new(),
+                    capacity_summary: "BD-R: 0 used, 100 remaining (max 100)".into(),
+                    sessions_remaining: 100,
+                }),
+            )],
+        })
+        .unwrap();
+        app.disc.disc_scan_rx = Some(rx);
+
+        app.tick_wait_disc(false);
+
+        // Scan result should be consumed and disc state updated.
+        assert!(
+            app.disc.disc_scan_rx.is_none(),
+            "disc_scan_rx should be cleared"
+        );
+        assert!(
+            matches!(app.hw.disc_state, HwState::Present(_)),
+            "disc_state should be Present, got {:?}",
+            app.hw.disc_state
+        );
+        assert!(
+            app.status.contains("BD-R"),
+            "status should contain capacity summary, got: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn tick_wait_disc_handles_disconnected_channel() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
+
+        // Create a channel and immediately drop the sender.
+        let (tx, rx) = std::sync::mpsc::channel::<crate::app::DiscScanBatch>();
+        drop(tx);
+        app.disc.disc_scan_rx = Some(rx);
+
+        app.tick_wait_disc(false);
+
+        // Should detect disconnect, clear rx, and spawn a new scan.
+        assert!(
+            app.disc.disc_scan_rx.is_some(),
+            "should have spawned a new scan after disconnect"
+        );
+        assert!(
+            app.status.contains("Scanning"),
+            "status should show scanning, got: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn process_disc_scan_no_drives_reports_absent() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
+        app.process_disc_scan(
+            crate::app::DiscScanBatch {
+                drives: vec![],
+                scans: vec![],
+            },
+            false,
+        );
+
+        assert_eq!(app.hw.disc_state, HwState::Absent);
+        assert!(
+            app.status.contains("No optical drive"),
+            "status should mention no drive, got: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn process_disc_scan_rewritable_reports_rejection() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
+        app.process_disc_scan(
+            crate::app::DiscScanBatch {
+                drives: vec![PathBuf::from("/dev/sr0")],
+                scans: vec![(
+                    PathBuf::from("/dev/sr0"),
+                    Err("rewritable media not allowed".into()),
+                )],
+            },
+            false,
+        );
+
+        assert_eq!(app.hw.disc_state, HwState::Absent);
+        assert!(
+            app.status.contains("rewritable"),
+            "status should mention rewritable, got: {}",
+            app.status
         );
     }
 }
