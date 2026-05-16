@@ -219,7 +219,7 @@ in
     serviceConfig = {
       Type            = "oneshot";
       RemainAfterExit = true;
-      ExecStart       = "${pkgs.util-linux}/bin/mount -o noexec,nosuid,nodev /dev/anodize-shuttle /run/anodize/shuttle";
+      ExecStart       = "${pkgs.util-linux}/bin/mount -o noexec,nosuid,nodev,uid=ceremony,gid=users /dev/anodize-shuttle /run/anodize/shuttle";
       ExecStop        = "${pkgs.util-linux}/bin/umount /run/anodize/shuttle";
     };
   };

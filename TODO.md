@@ -97,12 +97,6 @@ When entering shares, after a valid size share is entered, users still need to p
 
 The validation modal that appears before writing the validation/certificate is superfluous -- we always want to make the confirmation write if the change already happened. Just begin the write after confirming the previous modal.
 
-## Init root shuttle permissions
-
-Writing to the shuttle after doing an init root ceremony fails with: "Shuttle write failed (root.crt): create /run/anodize/shuttle/root.crt: Permission denied (os error 13)"
-
-We need to consider the permissions model for the new systemd managed mount, which changed recently.
-
 ## Root Init Written -- Ctrl-C keybinding clash
 
 In the screen after doing an init root ceremony, the Ctrl-C keybinding (to "quit without shuttle copy") is clashing with the Ctrl-C (to exit).
