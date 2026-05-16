@@ -3644,7 +3644,7 @@ mod tests {
     }
 
     #[test]
-    fn confirm_cert_burn_with_fresh_clock_opens_dialog() {
+    fn confirm_cert_burn_with_fresh_clock_skips_dialog() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.confirmed_time = Some(std::time::SystemTime::now());
         app.ceremony.state = CeremonyPhase::Execute;
@@ -3652,14 +3652,12 @@ mod tests {
 
         app.update(Action::ConfirmCertBurn);
 
+        // No confirmation dialog — proceeds directly to do_start_burn().
+        // (In the test env do_start_burn returns early because there is no
+        // staging directory, so we just verify no dialog was interposed.)
         assert!(
-            app.confirm_dialog.is_some(),
-            "fresh clock should open confirm dialog"
-        );
-        assert_eq!(
-            app.ceremony.state,
-            CeremonyPhase::Execute,
-            "should stay in Execute"
+            app.confirm_dialog.is_none(),
+            "should skip confirm dialog and proceed directly to burn"
         );
     }
 
@@ -3685,7 +3683,7 @@ mod tests {
     }
 
     #[test]
-    fn reconfirm_clock_after_stale_burn_resumes_execute() {
+    fn reconfirm_clock_after_stale_burn_skips_dialog() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.pending_burn_reconfirm = true;
         app.ceremony.state = CeremonyPhase::ClockReconfirm;
@@ -3697,15 +3695,8 @@ mod tests {
             !app.pending_burn_reconfirm,
             "flag should be cleared after reconfirm"
         );
-        assert_eq!(
-            app.ceremony.state,
-            CeremonyPhase::Execute,
-            "should return to Execute after reconfirm"
-        );
-        assert!(
-            app.confirm_dialog.is_some(),
-            "should open burn confirm dialog"
-        );
+        // No confirmation dialog — proceeds directly to do_start_burn().
+        assert!(app.confirm_dialog.is_none(), "should skip confirm dialog");
         assert!(
             app.clock_is_fresh(),
             "clock should be fresh after reconfirm"

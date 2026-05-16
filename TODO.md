@@ -89,10 +89,6 @@ appears to complete the rekey on the HSM and/or state.json.  The ceremony should
 
 When in the writing phase of the ceremony, there is a one-line log of disc write progress that gets overwritten. It would be better to have a multi-line log that shows the progress and also shows any errors that occur.
 
-## Write Certificate to Disc validation modal
-
-The validation modal that appears before writing the validation/certificate is superfluous -- we always want to make the confirmation write if the change already happened. Just begin the write after confirming the previous modal.
-
 ## Root Init Written -- Ctrl-C keybinding clash
 
 In the screen after doing an init root ceremony, the Ctrl-C keybinding (to "quit without shuttle copy") is clashing with the Ctrl-C (to exit).

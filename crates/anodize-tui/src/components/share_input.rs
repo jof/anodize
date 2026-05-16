@@ -457,9 +457,7 @@ impl ShareInput {
                         Some(false) => {
                             lines.push(Line::from(Span::styled(
                                 "  ✘ Checksum invalid — check words for errors.",
-                                Style::default()
-                                    .fg(Color::Red)
-                                    .add_modifier(Modifier::BOLD),
+                                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                             )));
                             lines.push(Line::from(Span::styled(
                                 "  Press [BS] to edit, or [Enter] to submit anyway.",

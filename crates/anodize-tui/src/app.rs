@@ -234,8 +234,8 @@ pub struct App {
     pub confirm_dialog: Option<ConfirmDialog>,
 
     // When true, the current ClockReconfirm is gating a disc burn (not a
-    // signing operation).  After re-confirm, proceed directly to the
-    // ConfirmCertBurn confirm dialog instead of dispatching crypto.
+    // signing operation).  After re-confirm, proceed directly to
+    // do_start_burn() instead of dispatching crypto.
     pub pending_burn_reconfirm: bool,
 
     // Content area vertical scroll offset
@@ -983,14 +983,7 @@ impl App {
             }
             Action::ConfirmCertBurn => {
                 if self.clock_is_fresh() {
-                    self.show_confirm(
-                        "Write Certificate to Disc",
-                        vec![
-                            "This will write the certificate and CRL to disc.".into(),
-                            "The disc session is permanent and cannot be erased.".into(),
-                        ],
-                        Action::DoStartBurn,
-                    );
+                    self.do_start_burn();
                 } else {
                     // Clock confirmation has gone stale — ask the operator to
                     // re-verify before writing timestamped data to disc.
@@ -1096,18 +1089,10 @@ impl App {
             Action::ReconfirmClock => {
                 self.confirmed_time = Some(SystemTime::now());
                 if self.pending_burn_reconfirm {
-                    // Returning from a stale-clock redirect — go back to the
-                    // cert preview and show the burn confirmation dialog.
+                    // Returning from a stale-clock redirect — proceed
+                    // directly to disc burn (no extra confirmation dialog).
                     self.pending_burn_reconfirm = false;
-                    self.ceremony.state = CeremonyPhase::Execute;
-                    self.show_confirm(
-                        "Write Certificate to Disc",
-                        vec![
-                            "This will write the certificate and CRL to disc.".into(),
-                            "The disc session is permanent and cannot be erased.".into(),
-                        ],
-                        Action::DoStartBurn,
-                    );
+                    self.do_start_burn();
                 } else {
                     self.do_dispatch_after_clock_reconfirm();
                 }
