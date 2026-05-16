@@ -107,16 +107,26 @@ in
     autologinUser = "ceremony";
     extraConfig = ''
       font-name=DejaVu Sans Mono
-      font-size=14
-      no-hotkeys
-      no-session-control
+      font-size=12
+      session-max=2
+      grab-zoom-in=
+      grab-zoom-out=
+      grab-scroll-up=
+      grab-scroll-down=
+      grab-page-up=
+      grab-page-down=
+      grab-session-next=
+      grab-session-prev=
+      grab-session-dummy=
+      grab-session-close=
+      grab-terminal-new=
     '';
   };
 
   # DejaVu provides broad Unicode coverage for kmscon's FreeType renderer:
   # Latin, Cyrillic, Greek, arrows, geometric shapes, dingbats (✓✘✗),
   # mathematical symbols, box drawing, block elements, braille patterns.
-  fonts.packages = [ pkgs.dejavu_fonts pkgs.noto-fonts-monochrome-emoji ];
+  fonts.packages = [ pkgs.dejavu_fonts ];
 
   # ── Storage: ephemeral RAM only ────────────────────────────────────────────
 
@@ -125,16 +135,25 @@ in
 
   # ── Boot ──────────────────────────────────────────────────────────────────
 
-  # KMS/DRM is required for kmscon (the userspace VT replacement).  We do
-  # NOT set 'nomodeset' — the kernel loads a DRM driver (or simpledrm on
-  # EFI systems without a native GPU driver).  Verbose boot is intentional;
-  # the sentinel clears the screen (ESC-c in ceremony-shell) when it takes
-  # over.
+  # kmscon needs a KMS/DRM device.  We blacklist native GPU drivers (i915,
+  # amdgpu, nouveau, …) because they can probe-hang or blank the display
+  # on unknown hardware.  The kernel's built-in 'simpledrm' driver wraps
+  # the EFI/UEFI framebuffer as a minimal KMS device (/dev/dri/card0)
+  # without any GPU-specific initialisation — safe on every EFI machine.
+  #
   # console=tty0: kernel messages go to the EFI framebuffer (tty1).
   # console=ttyS0,115200: kernel messages also go to the serial port;
   #   listing ttyS0 last makes it the primary console so
   #   systemd-getty-generator activates serial-getty@ttyS0.service.
   boot.kernelParams = [ "console=tty0" "console=ttyS0,115200n8" ];
+
+  # Prevent native GPU drivers from probing — forces simpledrm only.
+  boot.blacklistedKernelModules = [
+    "i915" "xe"              # Intel
+    "amdgpu" "radeon"        # AMD
+    "nouveau"                # NVIDIA
+    "ast" "mgag200"          # server BMC/IPMI GPUs
+  ];
 
   # Disable the graphical Plymouth boot splash — irrelevant for an appliance.
   boot.plymouth.enable = false;

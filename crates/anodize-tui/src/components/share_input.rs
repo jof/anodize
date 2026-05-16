@@ -370,7 +370,7 @@ impl ShareInput {
         // Collected shares summary
         for cs in &self.collected {
             lines.push(Line::from(vec![
-                Span::styled("  ✅ ", green),
+                Span::styled("  ✓ ", green),
                 Span::styled(
                     format!("#{} {}", cs.index, cs.custodian_name),
                     Style::default()
@@ -446,7 +446,7 @@ impl ShareInput {
                         Some(true) => {
                             lines.push(Line::from(Span::styled(
                                 format!(
-                                    "  ✅ {} words entered — checksum OK. Press [Enter] to submit.",
+                                    "  ✓ {} words entered — checksum OK. Press [Enter] to submit.",
                                     self.expected_words
                                 ),
                                 Style::default()
@@ -456,7 +456,7 @@ impl ShareInput {
                         }
                         Some(false) => {
                             lines.push(Line::from(Span::styled(
-                                "  ❌ Checksum invalid — check words for errors.",
+                                "  ✘ Checksum invalid — check words for errors.",
                                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                             )));
                             lines.push(Line::from(Span::styled(
@@ -518,7 +518,7 @@ impl ShareInput {
                         lines.push(Line::from(Span::styled(format!("    {hint}"), dim)));
                     } else if self.completions.is_empty() {
                         lines.push(Line::from(Span::styled(
-                            "    ❌ no matching word",
+                            "    ✘ no matching word",
                             Style::default().fg(Color::Red),
                         )));
                     }
@@ -568,7 +568,7 @@ impl ShareInput {
                 index,
             } => {
                 lines.push(Line::from(Span::styled(
-                    format!("  ✅ Accepted: #{index} {custodian_name}"),
+                    format!("  ✓ Accepted: #{index} {custodian_name}"),
                     green,
                 )));
             }
@@ -577,7 +577,7 @@ impl ShareInput {
                 index,
             } => {
                 lines.push(Line::from(Span::styled(
-                    format!("  ❌ COMMITMENT MISMATCH: #{index} {custodian_name} — share rejected"),
+                    format!("  ✘ COMMITMENT MISMATCH: #{index} {custodian_name} — share rejected"),
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(Span::styled(
@@ -587,13 +587,13 @@ impl ShareInput {
             }
             ShareVerifyResult::UnknownIndex(idx) => {
                 lines.push(Line::from(Span::styled(
-                    format!("  ❌ Unknown share index #{idx} — not in custodian roster"),
+                    format!("  ✘ Unknown share index #{idx} — not in custodian roster"),
                     Style::default().fg(Color::Red),
                 )));
             }
             ShareVerifyResult::DecodeError(msg) => {
                 lines.push(Line::from(Span::styled(
-                    format!("  ❌ {msg}"),
+                    format!("  ✘ {msg}"),
                     Style::default().fg(Color::Red),
                 )));
             }

@@ -87,22 +87,22 @@ fn render_hw_entry(
 
     let (dot, dot_style, detail) = match state {
         HwState::Absent => (
-            "⚫",
+            "○",
             Style::default().fg(Color::DarkGray).bg(Color::Black),
             "not detected".to_string(),
         ),
         HwState::Present(info) => (
-            "🟡",
+            "●",
             Style::default().fg(Color::Yellow).bg(Color::Black),
             info.clone(),
         ),
         HwState::Ready(info) => (
-            "🟢",
+            "●",
             Style::default().fg(Color::Green).bg(Color::Black),
             info.clone(),
         ),
         HwState::Error(msg) => (
-            "🔴",
+            "✘",
             Style::default().fg(Color::Red).bg(Color::Black),
             msg.clone(),
         ),

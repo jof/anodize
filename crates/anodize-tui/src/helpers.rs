@@ -12,10 +12,10 @@ use crate::media::SessionEntry;
 
 // ── Burn progress spinner ────────────────────────────────────────────────────
 
-const SPINNER_FRAMES: &[char] = &['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'];
+const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
 /// Return the spinner frame character for the given `Instant` start time.
-/// Cycles through moon-phase emoji every 100 ms.
+/// Cycles through Braille dot frames every 100 ms.
 pub fn spinner_frame(started: std::time::Instant) -> char {
     let idx = (started.elapsed().as_millis() / 100) as usize % SPINNER_FRAMES.len();
     SPINNER_FRAMES[idx]
@@ -413,12 +413,12 @@ mod tests {
     }
 
     #[test]
-    fn spinner_frame_cycles_through_moon_phases() {
+    fn spinner_frame_cycles_through_braille() {
         let started = std::time::Instant::now();
         let frame = spinner_frame(started);
         assert!(
             SPINNER_FRAMES.contains(&frame),
-            "frame '{frame}' should be one of the moon-phase spinner chars"
+            "frame '{frame}' should be one of the Braille spinner chars"
         );
     }
 
@@ -428,7 +428,7 @@ mod tests {
         // (or very close to it, given minimal elapsed time).
         let started = std::time::Instant::now();
         let frame = spinner_frame(started);
-        // The frame index is (elapsed_ms / 100) % 8.  With <100ms elapsed this is 0.
+        // The frame index is (elapsed_ms / 100) % 10.  With <100ms elapsed this is 0.
         assert_eq!(frame, SPINNER_FRAMES[0]);
     }
 

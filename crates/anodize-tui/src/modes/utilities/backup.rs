@@ -276,7 +276,7 @@ impl BackupState {
             BackupPhase::Done => {
                 if self.action_is_pair {
                     let desc = self.wrap_key_desc.as_deref().unwrap_or("?");
-                    self.lines.push("  ✅ Pair complete".into());
+                    self.lines.push("  ✓ Pair complete".into());
                     self.lines.push(String::new());
                     self.lines.push(format!("  Wrap key: {desc}"));
                     self.lines.push(format!(
@@ -289,9 +289,9 @@ impl BackupState {
                     ));
                 } else if let Some(ref r) = self.result {
                     let status = if r.public_keys_match {
-                        "✅ PUBLIC KEYS MATCH"
+                        "✓ PUBLIC KEYS MATCH"
                     } else {
-                        "❌ PUBLIC KEYS DO NOT MATCH"
+                        "✘ PUBLIC KEYS DO NOT MATCH"
                     };
                     self.lines.push(format!("  {status}"));
                     self.lines.push(String::new());
