@@ -88,7 +88,3 @@ appears to complete the rekey on the HSM and/or state.json.  The ceremony should
 # Burn Session Logs
 
 When in the writing phase of the ceremony, there is a one-line log of disc write progress that gets overwritten. It would be better to have a multi-line log that shows the progress and also shows any errors that occur.
-
-## Root Init Written -- Ctrl-C keybinding clash
-
-In the screen after doing an init root ceremony, the Ctrl-C keybinding (to "quit without shuttle copy") is clashing with the Ctrl-C (to exit).

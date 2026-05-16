@@ -635,13 +635,12 @@ impl CeremonyMode {
                 lines.push(String::new());
                 match app.current_op {
                     Some(Operation::MigrateDisc) => {
-                        lines.push("  [Ctrl+C]  Quit (migration complete; no USB export)".into());
+                        lines.push("  [Q]  Quit (migration complete; no USB export)".into());
                     }
                     _ => {
                         lines.push("  [1]  Copy artifacts to shuttle".into());
                         lines.push(
-                            "  [Ctrl+C]  Quit without shuttle copy (disc is the primary record)"
-                                .into(),
+                            "  [Q]  Quit without shuttle copy (disc is the primary record)".into(),
                         );
                     }
                 }
@@ -870,7 +869,7 @@ impl CeremonyMode {
                     "  Remove and store both disc and USB separately.".into(),
                     "  The HSM holds the private key; no key material was written to disk.".into(),
                     String::new(),
-                    "  [Ctrl+C]  Quit".into(),
+                    "  [Q]  Quit".into(),
                 ]
             }
         }
@@ -957,13 +956,11 @@ impl Component for CeremonyMode {
 
             CeremonyPhase::BurningDisc => Action::Noop, // auto-advance on burn
 
-            CeremonyPhase::DiscDone => {
-                if key.code == KeyCode::Char('1') {
-                    Action::DoWriteShuttle
-                } else {
-                    Action::Noop
-                }
-            }
+            CeremonyPhase::DiscDone => match key.code {
+                KeyCode::Char('1') => Action::DoWriteShuttle,
+                KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
+                _ => Action::Noop,
+            },
 
             CeremonyPhase::Planning(PlanningState::MigrateConfirm) => match key.code {
                 KeyCode::Char('1') => Action::ConfirmMigrate,
@@ -1015,7 +1012,10 @@ impl Component for CeremonyMode {
                 _ => Action::Noop,
             },
 
-            CeremonyPhase::Done => Action::Noop,
+            CeremonyPhase::Done => match key.code {
+                KeyCode::Char('q') | KeyCode::Char('Q') => Action::Quit,
+                _ => Action::Noop,
+            },
         }
     }
 

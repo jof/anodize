@@ -3469,7 +3469,7 @@ mod tests {
     }
 
     #[test]
-    fn q_never_quits() {
+    fn q_never_quits_in_normal_phases() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         // Setup mode
         let action = app.handle_key_event(key(KeyCode::Char('q')));
@@ -3494,6 +3494,26 @@ mod tests {
         assert!(
             !matches!(action, Action::Quit),
             "'q' should not produce Quit in CsrPreview"
+        );
+    }
+
+    #[test]
+    fn q_quits_in_disc_done_and_done() {
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        app.mode = crate::action::Mode::Ceremony;
+
+        app.ceremony.state = CeremonyPhase::DiscDone;
+        let action = app.handle_key_event(key(KeyCode::Char('q')));
+        assert!(
+            matches!(action, Action::Quit),
+            "'q' should produce Quit in DiscDone"
+        );
+
+        app.ceremony.state = CeremonyPhase::Done;
+        let action = app.handle_key_event(key(KeyCode::Char('q')));
+        assert!(
+            matches!(action, Action::Quit),
+            "'q' should produce Quit in Done"
         );
     }
 
