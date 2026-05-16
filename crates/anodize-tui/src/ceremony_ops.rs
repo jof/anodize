@@ -180,7 +180,7 @@ impl App {
             loop {
                 match rx.try_recv() {
                     Ok(BurnProgress::Step(msg)) => {
-                        self.disc.burn_step = Some(msg);
+                        self.disc.burn_log.push(msg);
                     }
                     Ok(BurnProgress::Done(r)) => {
                         tracing::info!("tick_intent_burn: received result from channel");
@@ -198,7 +198,7 @@ impl App {
             }
         };
         self.disc.burn_rx = None;
-        self.disc.burn_step = None;
+        self.disc.burn_log.clear();
         self.disc.burn_started = None;
         match result {
             Err(e) => {
@@ -260,7 +260,7 @@ impl App {
             loop {
                 match rx.try_recv() {
                     Ok(BurnProgress::Step(msg)) => {
-                        self.disc.burn_step = Some(msg);
+                        self.disc.burn_log.push(msg);
                     }
                     Ok(BurnProgress::Done(r)) => {
                         break r;
@@ -270,7 +270,7 @@ impl App {
             }
         };
         self.disc.burn_rx = None;
-        self.disc.burn_step = None;
+        self.disc.burn_log.clear();
         self.disc.burn_started = None;
         match result {
             Ok(()) => {
@@ -1939,7 +1939,7 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
         self.disc.burn_rx = Some(rx);
-        self.disc.burn_step = None;
+        self.disc.burn_log.clear();
         self.disc.burn_started = Some(std::time::Instant::now());
         self.disc.pending_intent_session = Some(intent_session);
 
@@ -2129,7 +2129,7 @@ impl App {
 
         let (tx, rx) = mpsc::channel();
         self.disc.burn_rx = Some(rx);
-        self.disc.burn_step = None;
+        self.disc.burn_log.clear();
         self.disc.burn_started = Some(std::time::Instant::now());
 
         {
@@ -3068,10 +3068,10 @@ mod tests {
 
         app.tick_intent_burn();
 
-        // burn_step and burn_rx should be cleared after Done
+        // burn_log and burn_rx should be cleared after Done
         assert!(
-            app.disc.burn_step.is_none(),
-            "burn_step should be cleared after Done"
+            app.disc.burn_log.is_empty(),
+            "burn_log should be cleared after Done"
         );
         assert!(
             app.disc.burn_rx.is_none(),
@@ -3117,6 +3117,55 @@ mod tests {
         assert_ne!(app.ceremony.state, CeremonyPhase::DiscDone);
         assert!(app.disc.burn_rx.is_none());
         assert!(app.status.contains("disc on fire"));
+    }
+
+    #[test]
+    fn tick_intent_burn_accumulates_burn_log() {
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::Commit;
+
+        // Send two steps without Done — tick should accumulate and return
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::media::BurnProgress::Step(
+            "Reading disc info…".into(),
+        ))
+        .unwrap();
+        tx.send(crate::media::BurnProgress::Step("Writing session…".into()))
+            .unwrap();
+        // Don't send Done yet — channel will be Empty on next try_recv
+        app.disc.burn_rx = Some(rx);
+        app.disc.burn_started = Some(std::time::Instant::now());
+
+        app.tick_intent_burn();
+
+        // Channel still open (no Done received), steps accumulated
+        assert_eq!(app.disc.burn_log.len(), 2);
+        assert_eq!(app.disc.burn_log[0], "Reading disc info…");
+        assert_eq!(app.disc.burn_log[1], "Writing session…");
+        assert!(app.disc.burn_rx.is_some(), "channel still open");
+    }
+
+    #[test]
+    fn tick_record_burn_accumulates_burn_log() {
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::BurningDisc;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::media::BurnProgress::Step("Step 1".into()))
+            .unwrap();
+        tx.send(crate::media::BurnProgress::Step("Step 2".into()))
+            .unwrap();
+        tx.send(crate::media::BurnProgress::Step("Step 3".into()))
+            .unwrap();
+        tx.send(crate::media::BurnProgress::Done(Ok(()))).unwrap();
+        app.disc.burn_rx = Some(rx);
+        app.disc.burn_started = Some(std::time::Instant::now());
+
+        app.tick_record_burn();
+
+        // After Done, burn_log should be cleared
+        assert!(app.disc.burn_log.is_empty(), "burn_log cleared after Done");
+        assert_eq!(app.ceremony.state, CeremonyPhase::DiscDone);
     }
 
     #[test]

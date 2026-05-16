@@ -728,7 +728,7 @@ mod tests {
             optical_dev: Some("/dev/sr0".into()),
             prior_sessions: sessions,
             burn_rx: None,
-            burn_step: None,
+            burn_log: Vec::new(),
             burn_started: None,
             sessions_remaining: Some(10),
             intent_session_dir_name: None,
@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn test_extension_name_unknown() {
-        let oid = der::asn1::ObjectIdentifier::new("9.9.9.9").unwrap();
+        let oid = der::asn1::ObjectIdentifier::new("1.2.3.4.99999").unwrap();
         assert_eq!(extension_name(oid), "Unknown");
     }
 

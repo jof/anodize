@@ -85,6 +85,3 @@ appears to complete the rekey on the HSM and/or state.json.  The ceremony should
 - detect the incomplete confirmation and roll back / warn the operator that
   the new shares are now live despite the abort.
 
-# Burn Session Logs
-
-When in the writing phase of the ceremony, there is a one-line log of disc write progress that gets overwritten. It would be better to have a multi-line log that shows the progress and also shows any errors that occur.
