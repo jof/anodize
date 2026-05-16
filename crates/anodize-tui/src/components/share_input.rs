@@ -63,6 +63,8 @@ pub struct ShareInput {
     pending_submit: bool,
     /// Last submit had an error; words preserved for editing.
     has_error: bool,
+    /// Pre-validation result when all words entered (before explicit submit).
+    checksum_valid: Option<bool>,
 }
 
 impl ShareInput {
@@ -83,6 +85,7 @@ impl ShareInput {
             sss_meta,
             pending_submit: false,
             has_error: false,
+            checksum_valid: None,
         }
     }
 
@@ -117,6 +120,7 @@ impl ShareInput {
                     self.pending_submit = false;
                     self.has_error = false;
                     self.last_result = None;
+                    self.checksum_valid = None;
                     if let Some(word) = self.words.pop() {
                         self.word_buf = word;
                         self.update_completions();
@@ -200,8 +204,19 @@ impl ShareInput {
         self.completions.clear();
         self.has_error = false;
         self.last_result = None;
+        self.checksum_valid = None;
         if self.words.len() == self.expected_words {
             self.pending_submit = true;
+            self.pre_validate();
+        }
+    }
+
+    /// Pre-validate the completed word list (checksum only) for visual feedback.
+    fn pre_validate(&mut self) {
+        let input = self.words.join("-");
+        match anodize_sss::Share::from_words(&input, self.secret_len) {
+            Ok(_) => self.checksum_valid = Some(true),
+            Err(_) => self.checksum_valid = Some(false),
         }
     }
 
@@ -301,7 +316,11 @@ impl ShareInput {
         let border_style = if self.has_error {
             Style::default().fg(Color::Red).bg(Color::Black)
         } else if self.pending_submit {
-            Style::default().fg(Color::Yellow).bg(Color::Black)
+            match self.checksum_valid {
+                Some(true) => Style::default().fg(Color::Green).bg(Color::Black),
+                Some(false) => Style::default().fg(Color::Red).bg(Color::Black),
+                None => Style::default().fg(Color::Yellow).bg(Color::Black),
+            }
         } else {
             crate::theme::MODAL_BORDER_CYAN
         };
@@ -311,8 +330,13 @@ impl ShareInput {
                 .bg(Color::Black)
                 .add_modifier(Modifier::BOLD)
         } else if self.pending_submit {
+            let color = match self.checksum_valid {
+                Some(true) => Color::Green,
+                Some(false) => Color::Red,
+                None => Color::Yellow,
+            };
             Style::default()
-                .fg(Color::Yellow)
+                .fg(color)
                 .bg(Color::Black)
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -385,7 +409,11 @@ impl ShareInput {
             let word_color = if self.has_error {
                 Color::Yellow
             } else if self.pending_submit {
-                Color::White
+                match self.checksum_valid {
+                    Some(true) => Color::Green,
+                    Some(false) => Color::Red,
+                    None => Color::White,
+                }
             } else {
                 Color::Green
             };
@@ -414,15 +442,42 @@ impl ShareInput {
                         yellow,
                     )));
                 } else {
-                    lines.push(Line::from(Span::styled(
-                        format!(
-                            "  ✓ {} words entered. Review and press [Enter] to submit.",
-                            self.expected_words
-                        ),
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    )));
+                    match self.checksum_valid {
+                        Some(true) => {
+                            lines.push(Line::from(Span::styled(
+                                format!(
+                                    "  ✓ {} words entered — checksum OK. Press [Enter] to submit.",
+                                    self.expected_words
+                                ),
+                                Style::default()
+                                    .fg(Color::Green)
+                                    .add_modifier(Modifier::BOLD),
+                            )));
+                        }
+                        Some(false) => {
+                            lines.push(Line::from(Span::styled(
+                                "  ✘ Checksum invalid — check words for errors.",
+                                Style::default()
+                                    .fg(Color::Red)
+                                    .add_modifier(Modifier::BOLD),
+                            )));
+                            lines.push(Line::from(Span::styled(
+                                "  Press [BS] to edit, or [Enter] to submit anyway.",
+                                yellow,
+                            )));
+                        }
+                        None => {
+                            lines.push(Line::from(Span::styled(
+                                format!(
+                                    "  {} words entered. Review and press [Enter] to submit.",
+                                    self.expected_words
+                                ),
+                                Style::default()
+                                    .fg(Color::Cyan)
+                                    .add_modifier(Modifier::BOLD),
+                            )));
+                        }
+                    }
                 }
 
                 lines.push(Line::from(Span::styled(
@@ -751,5 +806,55 @@ mod tests {
             }
         }
         assert_eq!(input.words.len(), 0);
+    }
+
+    #[test]
+    fn pre_validate_valid_share_shows_checksum_ok() {
+        let (mut input, flat) = fixture();
+        let words: Vec<&str> = flat.split('-').collect();
+
+        for &w in &words[..words.len() - 1] {
+            type_word(&mut input, w);
+            input.handle_key(key(KeyCode::Char(' ')));
+        }
+        type_word(&mut input, words.last().unwrap());
+
+        assert!(input.pending_submit);
+        assert_eq!(input.checksum_valid, Some(true));
+    }
+
+    #[test]
+    fn pre_validate_corrupted_share_shows_checksum_bad() {
+        let (mut input, flat) = fixture();
+        let words: Vec<&str> = flat.split('-').collect();
+
+        let wrong_word = if words[0] == "able" { "abet" } else { "able" };
+        type_word(&mut input, wrong_word);
+        input.handle_key(key(KeyCode::Char(' ')));
+        for &w in &words[1..words.len() - 1] {
+            type_word(&mut input, w);
+            input.handle_key(key(KeyCode::Char(' ')));
+        }
+        type_word(&mut input, words.last().unwrap());
+
+        assert!(input.pending_submit);
+        assert_eq!(input.checksum_valid, Some(false));
+    }
+
+    #[test]
+    fn backspace_from_review_clears_checksum_valid() {
+        let (mut input, flat) = fixture();
+        let words: Vec<&str> = flat.split('-').collect();
+
+        for &w in &words[..words.len() - 1] {
+            type_word(&mut input, w);
+            input.handle_key(key(KeyCode::Char(' ')));
+        }
+        type_word(&mut input, words.last().unwrap());
+        assert_eq!(input.checksum_valid, Some(true));
+
+        input.handle_key(key(KeyCode::Backspace));
+        assert_eq!(input.checksum_valid, None);
+        assert!(!input.pending_submit);
     }
 }
