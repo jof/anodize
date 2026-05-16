@@ -1,7 +1,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    text::Text,
+    text::{Line, Text},
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
@@ -213,6 +213,8 @@ impl CeremonyMode {
                 Some(Operation::MigrateDisc) => "Disc Migration Written",
                 Some(Operation::KeyBackup) => "Key Backup Written",
                 Some(Operation::ValidateDisc) => "Disc Validation Written",
+                #[cfg(feature = "dev-burn")]
+                Some(Operation::RefreshDisc) => "Disc Refreshed",
                 None => "Disc Session Written",
             },
             CeremonyPhase::Planning(PlanningState::LoadCsr) => "Select Certificate Profile",
@@ -273,7 +275,20 @@ impl CeremonyMode {
             .style(crate::theme::BLOCK)
             .border_style(crate::theme::BORDER)
             .title_style(crate::theme::TITLE);
-        let para = Paragraph::new(Text::from(content.join("\n")))
+        let lines: Vec<Line> = content
+            .into_iter()
+            .map(|s| {
+                #[cfg(feature = "dev-burn")]
+                if s.contains("[9]") {
+                    return Line::from(ratatui::text::Span::styled(
+                        s,
+                        ratatui::style::Style::default().fg(ratatui::style::Color::Red),
+                    ));
+                }
+                Line::from(s)
+            })
+            .collect();
+        let para = Paragraph::new(Text::from(lines))
             .block(block)
             .wrap(Wrap { trim: false })
             .scroll((app.content_scroll, 0));
@@ -321,6 +336,8 @@ impl CeremonyMode {
                     "  [6]  Migrate disc           (copy all sessions to new disc)".into(),
                     "  [7]  Key backup             (pair HSMs + backup signing key)".into(),
                     "  [8]  Validate disc           (verify integrity + HSM audit)".into(),
+                    #[cfg(feature = "dev-burn")]
+                    "  [9]  Refresh disc            (seed session → fresh start)".into(),
                 ]
             }
 
@@ -627,6 +644,8 @@ impl CeremonyMode {
                     Some(Operation::MigrateDisc) => "Disc migration",
                     Some(Operation::KeyBackup) => "Key backup",
                     Some(Operation::ValidateDisc) => "Disc validation",
+                    #[cfg(feature = "dev-burn")]
+                    Some(Operation::RefreshDisc) => "Disc refresh",
                     None => "Session",
                 };
                 let fp = app.data.fingerprint.as_deref().unwrap_or("(none)");
@@ -642,6 +661,10 @@ impl CeremonyMode {
                 match app.current_op {
                     Some(Operation::MigrateDisc) => {
                         lines.push("  [Q]  Quit (migration complete; no USB export)".into());
+                    }
+                    #[cfg(feature = "dev-burn")]
+                    Some(Operation::RefreshDisc) => {
+                        lines.push("  [1]  Continue (disc refreshed; no shuttle artifacts)".into());
                     }
                     _ => {
                         lines.push("  [1]  Copy artifacts to shuttle".into());
@@ -894,6 +917,8 @@ impl Component for CeremonyMode {
                 KeyCode::Char('6') => Action::SelectOperation(Operation::MigrateDisc),
                 KeyCode::Char('7') => Action::SelectOperation(Operation::KeyBackup),
                 KeyCode::Char('8') => Action::SelectOperation(Operation::ValidateDisc),
+                #[cfg(feature = "dev-burn")]
+                KeyCode::Char('9') => Action::SelectOperation(Operation::RefreshDisc),
                 _ => Action::Noop,
             },
 

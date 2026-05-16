@@ -324,8 +324,17 @@ impl App {
                     Some(Operation::MigrateDisc) => "Disc migration",
                     Some(Operation::KeyBackup) => "Key backup",
                     Some(Operation::ValidateDisc) => "Disc validation",
+                    #[cfg(feature = "dev-burn")]
+                    Some(Operation::RefreshDisc) => "Disc refresh",
                     None => "session",
                 };
+                // After a disc refresh, clear prior sessions so the TUI
+                // treats the disc as fresh for the next InitRoot.
+                #[cfg(feature = "dev-burn")]
+                if self.current_op == Some(Operation::RefreshDisc) {
+                    self.disc.prior_sessions.clear();
+                    self.disc.session_state = None;
+                }
                 self.set_status(format!("{op_label} written to disc: {disc_label}"));
             }
             Err(e) => {
@@ -761,6 +770,10 @@ impl App {
             }
             Operation::ValidateDisc => {
                 self.do_validate_disc();
+            }
+            #[cfg(feature = "dev-burn")]
+            Operation::RefreshDisc => {
+                self.do_refresh_disc();
             }
         }
     }
@@ -2145,6 +2158,53 @@ impl App {
         }
     }
 
+    // ── Disc refresh (dev-burn only) ─────────────────────────────────────────
+
+    #[cfg(feature = "dev-burn")]
+    pub(crate) fn do_refresh_disc(&mut self) {
+        use std::time::SystemTime;
+
+        let Some(dev) = &self.disc.optical_dev else {
+            self.set_status("No optical device — cannot refresh");
+            self.current_op = None;
+            self.ceremony.state = CeremonyPhase::OperationSelect;
+            return;
+        };
+
+        if self.disc.sessions_remaining == Some(0) {
+            self.set_status("Disc has no remaining sessions");
+            self.current_op = None;
+            self.ceremony.state = CeremonyPhase::OperationSelect;
+            return;
+        }
+
+        let now = SystemTime::now();
+        let dir_name = media::session_dir_name(now);
+        let seed_text = format!("anodize disc refresh\ncreated: {dir_name}\n");
+
+        let seed_session = media::iso9660::SessionEntry {
+            dir_name,
+            timestamp: now,
+            files: vec![media::iso9660::IsoFile {
+                name: "SEED.TXT".into(),
+                data: seed_text.into_bytes(),
+            }],
+        };
+
+        let mut all_sessions = self.disc.prior_sessions.clone();
+        all_sessions.push(seed_session);
+
+        let (tx, rx) = mpsc::channel();
+        self.disc.burn_rx = Some(rx);
+        self.disc.burn_log.clear();
+        self.disc.burn_started = Some(std::time::Instant::now());
+
+        media::write_session(dev, all_sessions, false, tx);
+
+        self.ceremony.state = CeremonyPhase::BurningDisc;
+        self.set_status("Writing seed session…");
+    }
+
     // ── Disc burn ─────────────────────────────────────────────────────────────
 
     pub(crate) fn do_start_burn(&mut self) {
@@ -2683,6 +2743,12 @@ impl App {
                 None
             }
 
+            #[cfg(feature = "dev-burn")]
+            Some(Operation::RefreshDisc) => {
+                // RefreshDisc uses do_refresh_disc() directly, not build_burn_session.
+                None
+            }
+
             None => {
                 self.set_status("No operation set");
                 None
@@ -2716,9 +2782,20 @@ impl App {
                 self.set_status("Validation complete.");
                 return;
             }
-            Some(Operation::MigrateDisc) | None => {
+            Some(Operation::MigrateDisc) => {
                 self.ceremony.state = CeremonyPhase::Done;
                 self.set_status("Migration complete.");
+                return;
+            }
+            #[cfg(feature = "dev-burn")]
+            Some(Operation::RefreshDisc) => {
+                self.ceremony.state = CeremonyPhase::Done;
+                self.set_status("Disc refreshed — ready for new InitRoot.");
+                return;
+            }
+            None => {
+                self.ceremony.state = CeremonyPhase::Done;
+                self.set_status("Complete.");
                 return;
             }
             _ => {}

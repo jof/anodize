@@ -125,7 +125,8 @@ fn main() -> Result<()> {
                 mem::forget(locked); // keeps fd (and flock) alive across exec
 
                 // Dev builds: ensure cdemu virtual optical drive is running.
-                #[cfg(feature = "dev-softhsm-usb")]
+                // (Skip for dev-burn — uses real /dev/sr0, no cdemu.)
+                #[cfg(all(feature = "dev-softhsm-usb", not(feature = "dev-burn")))]
                 ensure_cdemu();
 
                 // ESC-c (RIS) resets the terminal before the TUI takes over,
@@ -460,7 +461,7 @@ fn read_real_uid() -> Option<u32> {
 /// Checks `systemctl --user is-active cdemu-load-bdr`; if not active, starts it
 /// (which pulls in cdemu-daemon via Requires=).  Best-effort — failures are
 /// printed but do not prevent the ceremony from launching.
-#[cfg(feature = "dev-softhsm-usb")]
+#[cfg(all(feature = "dev-softhsm-usb", not(feature = "dev-burn")))]
 fn ensure_cdemu() {
     // XDG_RUNTIME_DIR is required for `systemctl --user` to find the user
     // manager socket.  PAM/logind normally sets this, but ceremony-shell

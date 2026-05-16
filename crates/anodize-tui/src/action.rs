@@ -9,6 +9,8 @@ pub enum Operation {
     MigrateDisc,
     KeyBackup,
     ValidateDisc,
+    #[cfg(feature = "dev-burn")]
+    RefreshDisc,
 }
 
 /// All possible actions in the app. Events produce Actions; update() consumes them.

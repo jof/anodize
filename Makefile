@@ -1,4 +1,4 @@
-.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev ssh-dev-vm ceremony-dev-vm list-usb write-usb write-usb-dev hash-iso verify-iso deploy-dev cdemu-swap-disc cdemu-swap-disc-local clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
+.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 dev-burn-amd64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev ssh-dev-vm ceremony-dev-vm list-usb write-usb write-usb-dev write-usb-dev-burn hash-iso verify-iso deploy-dev cdemu-swap-disc cdemu-swap-disc-local clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
 
 # Run the full GitHub Actions CI job locally via act + Docker
 ci:
@@ -63,7 +63,7 @@ NIX_SANDBOX_FLAG :=
 endif
 
 # Source files that affect the ISO build — changing any of these triggers a rebuild.
-NIX_SOURCES := flake.nix flake.lock nix/iso.nix nix/dev-iso.nix
+NIX_SOURCES := flake.nix flake.lock nix/iso.nix nix/dev-iso.nix nix/dev-burn-iso.nix
 
 # $(call nix-iso-build, <flake-output>, <dest-file>, <docker-platform>, <arch-tag>)
 ifdef NIX_BUILDER
@@ -134,6 +134,10 @@ anodize-dev-amd64.iso: $(NIX_SOURCES)
 anodize-dev-arm64.iso: $(NIX_SOURCES)
 	$(call nix-iso-build,dev-arm64,anodize-dev-arm64.iso,linux/arm64,arm64)
 
+# Dev-burn ISO (amd64) — real optical drives, SSH debug, disc-refresh.
+anodize-dev-burn-amd64.iso: $(NIX_SOURCES)
+	$(call nix-iso-build,dev-burn-amd64,anodize-dev-burn-amd64.iso,linux/amd64,amd64)
+
 # Reset the build cache.  Remote mode: wipe the remote directory.
 # Local mode: remove Docker Nix store volumes.
 nix-reset:
@@ -154,6 +158,7 @@ prod-amd64: anodize-prod-amd64.iso
 prod-arm64: anodize-prod-arm64.iso
 dev-amd64:  anodize-dev-amd64.iso
 dev-arm64:  anodize-dev-arm64.iso
+dev-burn-amd64: anodize-dev-burn-amd64.iso
 
 # Create a 64 MiB FAT shuttle image with a profile.toml and an empty
 # SoftHSM2 token directory.  The actual token is initialized during the
@@ -364,7 +369,7 @@ define write-usb-iso
 	echo "Found serial $(USB_SERIAL) at /dev/$$disk" && \
 	diskutil unmountDisk /dev/$$disk && \
 	test -b /dev/r$$disk || { echo "ABORT: /dev/r$$disk is not a block device — serial $(USB_SERIAL) not found?" >&2; exit 1; } && \
-	sudo dd if=$(1) of=/dev/r$$disk bs=1m && \
+	sudo dd if=$(1) of=/dev/r$$disk bs=1m status=progress && \
 	diskutil eject /dev/$$disk && \
 	echo "Done — safe to remove the USB stick."
 endef
@@ -399,6 +404,12 @@ ifndef USB_SERIAL
 	$(error USB_SERIAL is required — set it to your USB stick serial number)
 endif
 	$(call write-usb-iso,anodize-dev-amd64.iso)
+
+write-usb-dev-burn: anodize-dev-burn-amd64.iso
+ifndef USB_SERIAL
+	$(error USB_SERIAL is required — set it to your USB stick serial number)
+endif
+	$(call write-usb-iso,anodize-dev-burn-amd64.iso)
 
 # ---------------------------------------------------------------------------
 # ISO hash and verification — for reproducibility assurance.
@@ -616,7 +627,7 @@ endif
 .FORCE:
 
 clean:
-	rm -rf anodize-prod-amd64.iso anodize-prod-arm64.iso anodize-dev-amd64.iso anodize-dev-arm64.iso anodize-prod-amd64.iso.sha256 fake-shuttle.img anodize-ceremony-dev.bin dev-disc /tmp/anodize-ovmf-vars.fd
+	rm -rf anodize-prod-amd64.iso anodize-prod-arm64.iso anodize-dev-amd64.iso anodize-dev-arm64.iso anodize-dev-burn-amd64.iso anodize-prod-amd64.iso.sha256 fake-shuttle.img anodize-ceremony-dev.bin dev-disc /tmp/anodize-ovmf-vars.fd
 
 # One-time repo setup — configures git to use the committed hooks directory.
 setup:

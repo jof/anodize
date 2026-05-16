@@ -9,6 +9,10 @@ license.workspace = true
 # Writes SOFTHSM2_CONF pointing at <usb>/softhsm2/tokens/ before HSM init.
 # NEVER enable in a real ceremony — dev testing only.
 dev-softhsm-usb = []
+# Real-disc burning validation: targets physical optical drives (no cdemu),
+# SSH debug shell, and disc-refresh (seed session) support.
+# For development burn testing only — never ship in a production ISO.
+dev-burn = []
 
 [[bin]]
 name = "anodize-ceremony"

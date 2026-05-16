@@ -82,10 +82,19 @@
           cargoExtraArgs = "--package anodize-tui --features dev-softhsm-usb";
         });
 
+        # Dev-burn binary: targets real optical drives (no cdemu), with SSH
+        # debug shell and disc-refresh support.  For burn validation only.
+        anodize-ceremony-dev-burn = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname         = "anodize-ceremony";
+          version       = "0.1.0";
+          cargoExtraArgs = "--package anodize-tui --features dev-softhsm-usb,dev-burn";
+        });
+
       in
       {
         packages = {
-          inherit anodize-ceremony anodize-ceremony-dev;
+          inherit anodize-ceremony anodize-ceremony-dev anodize-ceremony-dev-burn;
           default = anodize-ceremony;
 
           # Two image types (prod / dev) × two architectures (amd64 / arm64).
@@ -94,6 +103,7 @@
           prod-arm64 = self.nixosConfigurations.ceremony-prod-arm64.config.system.build.isoImage;
           dev-amd64  = self.nixosConfigurations.ceremony-dev-amd64.config.system.build.isoImage;
           dev-arm64  = self.nixosConfigurations.ceremony-dev-arm64.config.system.build.isoImage;
+          dev-burn-amd64 = self.nixosConfigurations.ceremony-dev-burn-amd64.config.system.build.isoImage;
         };
 
         # Development shell — Rust toolchain comes from rustup (rust-toolchain.toml).
@@ -210,6 +220,33 @@
             boot.kernelParams = [ "console=ttyAMA0,115200" ];
 
             environment.variables.ANODIZE_BUILD_TYPE = "dev";
+          }
+        ];
+      };
+      # ── Dev-burn ISO ──────────────────────────────────────────────────────
+      # Real optical drives (no cdemu), SoftHSM, SSH debug shell, disc-refresh.
+      # For burn validation testing on physical hardware.
+
+      nixosConfigurations.ceremony-dev-burn-amd64 = nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+
+        specialArgs = {
+          anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony-dev-burn;
+          serialPort = "ttyS0";
+        };
+
+        modules = [
+          "${nixpkgs}/nixos/modules/installer/cd-dvd/iso-image.nix"
+          ./nix/iso.nix
+          ./nix/dev-burn-iso.nix
+          {
+            system.nixos.revision = nixpkgs.lib.mkForce (self.rev or "dirty-tree");
+            image.fileName    = nixpkgs.lib.mkForce "anodize-dev-burn-amd64";
+            isoImage.volumeID = nixpkgs.lib.mkForce "ANODIZE-BURN-AMD";
+
+            boot.kernelParams = [ "console=ttyS0,115200" "console=tty0" ];
+
+            environment.variables.ANODIZE_BUILD_TYPE = "dev-burn";
           }
         ];
       };

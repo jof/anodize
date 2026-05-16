@@ -1272,10 +1272,15 @@ impl App {
 
         // Build header lines
         let is_dev = cfg!(feature = "dev-softhsm-usb");
+        let is_burn = cfg!(feature = "dev-burn");
         let mut header_lines: Vec<Line> = vec![Line::from("ANODIZE ROOT CA CEREMONY")];
         if is_dev {
             header_lines.push(Line::from(Span::styled(
-                "*** DEV BUILD — NOT FOR PRODUCTION USE ***",
+                if is_burn {
+                    "*** DEV-BURN BUILD — REAL DISC, NOT FOR PRODUCTION ***"
+                } else {
+                    "*** DEV BUILD — NOT FOR PRODUCTION USE ***"
+                },
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )));
         }

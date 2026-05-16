@@ -65,6 +65,12 @@ pub fn load_session_state_from_sessions(
     sessions: &[SessionEntry],
 ) -> Option<anodize_config::state::SessionState> {
     for session in sessions.iter().rev() {
+        // dev-burn: a SEED.TXT marker means "treat disc as blank from here".
+        #[cfg(feature = "dev-burn")]
+        if session.files.iter().any(|f| f.name == "SEED.TXT") {
+            tracing::info!(session = %session.dir_name, "SEED.TXT boundary — ignoring older sessions");
+            return None;
+        }
         if let Some(file) = session
             .files
             .iter()
