@@ -18,7 +18,10 @@ use media::iso9660::{IsoFile, SessionEntry};
 use media::{scan_disc, session_dir_name, write_session, BurnProgress};
 
 #[derive(Parser)]
-#[command(name = "anodize-seed-disc", about = "Seed an appendable disc with a minimal init session")]
+#[command(
+    name = "anodize-seed-disc",
+    about = "Seed an appendable disc with a minimal init session"
+)]
 struct Cli {
     /// Optical device path.
     #[arg(long, default_value = "/dev/sr0")]
@@ -44,9 +47,8 @@ fn main() -> anyhow::Result<()> {
     // Build new session: prior sessions + a new minimal one
     let now = SystemTime::now();
     let dir_name = session_dir_name(now);
-    let seed_text = format!(
-        "anodize seed session\ncreated: {dir_name}\npurpose: enable fresh root CA\n"
-    );
+    let seed_text =
+        format!("anodize seed session\ncreated: {dir_name}\npurpose: enable fresh root CA\n");
 
     let new_session = SessionEntry {
         dir_name: dir_name.clone(),
