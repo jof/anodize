@@ -368,7 +368,7 @@ define write-usb-iso
 	fi && \
 	echo "Found serial $(USB_SERIAL) at /dev/$$disk" && \
 	diskutil unmountDisk /dev/$$disk && \
-	test -b /dev/r$$disk || { echo "ABORT: /dev/r$$disk is not a block device — serial $(USB_SERIAL) not found?" >&2; exit 1; } && \
+	test -c /dev/r$$disk || { echo "ABORT: /dev/r$$disk is not a character device — serial $(USB_SERIAL) not found?" >&2; exit 1; } && \
 	sudo dd if=$(1) of=/dev/r$$disk bs=1m status=progress && \
 	diskutil eject /dev/$$disk && \
 	echo "Done — safe to remove the USB stick."
