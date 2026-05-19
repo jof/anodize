@@ -16,7 +16,7 @@ use ratatui::{
 use sha2::{Digest, Sha256};
 use x509_cert::certificate::Certificate;
 
-use crate::app::{CeremonyData, DiscContext};
+use crate::app::DiscContext;
 use crate::media::SessionEntry;
 
 // ── View state machine ──────────────────────────────────────────────────────
@@ -320,7 +320,7 @@ impl DiscInspectorState {
 
 // ── Gather functions ────────────────────────────────────────────────────────
 
-pub fn gather_banner_from(disc: &DiscContext, data: &CeremonyData) -> Vec<String> {
+pub fn gather_banner_from(disc: &DiscContext, fingerprint: Option<&str>) -> Vec<String> {
     let mut lines = Vec::new();
 
     // Media / capacity
@@ -370,7 +370,7 @@ pub fn gather_banner_from(disc: &DiscContext, data: &CeremonyData) -> Vec<String
     }
 
     // Root cert fingerprint
-    if let Some(ref fp) = data.fingerprint {
+    if let Some(fp) = fingerprint {
         lines.push(format!("  Root cert: {fp}"));
     }
 
@@ -713,7 +713,7 @@ fn centered_rect(width: u16, height: u16, outer: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::{CeremonyData, DiscContext};
+    use crate::app::DiscContext;
     use crate::media::iso9660::IsoFile;
     use anodize_config::state::{Custodian, SessionState, SssMetadata};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -766,22 +766,6 @@ mod tests {
                 last_hsm_log_seq: None,
                 fleet: anodize_config::state::HsmFleet::default(),
             }),
-        }
-    }
-
-    fn dummy_data() -> CeremonyData {
-        CeremonyData {
-            cert_der: None,
-            fingerprint: Some("AA:BB:CC".into()),
-            crl_der: None,
-            root_cert_der: None,
-            csr_der: None,
-            selected_profile_idx: None,
-            revocation_list: vec![],
-            crl_number: None,
-            revoke_serial_buf: String::new(),
-            revoke_reason_buf: String::new(),
-            migrate_sessions: vec![],
         }
     }
 
@@ -971,8 +955,7 @@ mod tests {
             make_session("20250101T000000_000000000Z-record", vec![]),
         ];
         let disc = dummy_disc(sessions);
-        let data = dummy_data();
-        let lines = gather_banner_from(&disc, &data);
+        let lines = gather_banner_from(&disc, Some("AA:BB:CC"));
 
         assert!(lines.iter().any(|l| l.contains("2 used")));
         assert!(lines.iter().any(|l| l.contains("10 remaining")));
@@ -989,8 +972,7 @@ mod tests {
     fn test_gather_banner_no_sessions_remaining() {
         let mut disc = dummy_disc(vec![]);
         disc.sessions_remaining = None;
-        let data = dummy_data();
-        let lines = gather_banner_from(&disc, &data);
+        let lines = gather_banner_from(&disc, None);
         assert!(lines.iter().any(|l| l.contains("capacity unknown")));
     }
 

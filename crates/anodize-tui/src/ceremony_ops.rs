@@ -143,8 +143,6 @@ impl App {
                         self.disc.session_state =
                             load_session_state_from_sessions(&self.disc.prior_sessions);
                         if let Some(ref state) = self.disc.session_state {
-                            // Populate revocation list and CRL number from state
-                            self.data.crl_number = Some(state.crl_number);
                             tracing::info!(
                                 version = state.version,
                                 crl_number = state.crl_number,
@@ -478,9 +476,8 @@ impl App {
                 self.set_status(format!("CSR loaded. Select profile [1]–[{profiles_len}]."));
             }
             Operation::RevokeCert => {
-                self.data.root_cert_der =
-                    load_root_cert_der_from_sessions(&self.disc.prior_sessions);
-                if self.data.root_cert_der.is_none() {
+                let root_cert_der = load_root_cert_der_from_sessions(&self.disc.prior_sessions);
+                if root_cert_der.is_none() {
                     self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
                     self.current_op = None;
                     return;
@@ -493,7 +490,7 @@ impl App {
                     revocation_list,
                     crl_number,
                     cert_list,
-                    self.data.root_cert_der.clone(),
+                    root_cert_der,
                 );
                 self.active_op = Some(crate::ops::ActiveOperation::RevokeCert(ctx));
                 self.ceremony.state = CeremonyPhase::ActiveOp;
@@ -502,21 +499,18 @@ impl App {
                 );
             }
             Operation::IssueCrl => {
-                self.data.root_cert_der =
-                    load_root_cert_der_from_sessions(&self.disc.prior_sessions);
-                if self.data.root_cert_der.is_none() {
+                let root_cert_der = load_root_cert_der_from_sessions(&self.disc.prior_sessions);
+                if root_cert_der.is_none() {
                     self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
                     self.current_op = None;
                     return;
                 }
                 let revocation_list = load_revocation_from_sessions(&self.disc.prior_sessions);
                 let crl_number = Some(next_crl_number_from_sessions(&self.disc.prior_sessions));
-                self.data.revocation_list = revocation_list.clone();
-                self.data.crl_number = crl_number;
                 let ctx = crate::ops::issue_crl::IssueCrlCtx::new(
                     revocation_list,
                     crl_number,
-                    self.data.root_cert_der.clone(),
+                    root_cert_der,
                 );
                 self.active_op = Some(crate::ops::ActiveOperation::IssueCrl(ctx));
                 self.ceremony.state = CeremonyPhase::ActiveOp;
@@ -577,19 +571,6 @@ impl App {
     // ── WAL intent write ──────────────────────────────────────────────────────
 
     pub(crate) fn do_write_intent(&mut self) {
-        // For Mode 2+, load root cert from disc before intent write
-        if matches!(
-            self.current_op,
-            Some(Operation::SignCsr) | Some(Operation::RevokeCert) | Some(Operation::IssueCrl)
-        ) && self.data.root_cert_der.is_none()
-        {
-            self.data.root_cert_der = load_root_cert_der_from_sessions(&self.disc.prior_sessions);
-            if self.data.root_cert_der.is_none() {
-                self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
-                return;
-            }
-        }
-
         let raw_bytes = match self.profile_toml_bytes.clone() {
             Some(b) => b,
             None => {
@@ -1382,13 +1363,17 @@ mod tests {
     #[test]
     fn migrate_build_burn_session_is_pure_copy() {
         let mut app = migrate_app_with_active_op(3);
-        // Simulate [1] to move sessions to context, then sync to data.
+        // Simulate [1] to move sessions to context.
         let action = app.handle_key_event(key(KeyCode::Char('1')));
         app.update(action);
-        // Sync context sessions into data for build_burn_session.
-        if let Some(crate::ops::ActiveOperation::MigrateDisc(ref ctx)) = app.active_op {
-            app.data.migrate_sessions = ctx.sessions.clone();
-        }
+
+        // Grab expected source files from the op context before build_burn_session.
+        let source_sessions: Vec<crate::media::SessionEntry> =
+            if let Some(crate::ops::ActiveOperation::MigrateDisc(ref ctx)) = app.active_op {
+                ctx.sessions.clone()
+            } else {
+                panic!("expected MigrateDisc active_op");
+            };
 
         let staging =
             std::env::temp_dir().join(format!("anodize-migrate-test-{}", std::process::id()));
@@ -1399,7 +1384,7 @@ mod tests {
             .expect("should produce session");
 
         // Must match the last source session's files exactly.
-        let source_files = &app.data.migrate_sessions.last().unwrap().files;
+        let source_files = &source_sessions.last().unwrap().files;
         assert_eq!(session.files.len(), source_files.len());
         for (got, want) in session.files.iter().zip(source_files.iter()) {
             assert_eq!(got.name, want.name);

@@ -44,6 +44,36 @@ pub enum ActiveOperation {
 #[cfg(feature = "dev-burn")]
 pub struct RefreshCtx;
 
+impl ActiveOperation {
+    /// SHA-256 fingerprint of the signed cert (if produced by this operation).
+    pub fn fingerprint(&self) -> Option<&str> {
+        match self {
+            Self::InitRoot(ctx) => ctx.fingerprint.as_deref(),
+            Self::SignCsr(ctx) => ctx.fingerprint.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Signed certificate DER bytes (if produced by this operation).
+    pub fn cert_der(&self) -> Option<&[u8]> {
+        match self {
+            Self::InitRoot(ctx) => ctx.cert_der.as_deref(),
+            Self::SignCsr(ctx) => ctx.cert_der.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Signed CRL DER bytes (if produced by this operation).
+    pub fn crl_der(&self) -> Option<&[u8]> {
+        match self {
+            Self::InitRoot(ctx) => ctx.crl_der.as_deref(),
+            Self::RevokeCert(ctx) => ctx.crl_der.as_deref(),
+            Self::IssueCrl(ctx) => ctx.crl_der.as_deref(),
+            _ => None,
+        }
+    }
+}
+
 // ── OpAction ────────────────────────────────────────────────────────────────
 
 /// Return type from `OpContext::handle_key`, replacing most `Action` variants.

@@ -266,13 +266,17 @@ impl CeremonyMode {
             }
 
             CeremonyPhase::Execute => {
-                let fp = app.data.fingerprint.as_deref().unwrap_or("(none)");
+                let fp = app
+                    .active_op
+                    .as_ref()
+                    .and_then(|op| op.fingerprint())
+                    .unwrap_or("(none)");
                 // Parse actual cert for subject/validity when available; fall
                 // back to root CA profile only when cert_der is absent.
                 let (subject, validity_label) = app
-                    .data
-                    .cert_der
-                    .as_deref()
+                    .active_op
+                    .as_ref()
+                    .and_then(|op| op.cert_der())
                     .and_then(crate::helpers::cert_subject_and_validity_days)
                     .map(|(subj, days)| (subj, format!("{days} days")))
                     .unwrap_or_else(|| {
@@ -291,7 +295,7 @@ impl CeremonyMode {
                             "7305 days (20 years)".into(),
                         )
                     });
-                let has_crl = app.data.crl_der.is_some();
+                let has_crl = app.active_op.as_ref().and_then(|op| op.crl_der()).is_some();
                 let mut lines = vec![
                     String::new(),
                     format!("  Subject  : {subject}"),
@@ -350,12 +354,12 @@ impl CeremonyMode {
                     Some(Operation::RefreshDisc) => "Disc refresh",
                     None => "Session",
                 };
-                let fp = app.data.fingerprint.as_deref().unwrap_or("(none)");
+                let fp = app.active_op.as_ref().and_then(|op| op.fingerprint());
                 let mut lines = vec![
                     String::new(),
                     format!("  {op_label} written to disc successfully."),
                 ];
-                if app.data.fingerprint.is_some() {
+                if let Some(fp) = fp {
                     lines.push(String::new());
                     lines.push(format!("  Fingerprint: {fp}"));
                 }

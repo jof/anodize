@@ -4,7 +4,7 @@ use std::time::Instant;
 use std::time::{Duration, SystemTime};
 
 use anodize_config::state::SessionState;
-use anodize_config::{Profile, RevocationEntry};
+use anodize_config::Profile;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -80,39 +80,6 @@ pub struct CertSummary {
     pub already_revoked: bool,
 }
 
-/// Certificate / CRL / CSR / revocation / migration artefacts.
-pub struct CeremonyData {
-    pub cert_der: Option<Vec<u8>>,
-    pub fingerprint: Option<String>,
-    pub crl_der: Option<Vec<u8>>,
-    pub root_cert_der: Option<Vec<u8>>,
-    pub csr_der: Option<Vec<u8>>,
-    pub selected_profile_idx: Option<usize>,
-    pub revocation_list: Vec<RevocationEntry>,
-    pub crl_number: Option<u64>,
-    pub revoke_serial_buf: String,
-    pub revoke_reason_buf: String,
-    pub migrate_sessions: Vec<SessionEntry>,
-}
-
-impl CeremonyData {
-    fn new() -> Self {
-        Self {
-            cert_der: None,
-            fingerprint: None,
-            crl_der: None,
-            root_cert_der: None,
-            csr_der: None,
-            selected_profile_idx: None,
-            revocation_list: Vec::new(),
-            crl_number: None,
-            revoke_serial_buf: String::new(),
-            revoke_reason_buf: String::new(),
-            migrate_sessions: Vec::new(),
-        }
-    }
-}
-
 /// Maximum elapsed time since the last clock confirmation before a
 /// re-confirm is required.  On a live-boot, air-gapped system the clock
 /// cannot drift, but the guard catches the case where the operator walks
@@ -131,7 +98,6 @@ pub struct App {
     // Sub-contexts
     pub hw: HardwareManager,
     pub disc: DiscContext,
-    pub data: CeremonyData,
 
     // Mode components
     pub setup: SetupMode,
@@ -185,7 +151,6 @@ impl App {
 
             hw: HardwareManager::new(),
             disc: DiscContext::new(),
-            data: CeremonyData::new(),
 
             setup: SetupMode::new(),
             ceremony: CeremonyMode::new(),
@@ -341,7 +306,7 @@ impl App {
             match deferred {
                 KeyAction::Refresh => {
                     let banner = crate::modes::utilities::disc_inspector::gather_banner_from(
-                        &self.disc, &self.data,
+                        &self.disc, None,
                     );
                     let list = crate::modes::utilities::disc_inspector::gather_session_list_from(
                         &self.disc,
@@ -540,48 +505,14 @@ impl App {
                                 return Action::SetStatus(msg);
                             }
                             crate::ops::OpAction::StartRecordBurn => {
-                                // Sync any context-held data back into App fields
-                                // so the existing burn pipeline can use them.
-                                if let Some(crate::ops::ActiveOperation::MigrateDisc(ref ctx)) =
-                                    self.active_op
-                                {
-                                    self.data.migrate_sessions = ctx.sessions.clone();
-                                }
                                 self.do_start_burn();
                                 return Action::Noop;
                             }
                             crate::ops::OpAction::WriteIntent => {
-                                // Sync context-held data back into App fields
-                                // so the intent builder can use them.
-                                if let Some(crate::ops::ActiveOperation::RevokeCert(ref ctx)) =
-                                    self.active_op
-                                {
-                                    self.data.revocation_list = ctx.revocation_list.clone();
-                                    self.data.crl_number = ctx.crl_number;
-                                    self.data.revoke_serial_buf = ctx.serial_buf.clone();
-                                    self.data.revoke_reason_buf = ctx.reason_buf.clone();
-                                }
                                 self.do_write_intent();
                                 return Action::Noop;
                             }
                             crate::ops::OpAction::ExecuteOp => {
-                                // Sync context-held data back into App fields
-                                // so the existing execute pipeline can use them.
-                                match self.active_op {
-                                    Some(crate::ops::ActiveOperation::SignCsr(ref ctx)) => {
-                                        self.data.csr_der = Some(ctx.csr_der.clone());
-                                        self.data.selected_profile_idx = ctx.selected_profile_idx;
-                                    }
-                                    Some(crate::ops::ActiveOperation::RevokeCert(ref ctx)) => {
-                                        self.data.revocation_list = ctx.revocation_list.clone();
-                                        self.data.crl_number = ctx.crl_number;
-                                    }
-                                    Some(crate::ops::ActiveOperation::IssueCrl(ref ctx)) => {
-                                        self.data.revocation_list = ctx.revocation_list.clone();
-                                        self.data.crl_number = ctx.crl_number;
-                                    }
-                                    _ => {}
-                                }
                                 self.do_dispatch_after_clock_reconfirm();
                                 return Action::Noop;
                             }
@@ -822,7 +753,7 @@ impl App {
                     use crate::modes::utilities::disc_inspector::{
                         gather_banner_from, gather_session_list_from,
                     };
-                    let banner = gather_banner_from(&self.disc, &self.data);
+                    let banner = gather_banner_from(&self.disc, None);
                     let list = gather_session_list_from(&self.disc);
                     let count = self.disc.prior_sessions.len();
                     self.utilities.screen = screen;

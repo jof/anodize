@@ -134,7 +134,7 @@ impl UtilitiesMode {
         if let Some(rem) = app.disc.sessions_remaining {
             lines.push(format!("  Disc sessions remaining: {rem}"));
         }
-        if let Some(ref fp) = app.data.fingerprint {
+        if let Some(fp) = app.active_op.as_ref().and_then(|op| op.fingerprint()) {
             lines.push(format!("  Root cert fingerprint: {fp}"));
         }
 
