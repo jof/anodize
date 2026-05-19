@@ -10,9 +10,12 @@ mod app;
 mod ceremony_ops;
 mod components;
 mod event;
+mod hardware;
 mod helpers;
 mod media;
 mod modes;
+mod ops;
+mod staging;
 mod theme;
 mod tui;
 
