@@ -222,16 +222,4 @@ impl Component for SetupMode {
     fn handle_tick(&mut self) -> Action {
         Action::Noop
     }
-
-    fn render(&self, frame: &mut Frame, area: Rect) {
-        // Fallback render without app context (used if called generically)
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title("Setup")
-            .style(crate::theme::BLOCK)
-            .border_style(crate::theme::BORDER)
-            .title_style(crate::theme::TITLE);
-        let para = Paragraph::new("  (Setup mode)").block(block);
-        frame.render_widget(para, area);
-    }
 }

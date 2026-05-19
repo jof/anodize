@@ -9,8 +9,8 @@ pub enum Event {
     Key(KeyEvent),
     /// Tick interval elapsed — drive background polling.
     Tick,
-    /// Terminal was resized.
-    Resize(u16, u16),
+    /// Terminal was resized (ratatui handles dimensions automatically).
+    Resize,
 }
 
 /// Synchronous event handler: polls crossterm and emits `Event`s.
@@ -32,7 +32,7 @@ impl EventHandler {
         if event::poll(self.tick_rate)? {
             match event::read()? {
                 CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => Ok(Event::Key(key)),
-                CrosstermEvent::Resize(w, h) => Ok(Event::Resize(w, h)),
+                CrosstermEvent::Resize(_, _) => Ok(Event::Resize),
                 // Ignore non-press key events (Release, Repeat) and mouse/focus/paste
                 _ => Ok(Event::Tick),
             }

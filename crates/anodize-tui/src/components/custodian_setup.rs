@@ -53,13 +53,6 @@ impl CustodianSetup {
         }
     }
 
-    /// Pre-populate with existing names (for re-key).
-    pub fn with_names(mut self, names: Vec<String>) -> Self {
-        self.names = names;
-        self.threshold = default_threshold(self.names.len());
-        self
-    }
-
     /// Handle a key event. Returns true if the component consumed the event.
     pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) -> bool {
         use crossterm::event::KeyCode;

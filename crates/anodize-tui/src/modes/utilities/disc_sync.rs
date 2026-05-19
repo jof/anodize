@@ -26,8 +26,6 @@ pub enum SyncPhase {
     ScanSource,
     /// Master scanned; waiting for operator to insert backup disc.
     WaitTarget,
-    /// Scanning target disc and validating pairing.
-    ScanTarget,
     /// Pairing validated; show confirmation before writing.
     Confirm,
     /// Writing missing sessions to target disc.
@@ -283,10 +281,6 @@ impl DiscSyncState {
                 KeyCode::Esc => (false, SyncAction::None),
                 _ => (true, SyncAction::None),
             },
-            SyncPhase::ScanTarget => {
-                // This phase is transient — scan happens immediately
-                (true, SyncAction::None)
-            }
             SyncPhase::Confirm => match key.code {
                 KeyCode::Enter => (true, SyncAction::StartWrite),
                 KeyCode::Esc => {
@@ -343,7 +337,6 @@ impl DiscSyncState {
         match self.phase {
             SyncPhase::ScanSource => "Disc Sync  [1] scan master  [Esc] back",
             SyncPhase::WaitTarget => "Disc Sync  [1] scan backup  [Esc] back",
-            SyncPhase::ScanTarget => "Disc Sync — scanning backup…",
             SyncPhase::Confirm => "Disc Sync  [Enter] write  [Esc] cancel",
             SyncPhase::Writing => "Disc Sync — writing…",
             SyncPhase::Done => "Disc Sync  [1] sync another  [Esc] back",
@@ -385,9 +378,6 @@ impl DiscSyncState {
             }
             SyncPhase::WaitTarget => {
                 lines.push(Line::from("  Insert a backup disc and press [1] to scan."));
-            }
-            SyncPhase::ScanTarget => {
-                lines.push(Line::from(Span::styled("  Scanning backup disc…", yellow)));
             }
             SyncPhase::Confirm => {
                 lines.push(Line::from(vec![

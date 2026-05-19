@@ -93,7 +93,7 @@ fn main() -> Result<()> {
                 let action = app.handle_tick();
                 app.update(action);
             }
-            event::Event::Resize(_, _) => {
+            event::Event::Resize => {
                 // ratatui handles resize automatically on next draw
             }
         }

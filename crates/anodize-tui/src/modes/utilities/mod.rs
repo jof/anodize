@@ -1,4 +1,3 @@
-pub mod backup;
 pub mod disc_inspector;
 pub mod disc_sync;
 
@@ -30,8 +29,6 @@ pub struct UtilitiesMode {
     pub screen: UtilScreen,
     /// Cached lines for the current sub-screen (populated on entry).
     cached_lines: Vec<String>,
-    /// Backup FSM state (persists across re-renders, used by ceremony backup).
-    pub backup: backup::BackupState,
     /// Disc inspector state (persists across re-renders).
     pub disc_inspector: disc_inspector::DiscInspectorState,
     /// Disc sync state (persists across re-renders).
@@ -43,7 +40,6 @@ impl UtilitiesMode {
         Self {
             screen: UtilScreen::Menu,
             cached_lines: Vec::new(),
-            backup: backup::BackupState::new(),
             disc_inspector: disc_inspector::DiscInspectorState::new(),
             disc_sync: disc_sync::DiscSyncState::new(),
         }
@@ -443,19 +439,5 @@ impl Component for UtilitiesMode {
                 _ => Action::Noop,
             },
         }
-    }
-
-    fn render(&self, frame: &mut Frame, area: Rect) {
-        // Fallback — render_with_app is preferred
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .title("Utilities")
-            .style(crate::theme::BLOCK)
-            .border_style(crate::theme::BORDER)
-            .title_style(crate::theme::TITLE);
-        let para = Paragraph::new(Text::from("  Press F3 to enter Utilities"))
-            .block(block)
-            .wrap(Wrap { trim: false });
-        frame.render_widget(para, area);
     }
 }

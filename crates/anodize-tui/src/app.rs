@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 use std::time::{Duration, SystemTime};
@@ -19,13 +19,13 @@ use crate::action::{Action, Mode, Operation};
 use crate::components::confirm_dialog::ConfirmDialog;
 use crate::components::mode_bar::ModeBar;
 use crate::components::phase_bar::PhaseBar;
-use crate::components::status_bar::{HwState, StatusBar};
+use crate::components::status_bar::StatusBar;
 use crate::components::Component;
 use crate::hardware::HardwareManager;
 use crate::media::{BurnProgress, SessionEntry};
 use crate::modes;
 use crate::modes::ceremony::CeremonyMode;
-use crate::modes::ceremony::{CeremonyPhase, PlanningState};
+use crate::modes::ceremony::CeremonyPhase;
 use crate::modes::setup::{SetupMode, SetupPhase};
 use crate::modes::utilities::UtilitiesMode;
 use crate::ops::{ActiveOperation, OpContext};
@@ -74,11 +74,8 @@ impl DiscContext {
 pub struct CertSummary {
     /// Uppercase hex string of the full certificate serial number.
     pub serial: String,
-    /// Raw serial bytes for constructing `SerialNumber` in CRL issuance.
-    pub serial_bytes: Vec<u8>,
     pub subject: String,
     pub not_after: String,
-    pub session_dir: String,
     pub is_root: bool,
     pub already_revoked: bool,
 }
@@ -90,25 +87,12 @@ pub struct CeremonyData {
     pub crl_der: Option<Vec<u8>>,
     pub root_cert_der: Option<Vec<u8>>,
     pub csr_der: Option<Vec<u8>>,
-    pub csr_subject_display: Option<String>,
     pub selected_profile_idx: Option<usize>,
     pub revocation_list: Vec<RevocationEntry>,
     pub crl_number: Option<u64>,
     pub revoke_serial_buf: String,
     pub revoke_reason_buf: String,
-    pub revoke_phase: u8, // 0=serial entry, 1=reason entry
-    pub cert_list: Vec<CertSummary>,
-    pub cert_list_cursor: usize,
     pub migrate_sessions: Vec<SessionEntry>,
-    pub migrate_chain_ok: bool,
-    pub migrate_total_bytes: u64,
-    pub migrate_source_fingerprint: Option<String>,
-    // Compiled certificate preview (CSR + profile → final cert structure)
-    pub cert_preview_lines: Vec<String>,
-    // Disc validation
-    pub validate_report_lines: Vec<String>,
-    pub validate_has_hsm: bool,
-    pub validate_findings: Vec<anodize_audit::validate::Finding>,
 }
 
 impl CeremonyData {
@@ -119,53 +103,12 @@ impl CeremonyData {
             crl_der: None,
             root_cert_der: None,
             csr_der: None,
-            csr_subject_display: None,
             selected_profile_idx: None,
             revocation_list: Vec::new(),
             crl_number: None,
             revoke_serial_buf: String::new(),
             revoke_reason_buf: String::new(),
-            revoke_phase: 0,
-            cert_list: Vec::new(),
-            cert_list_cursor: 0,
             migrate_sessions: Vec::new(),
-            migrate_chain_ok: false,
-            migrate_total_bytes: 0,
-            migrate_source_fingerprint: None,
-            cert_preview_lines: Vec::new(),
-            validate_report_lines: Vec::new(),
-            validate_has_hsm: false,
-            validate_findings: Vec::new(),
-        }
-    }
-}
-
-/// SSS / custodian / share components for InitRoot & RekeyShares.
-pub struct SssContext {
-    pub custodian_buf: String,
-    pub shares: Option<Vec<anodize_sss::Share>>,
-    pub custodian_names: Vec<String>,
-    pub share_input: Option<crate::components::share_input::ShareInput>,
-    pub share_reveal: Option<crate::components::share_reveal::ShareReveal>,
-    pub custodian_setup: Option<crate::components::custodian_setup::CustodianSetup>,
-    /// Old PIN hex retained during RekeyShares PIN rotation so that
-    /// `change_pin(old, new)` can be called after share verification.
-    pub rekey_old_pin_hex: Option<String>,
-    /// Device identifiers of backup HSMs whose PIN was changed during rekey.
-    pub rekey_changed_backup_ids: Vec<String>,
-}
-
-impl SssContext {
-    fn new() -> Self {
-        Self {
-            custodian_buf: String::new(),
-            shares: None,
-            custodian_names: Vec::new(),
-            share_input: None,
-            share_reveal: None,
-            custodian_setup: None,
-            rekey_old_pin_hex: None,
-            rekey_changed_backup_ids: Vec::new(),
         }
     }
 }
@@ -189,7 +132,6 @@ pub struct App {
     pub hw: HardwareManager,
     pub disc: DiscContext,
     pub data: CeremonyData,
-    pub sss: SssContext,
 
     // Mode components
     pub setup: SetupMode,
@@ -244,7 +186,6 @@ impl App {
             hw: HardwareManager::new(),
             disc: DiscContext::new(),
             data: CeremonyData::new(),
-            sss: SssContext::new(),
 
             setup: SetupMode::new(),
             ceremony: CeremonyMode::new(),
@@ -283,7 +224,6 @@ impl App {
             hw: &mut self.hw,
             disc: &mut self.disc,
             profile: self.profile.as_ref(),
-            profile_toml_bytes: self.profile_toml_bytes.as_deref(),
             shuttle_mount: &self.shuttle_mount,
             skip_disc: self.skip_disc,
             confirmed_time: &mut self.confirmed_time,
@@ -565,262 +505,6 @@ impl App {
             _ => {}
         }
 
-        // CustodianSetup component delegation
-        if self.mode == Mode::Ceremony {
-            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::CustodianSetup)
-                || self.ceremony.state
-                    == CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup)
-            {
-                if let Some(ref mut setup) = self.sss.custodian_setup {
-                    // Intercept Esc before the component to gate behind
-                    // a confirmation dialog instead of immediate abort.
-                    if key.code == KeyCode::Esc {
-                        let is_rekey = self.ceremony.state
-                            == CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup);
-                        let action = if is_rekey {
-                            Action::RekeyAbort
-                        } else {
-                            Action::InitRootAbort
-                        };
-                        self.show_abort_confirm(action);
-                        return Action::Noop;
-                    }
-                    setup.handle_key(key);
-                    if setup.confirmed {
-                        let names = setup.names.clone();
-                        let threshold = setup.threshold;
-                        self.sss.custodian_setup = None;
-                        let is_rekey = self.ceremony.state
-                            == CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup);
-                        if is_rekey {
-                            self.sss.custodian_names = names;
-                            self.do_rekey_confirm_custodians_with_threshold(threshold);
-                        } else {
-                            self.sss.custodian_names = names;
-                            self.do_init_root_confirm_custodians_with_threshold(threshold);
-                        }
-                    }
-                }
-                return Action::Noop;
-            }
-        }
-
-        // InitRoot share reveal/verify: delegate to owned components
-        if self.mode == Mode::Ceremony {
-            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::ShareReveal) {
-                if key.code == KeyCode::Esc {
-                    self.show_abort_confirm(Action::InitRootAbort);
-                    return Action::Noop;
-                }
-                if let Some(ref mut reveal) = self.sss.share_reveal {
-                    if reveal.handle_key(key) {
-                        // All shares revealed → advance to verification round
-                        self.sss.share_reveal = None;
-                        if let Some(ref state) = self.disc.session_state {
-                            let mut si = crate::components::share_input::ShareInput::new(
-                                state.sss.clone(),
-                                32, // PIN is 32 bytes
-                            );
-                            si.verify_all = true;
-                            self.sss.share_input = Some(si);
-                        }
-                        self.ceremony.state = CeremonyPhase::Planning(PlanningState::ShareVerify);
-                        self.set_status(
-                            "Verification round: every custodian must re-enter their share.",
-                        );
-                    }
-                }
-                return Action::Noop;
-            }
-            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::ShareVerify) {
-                if key.code == KeyCode::Esc {
-                    self.show_abort_confirm(Action::InitRootAbort);
-                    return Action::Noop;
-                }
-                if let Some(ref mut input) = self.sss.share_input {
-                    input.handle_key(key);
-                    if input.is_complete() {
-                        self.sss.share_input = None;
-                        self.sss.shares = None;
-                        // All shares verified → generate root keypair
-                        self.set_status("All shares verified. Writing intent to disc…");
-                        self.do_write_intent();
-                    }
-                }
-                return Action::Noop;
-            }
-
-            // Quorum phase: collect shares → reconstruct PIN → HSM login → execute
-            if self.ceremony.state == CeremonyPhase::Quorum {
-                if key.code == KeyCode::Esc {
-                    self.show_abort_confirm(Action::CeremonyCancel);
-                    return Action::Noop;
-                }
-                if let Some(ref mut input) = self.sss.share_input {
-                    input.handle_key(key);
-                    if input.quorum_reached() {
-                        self.do_quorum_complete();
-                    }
-                }
-                return Action::Noop;
-            }
-
-            // RekeyShares: quorum input → reconstruct PIN
-            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RekeyQuorum) {
-                if key.code == KeyCode::Esc {
-                    self.show_abort_confirm(Action::RekeyAbort);
-                    return Action::Noop;
-                }
-                if let Some(ref mut input) = self.sss.share_input {
-                    input.handle_key(key);
-                    if input.quorum_reached() {
-                        // Reconstruct PIN and verify
-                        self.do_rekey_quorum_complete();
-                    }
-                }
-                return Action::Noop;
-            }
-
-            // KeyBackup: quorum input → reconstruct PIN → discover devices
-            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::BackupQuorum) {
-                if key.code == KeyCode::Esc {
-                    self.show_abort_confirm(Action::CeremonyCancel);
-                    return Action::Noop;
-                }
-                if let Some(ref mut input) = self.sss.share_input {
-                    input.handle_key(key);
-                    if input.quorum_reached() {
-                        self.do_backup_quorum_complete();
-                    }
-                }
-                return Action::Noop;
-            }
-
-            // KeyBackup: device selection phase — forward keys to backup FSM
-            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::BackupDevices) {
-                if key.code == KeyCode::Esc {
-                    // Check if backup FSM can go back, or abort to op select
-                    use crate::modes::utilities::backup::BackupPhase;
-                    match self.utilities.backup.phase {
-                        BackupPhase::SelectSource => {
-                            self.show_abort_confirm(Action::CeremonyCancel);
-                            return Action::Noop;
-                        }
-                        _ => {
-                            self.utilities.backup.go_back();
-                        }
-                    }
-                    return Action::Noop;
-                }
-                // Number keys: forward to backup FSM
-                if let KeyCode::Char(c) = key.code {
-                    if let Some(d) = c.to_digit(10) {
-                        let action = self.utilities.backup.handle_key_digit(d as u8);
-                        if action == crate::modes::utilities::backup::BackupAction::Execute {
-                            // All inputs collected → write intent WAL to disc,
-                            // then tick_intent_burn will execute + record burn.
-                            self.do_write_intent();
-                        }
-                        return Action::Noop;
-                    }
-                }
-                if key.code == KeyCode::Enter {
-                    let action = self.utilities.backup.handle_enter();
-                    if action == crate::modes::utilities::backup::BackupAction::Execute {
-                        self.do_write_intent();
-                    }
-                    return Action::Noop;
-                }
-                return Action::Noop;
-            }
-
-            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RekeyShareReveal) {
-                if key.code == KeyCode::Esc {
-                    self.show_abort_confirm(Action::RekeyAbort);
-                    return Action::Noop;
-                }
-                if let Some(ref mut reveal) = self.sss.share_reveal {
-                    if reveal.handle_key(key) {
-                        self.sss.share_reveal = None;
-                        if let Some(ref state) = self.disc.session_state {
-                            let mut si = crate::components::share_input::ShareInput::new(
-                                state.sss.clone(),
-                                32,
-                            );
-                            si.verify_all = true;
-                            self.sss.share_input = Some(si);
-                        }
-                        self.ceremony.state =
-                            CeremonyPhase::Planning(PlanningState::RekeyShareVerify);
-                        self.set_status(
-                            "Verify new shares: every custodian must re-enter their share.",
-                        );
-                    }
-                }
-                return Action::Noop;
-            }
-            if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RekeyShareVerify) {
-                if key.code == KeyCode::Esc {
-                    self.show_abort_confirm(Action::RekeyAbort);
-                    return Action::Noop;
-                }
-                if let Some(ref mut input) = self.sss.share_input {
-                    input.handle_key(key);
-                    if input.is_complete() {
-                        // Validate share round-trip and change HSM PIN before burning
-                        match self.do_rekey_change_pin() {
-                            Ok(old_pin_hex) => {
-                                // Propagate PIN to backup HSMs
-                                let new_pin_hex = self.pin_buf.clone();
-                                match self.do_rekey_change_pin_backups(&old_pin_hex, &new_pin_hex) {
-                                    Ok(ids) => {
-                                        self.sss.rekey_changed_backup_ids = ids;
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(
-                                            "RekeyShares: backup PIN propagation failed: {e}"
-                                        );
-                                        self.sss.share_input = None;
-                                        self.sss.shares = None;
-                                        self.set_status(format!("Re-key failed: {e}"));
-                                        self.ceremony.state = CeremonyPhase::OperationSelect;
-                                        self.current_op = None;
-                                        return Action::Noop;
-                                    }
-                                }
-                                // Verify old PIN is rejected before burning
-                                if let Err(e) = self.do_rekey_verify_old_pin_rejected(&old_pin_hex)
-                                {
-                                    tracing::error!(
-                                        "RekeyShares: old-PIN rejection check failed: {e}"
-                                    );
-                                    self.sss.share_input = None;
-                                    self.sss.shares = None;
-                                    self.set_status(format!("Re-key failed: {e}"));
-                                    self.ceremony.state = CeremonyPhase::OperationSelect;
-                                    self.current_op = None;
-                                    return Action::Noop;
-                                }
-                                self.sss.share_input = None;
-                                self.sss.shares = None;
-                                self.do_start_burn();
-                            }
-                            Err(e) => {
-                                tracing::error!("RekeyShares: PIN change failed: {e}");
-                                self.sss.share_input = None;
-                                self.sss.shares = None;
-                                self.sss.rekey_old_pin_hex = None;
-                                self.set_status(format!("Re-key failed: {e}"));
-                                self.ceremony.state = CeremonyPhase::OperationSelect;
-                                self.current_op = None;
-                            }
-                        }
-                    }
-                }
-                return Action::Noop;
-            }
-        }
-
         // Delegate to the active mode's component
         match self.mode {
             Mode::Setup => self.setup.handle_key_event(key),
@@ -839,22 +523,80 @@ impl App {
                                 return Action::Noop;
                             }
                             crate::ops::OpAction::Abort => {
-                                self.active_op = None;
-                                self.ceremony.state = CeremonyPhase::OperationSelect;
+                                if self
+                                    .active_op
+                                    .as_ref()
+                                    .map_or(false, |op| op.needs_abort_confirmation())
+                                {
+                                    self.show_abort_confirm(Action::CeremonyCancel);
+                                } else {
+                                    self.active_op = None;
+                                    self.current_op = None;
+                                    self.ceremony.state = CeremonyPhase::OperationSelect;
+                                }
                                 return Action::Noop;
                             }
                             crate::ops::OpAction::SetStatus(msg) => {
                                 return Action::SetStatus(msg);
                             }
-                            crate::ops::OpAction::Quit => {
-                                return Action::Quit;
+                            crate::ops::OpAction::StartRecordBurn => {
+                                // Sync any context-held data back into App fields
+                                // so the existing burn pipeline can use them.
+                                if let Some(crate::ops::ActiveOperation::MigrateDisc(ref ctx)) =
+                                    self.active_op
+                                {
+                                    self.data.migrate_sessions = ctx.sessions.clone();
+                                }
+                                self.do_start_burn();
+                                return Action::Noop;
                             }
-                            // Future: wire these up as operations are migrated.
-                            crate::ops::OpAction::ShowConfirm { .. }
-                            | crate::ops::OpAction::WriteIntent
-                            | crate::ops::OpAction::StartRecordBurn
-                            | crate::ops::OpAction::WriteShuttle => {
-                                tracing::warn!("OpAction not yet wired: {:?}", result);
+                            crate::ops::OpAction::WriteIntent => {
+                                // Sync context-held data back into App fields
+                                // so the intent builder can use them.
+                                if let Some(crate::ops::ActiveOperation::RevokeCert(ref ctx)) =
+                                    self.active_op
+                                {
+                                    self.data.revocation_list = ctx.revocation_list.clone();
+                                    self.data.crl_number = ctx.crl_number;
+                                    self.data.revoke_serial_buf = ctx.serial_buf.clone();
+                                    self.data.revoke_reason_buf = ctx.reason_buf.clone();
+                                }
+                                self.do_write_intent();
+                                return Action::Noop;
+                            }
+                            crate::ops::OpAction::ExecuteOp => {
+                                // Sync context-held data back into App fields
+                                // so the existing execute pipeline can use them.
+                                match self.active_op {
+                                    Some(crate::ops::ActiveOperation::SignCsr(ref ctx)) => {
+                                        self.data.csr_der = Some(ctx.csr_der.clone());
+                                        self.data.selected_profile_idx = ctx.selected_profile_idx;
+                                    }
+                                    Some(crate::ops::ActiveOperation::RevokeCert(ref ctx)) => {
+                                        self.data.revocation_list = ctx.revocation_list.clone();
+                                        self.data.crl_number = ctx.crl_number;
+                                    }
+                                    Some(crate::ops::ActiveOperation::IssueCrl(ref ctx)) => {
+                                        self.data.revocation_list = ctx.revocation_list.clone();
+                                        self.data.crl_number = ctx.crl_number;
+                                    }
+                                    _ => {}
+                                }
+                                self.do_dispatch_after_clock_reconfirm();
+                                return Action::Noop;
+                            }
+                            crate::ops::OpAction::ShowConfirm {
+                                title,
+                                body,
+                                on_confirm,
+                            } => {
+                                use crate::ops::ConfirmTarget;
+                                let action = match on_confirm {
+                                    ConfirmTarget::WriteIntent => Action::DoWriteIntent,
+                                    ConfirmTarget::StartRecordBurn => Action::DoStartBurn,
+                                    ConfirmTarget::Abort => Action::CeremonyCancel,
+                                };
+                                self.show_confirm(title, body, action);
                                 return Action::Noop;
                             }
                         }
@@ -867,10 +609,7 @@ impl App {
                 // dialog when the current phase warrants it.
                 if self.ceremony.needs_abort_confirmation() {
                     match action {
-                        Action::CeremonyCancel
-                        | Action::InitRootAbort
-                        | Action::RekeyAbort
-                        | Action::RevokeSelectCancel => {
+                        Action::CeremonyCancel | Action::InitRootAbort => {
                             self.show_abort_confirm(action);
                             return Action::Noop;
                         }
@@ -911,8 +650,13 @@ impl App {
             self.tick_wait_disc(false);
         }
 
-        // Disc scan during WaitMigrateTarget
-        if self.ceremony.is_waiting_migrate_target() {
+        // Disc scan during WaitMigrateTarget (ActiveOp)
+        let is_migrate_wait = matches!(
+            &self.active_op,
+            Some(crate::ops::ActiveOperation::MigrateDisc(ctx))
+                if ctx.phase == crate::ops::migrate_disc::MigratePhase::WaitTarget
+        );
+        if is_migrate_wait {
             self.tick_wait_disc(true);
         }
 
@@ -944,7 +688,7 @@ impl App {
     /// Process an action, updating app state.
     pub fn update(&mut self, action: Action) {
         match action {
-            Action::Noop | Action::Tick | Action::Render => {}
+            Action::Noop | Action::Render => {}
             Action::Quit => self.running = false,
             Action::SwitchMode(mode) => {
                 self.mode = mode;
@@ -958,18 +702,9 @@ impl App {
                 self.setup.phase = SetupPhase::WaitShuttle;
                 self.set_status("Scanning for shuttle USB with profile.toml…");
             }
-            Action::ProfileLoaded => {
-                self.setup.phase = SetupPhase::ProfileLoaded;
-                self.set_status("Profile loaded from shuttle.");
-            }
             Action::HsmDetected => {
                 self.setup.phase = SetupPhase::HsmDetect;
                 self.do_detect_hsm();
-            }
-            Action::HsmDetectFailed(msg) => {
-                self.hw.hsm_state = HwState::Error(msg.clone());
-                self.set_status(format!("HSM detection failed: {msg}"));
-                self.setup.phase = SetupPhase::ProfileLoaded;
             }
             Action::HsmWarnAcknowledged => {
                 self.setup.phase = SetupPhase::WaitDisc;
@@ -1001,42 +736,6 @@ impl App {
             Action::SelectOperation(op) => {
                 self.do_select_operation(op);
             }
-            Action::SelectCertProfile(idx) => {
-                self.data.selected_profile_idx = Some(idx);
-                // Eagerly load root cert so the preview can show the real issuer DN.
-                if self.data.root_cert_der.is_none() {
-                    self.data.root_cert_der =
-                        crate::helpers::load_root_cert_der_from_sessions(&self.disc.prior_sessions);
-                }
-                // Build compiled certificate preview from CSR + profile + issuer.
-                if let (Some(csr_der), Some(profile)) =
-                    (self.data.csr_der.as_ref(), self.profile.as_ref())
-                {
-                    let prof = &profile.cert_profiles[idx];
-                    let cdp = profile.ca.cdp_url.as_deref();
-                    self.data.cert_preview_lines = crate::helpers::build_cert_preview(
-                        csr_der,
-                        prof,
-                        &profile.ca.common_name,
-                        &profile.ca.organization,
-                        &profile.ca.country,
-                        cdp,
-                        self.data.root_cert_der.as_deref(),
-                    );
-                }
-                self.ceremony.set_state_csr_preview();
-                self.set_status("Review certificate document. [1] to proceed, [q] to cancel.");
-            }
-            Action::ConfirmCsrSign => {
-                self.show_confirm(
-                    "Sign CSR",
-                    vec![
-                        "This will sign the CSR using the HSM private key".into(),
-                        "and write an intent+record session to disc.".into(),
-                    ],
-                    Action::DoWriteIntent,
-                );
-            }
             Action::ConfirmCertBurn => {
                 if self.clock_is_fresh() {
                     self.do_start_burn();
@@ -1050,97 +749,6 @@ impl App {
                     );
                 }
             }
-            Action::ConfirmCrlSign => {
-                self.show_confirm(
-                    "Sign and Write CRL",
-                    vec![
-                        "This will sign the CRL using the HSM private key".into(),
-                        "and write an intent+record session to disc.".into(),
-                    ],
-                    Action::DoWriteIntent,
-                );
-            }
-
-            // Revocation cert picker
-            Action::RevokeSelectUp => {
-                if self.data.cert_list_cursor > 0 {
-                    self.data.cert_list_cursor -= 1;
-                }
-            }
-            Action::RevokeSelectDown => {
-                if !self.data.cert_list.is_empty()
-                    && self.data.cert_list_cursor < self.data.cert_list.len() - 1
-                {
-                    self.data.cert_list_cursor += 1;
-                }
-            }
-            Action::RevokeSelectConfirm => {
-                if let Some(cert) = self.data.cert_list.get(self.data.cert_list_cursor) {
-                    if cert.already_revoked {
-                        self.set_status(format!(
-                            "Certificate serial {} is already revoked.",
-                            cert.serial
-                        ));
-                    } else {
-                        self.data.revoke_serial_buf = cert.serial.to_string();
-                        self.data.revoke_reason_buf.clear();
-                        self.data.revoke_phase = 1;
-                        self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokeInput);
-                        self.set_status(
-                            "Serial pre-filled. Enter reason (optional, Enter to skip).",
-                        );
-                    }
-                }
-            }
-            Action::RevokeSelectManual => {
-                self.data.revoke_serial_buf.clear();
-                self.data.revoke_reason_buf.clear();
-                self.data.revoke_phase = 0;
-                self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokeInput);
-                self.set_status("Enter certificate serial number (hex). Press Enter to continue.");
-            }
-            Action::RevokeSelectCancel => {
-                self.current_op = None;
-                self.ceremony.state = CeremonyPhase::OperationSelect;
-                self.set_status("Revocation cancelled.");
-            }
-
-            // Revocation input
-            Action::RevokeInputChar(c) => {
-                if self.data.revoke_phase == 0 && c.is_ascii_hexdigit() {
-                    self.data.revoke_serial_buf.push(c);
-                } else if self.data.revoke_phase == 1 {
-                    self.data.revoke_reason_buf.push(c);
-                }
-            }
-            Action::RevokeInputBackspace => {
-                if self.data.revoke_phase == 0 {
-                    self.data.revoke_serial_buf.pop();
-                } else {
-                    self.data.revoke_reason_buf.pop();
-                }
-            }
-            Action::RevokeInputConfirm => {
-                self.do_add_revocation_entry();
-            }
-            Action::RevokeInputNextPhase => {
-                if self.data.revoke_phase == 0 && !self.data.revoke_serial_buf.is_empty() {
-                    self.data.revoke_phase = 1;
-                    self.set_status("Reason (optional, Enter to skip): e.g. key-compromise");
-                } else if self.data.revoke_phase == 1 {
-                    self.do_add_revocation_entry();
-                }
-            }
-            Action::RevokeInputCancel => {
-                if self.data.revoke_phase == 0 {
-                    self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokeSelect);
-                    self.set_status("Revocation cancelled.");
-                } else {
-                    self.data.revoke_phase = 0;
-                    self.set_status("Enter certificate serial number (digits). Press Enter.");
-                }
-            }
-
             // Clock re-confirm: operator attests clock is correct at signing time
             Action::ReconfirmClock => {
                 self.confirmed_time = Some(SystemTime::now());
@@ -1155,61 +763,45 @@ impl App {
             }
 
             // Disc/Shuttle
-            Action::IntentBurnComplete => {}
             Action::DoWriteIntent => {
                 self.do_write_intent();
             }
             Action::DoStartBurn => {
-                self.do_start_burn();
+                if self.clock_is_fresh() {
+                    self.do_start_burn();
+                } else {
+                    self.pending_burn_reconfirm = true;
+                    self.ceremony.state = CeremonyPhase::ClockReconfirm;
+                    self.set_status(
+                        "Clock confirmation expired — please re-confirm before disc write.",
+                    );
+                }
             }
-            Action::BurnComplete => {}
             Action::DoWriteShuttle => {
                 self.do_write_shuttle();
             }
 
-            // InitRoot ceremony
+            // InitRoot ceremony abort (from PostCommitError Esc)
             Action::InitRootAbort => {
-                self.sss.custodian_buf.clear();
-                self.sss.shares = None;
-                self.sss.custodian_names.clear();
-                self.sss.share_input = None;
-                self.sss.share_reveal = None;
-                self.sss.custodian_setup = None;
+                self.active_op = None;
                 self.current_op = None;
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.set_status("InitRoot aborted.");
             }
-            Action::RekeyAbort => {
-                self.sss.custodian_buf.clear();
-                self.sss.shares = None;
-                self.sss.custodian_names.clear();
-                self.sss.share_input = None;
-                self.sss.share_reveal = None;
-                self.sss.custodian_setup = None;
-                self.sss.rekey_old_pin_hex = None;
-                self.sss.rekey_changed_backup_ids.clear();
-                self.current_op = None;
-                self.ceremony.state = CeremonyPhase::OperationSelect;
-                self.set_status("RekeyShares aborted.");
-            }
             Action::RetryPostCommit => {
-                if let Err(e) = self.post_intent_init_root() {
-                    tracing::error!("RetryPostCommit: {e}");
-                    self.set_status(e);
+                // Retry HSM bootstrap + keygen via InitRootCtx.
+                if let Some(mut op) = self.active_op.take() {
+                    use crate::ops::OpContext;
+                    let mut shared = self.make_shared();
+                    op.advance_after_intent_burn(&mut shared);
+                    self.active_op = Some(op);
+                    self.ceremony.state = CeremonyPhase::ActiveOp;
+                } else {
+                    self.set_status("No active operation to retry.");
                     self.ceremony.state = CeremonyPhase::PostCommitError;
                 }
             }
 
-            // Migration
-            Action::ConfirmMigrate => {
-                self.data.migrate_sessions = self.disc.prior_sessions.clone();
-                self.disc.prior_sessions.clear();
-                self.disc.optical_dev = None;
-                self.hw.disc_state = HwState::Absent;
-                self.disc.sessions_remaining = None;
-                self.ceremony.set_state_wait_migrate_target();
-                self.set_status("Eject old disc. Insert blank new disc.");
-            }
             // Utilities sub-screens
             Action::UtilScreen(idx) => {
                 use crate::modes::utilities::{UtilScreen, UtilitiesMode};
@@ -1253,44 +845,12 @@ impl App {
                 self.content_scroll = 0;
             }
 
-            Action::BackupExecute => {
-                // Execute the confirmed backup/pair operation (ceremony mode).
-                if let Some(ref profile) = self.profile {
-                    if let Ok(backup_impl) = anodize_hsm::create_backup(profile.hsm.backend) {
-                        let pin = secrecy::SecretString::new(self.pin_buf.clone());
-                        self.utilities.backup.execute(backup_impl.as_ref(), &pin);
-                    }
-                }
-            }
-
-            Action::ValidateRunHsmCheck => {
-                self.do_validate_hsm_check();
-            }
-            Action::ValidateExportReport => {
-                self.do_validate_export_report();
-            }
-
             Action::CeremonyCancel => {
-                self.sss.share_input = None;
-                self.sss.share_reveal = None;
-                self.sss.custodian_setup = None;
+                self.active_op = None;
                 self.current_op = None;
                 self.pending_burn_reconfirm = false;
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.set_status("Cancelled.");
-            }
-
-            Action::ConfirmMigrateTarget => {
-                let ready = self.skip_disc
-                    || (self.disc.optical_dev.is_some()
-                        && self
-                            .disc
-                            .sessions_remaining
-                            .map(|r| r >= 50)
-                            .unwrap_or(false));
-                if ready {
-                    self.do_start_burn();
-                }
             }
         }
     }
@@ -1380,7 +940,14 @@ impl App {
         // Phase bar
         let phase_steps = match self.mode {
             Mode::Setup => modes::setup_phases(self.setup.phase.index()),
-            Mode::Ceremony => modes::ceremony_phases(self.ceremony.phase_index()),
+            Mode::Ceremony => {
+                let idx = if self.ceremony.state == CeremonyPhase::ActiveOp {
+                    self.active_op.as_ref().map_or(1, |op| op.phase_index())
+                } else {
+                    self.ceremony.phase_index()
+                };
+                modes::ceremony_phases(idx)
+            }
             Mode::Utilities => modes::utility_phases(&self.utilities.screen),
         };
         let phase_bar = PhaseBar {
@@ -1436,16 +1003,8 @@ impl App {
     /// Context-sensitive warning body for the abort confirmation dialog.
     fn abort_confirm_body(&self) -> Vec<String> {
         use CeremonyPhase::*;
-        use PlanningState::*;
         match &self.ceremony.state {
-            Planning(ShareReveal)
-            | Planning(ShareVerify)
-            | Planning(RekeyShareReveal)
-            | Planning(RekeyShareVerify) => vec![
-                "Generated shares will be destroyed.".into(),
-                "Custodians who recorded shares must discard them.".into(),
-            ],
-            Quorum | Planning(RekeyQuorum) | Planning(BackupQuorum) | Execute | ClockReconfirm => {
+            Execute | ClockReconfirm => {
                 vec![
                     "HSM session and partially-reconstructed PIN".into(),
                     "will be discarded.".into(),

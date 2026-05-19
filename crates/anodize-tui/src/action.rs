@@ -19,7 +19,6 @@ pub enum Operation {
 pub enum Action {
     Noop,
     Quit,
-    Tick,
     Render,
     // Navigation
     SwitchMode(Mode),
@@ -27,54 +26,25 @@ pub enum Action {
     SetStatus(String),
     // Setup flow
     ConfirmClock,
-    ProfileLoaded,
     HsmDetected,
-    HsmDetectFailed(String),
     HsmWarnAcknowledged,
     // Ceremony flow
     SetupComplete,
     SelectOperation(Operation),
-    SelectCertProfile(usize), // 0-indexed profile index
     // Disc + Shuttle
     ConfirmDisc,
     DoWriteIntent,
-    IntentBurnComplete,
     DoStartBurn,
-    BurnComplete,
     DoWriteShuttle,
-    // Revocation cert picker
-    RevokeSelectUp,
-    RevokeSelectDown,
-    RevokeSelectConfirm,
-    RevokeSelectManual,
-    RevokeSelectCancel,
-    // Revocation input
-    RevokeInputChar(char),
-    RevokeInputBackspace,
-    RevokeInputConfirm,
-    RevokeInputNextPhase,
-    RevokeInputCancel,
     // Clock re-confirm before signing
     ReconfirmClock,
-    // CSR review
-    ConfirmCsrSign,
     // Cert/CRL review
     ConfirmCertBurn,
-    ConfirmCrlSign,
-    // Migration
-    ConfirmMigrate,
-    ConfirmMigrateTarget,
-    // InitRoot / RekeyShares ceremony
+    // InitRoot ceremony
     InitRootAbort,
-    RekeyAbort,
     RetryPostCommit,
     // Utilities sub-screens (1=SystemInfo, 2=AuditLog, 3=HsmInventory, 4=DiscInspector)
     UtilScreen(u8),
-    // HSM backup: execute the confirmed pair/backup operation (ceremony mode)
-    BackupExecute,
-    // Disc validation
-    ValidateRunHsmCheck,
-    ValidateExportReport,
     // Generic cancel: return to OperationSelect from any ceremony phase
     CeremonyCancel,
 }

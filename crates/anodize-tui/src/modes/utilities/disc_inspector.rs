@@ -776,23 +776,12 @@ mod tests {
             crl_der: None,
             root_cert_der: None,
             csr_der: None,
-            csr_subject_display: None,
             selected_profile_idx: None,
             revocation_list: vec![],
             crl_number: None,
             revoke_serial_buf: String::new(),
             revoke_reason_buf: String::new(),
-            revoke_phase: 0,
-            cert_list: Vec::new(),
-            cert_list_cursor: 0,
             migrate_sessions: vec![],
-            migrate_chain_ok: false,
-            migrate_total_bytes: 0,
-            migrate_source_fingerprint: None,
-            cert_preview_lines: Vec::new(),
-            validate_report_lines: Vec::new(),
-            validate_has_hsm: false,
-            validate_findings: Vec::new(),
         }
     }
 
