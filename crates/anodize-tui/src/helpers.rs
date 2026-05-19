@@ -21,17 +21,6 @@ pub fn spinner_frame(started: std::time::Instant) -> char {
     SPINNER_FRAMES[idx]
 }
 
-// ── Noise PIN masking ─────────────────────────────────────────────────────────
-
-pub fn noise_display_len() -> usize {
-    use std::time::UNIX_EPOCH;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .subsec_nanos() as usize;
-    8 + (nanos % 13)
-}
-
 // ── Error helpers ─────────────────────────────────────────────────────────────
 
 pub fn mechanism_error_msg(prefix: &str, e: &CaError) -> String {
@@ -212,15 +201,12 @@ pub fn gather_cert_list_from_sessions(
                 Ok(cert) => {
                     let subject = cert.tbs_certificate.subject.to_string();
                     let not_after = format!("{}", cert.tbs_certificate.validity.not_after);
-                    let serial_bytes = cert.tbs_certificate.serial_number.as_bytes().to_vec();
                     let serial = serial_to_hex(&cert.tbs_certificate.serial_number);
                     certs.push(CertSummary {
                         already_revoked: revoked_serials.contains(serial.as_str()),
                         serial,
-                        serial_bytes,
                         subject,
                         not_after,
-                        session_dir: session.dir_name.clone(),
                         is_root,
                     });
                 }

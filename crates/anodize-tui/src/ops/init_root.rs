@@ -197,17 +197,24 @@ impl InitRootCtx {
             .bootstrap(target.slot_id, &so_pin, &user_pin, &cfg.token_label)
             .map_err(|e| format!("HSM bootstrap failed: {e}"))?;
 
-        // Determine device_id via inventory
+        // Determine device_id and model for fleet enrollment.
+        //
+        // NOTE: We intentionally avoid calling create_inventory() here.
+        // For PKCS#11 backends (SoftHSM), enumerate_devices() creates a
+        // temporary Pkcs11 context whose C_Finalize on drop is process-global
+        // and would kill the session we just bootstrapped above.
         let (device_id, model) = {
-            let inventory = anodize_hsm::create_inventory(cfg.backend)
-                .map_err(|e| format!("Inventory init: {e}"))?;
-            let devices = inventory
-                .enumerate_devices()
-                .map_err(|e| format!("Device enumeration: {e}"))?;
-            match devices.iter().find(|d| d.serial == target.serial_number) {
-                Some(d) => (d.serial.clone(), d.model.clone()),
-                None => (target.serial_number.clone(), format!("{:?}", cfg.backend)),
-            }
+            let id = if target.serial_number.is_empty() {
+                cfg.token_label.clone()
+            } else {
+                target.serial_number.clone()
+            };
+            let model_name = if target.model.is_empty() {
+                format!("{:?}", cfg.backend)
+            } else {
+                target.model.clone()
+            };
+            (id, model_name)
         };
 
         let now = {

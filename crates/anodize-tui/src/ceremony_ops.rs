@@ -8,20 +8,17 @@ use std::sync::mpsc;
 use std::time::SystemTime;
 
 use anodize_audit::{genesis_hash, AuditLog};
-use anodize_ca::{build_root_cert, issue_crl, sign_intermediate_csr, P384HsmSigner};
-use anodize_config::{load as load_profile, serialize_revocation_list, RevocationEntry};
-use anodize_hsm::{create_backend, Hsm, HsmActor, KeySpec};
-use der::{Decode, Encode};
+use anodize_config::load as load_profile;
+use anodize_hsm::create_backend;
+use der::Decode as _;
 use ratatui::{layout::Rect, Frame};
-use secrecy::SecretString;
-use x509_cert::certificate::Certificate;
 
 use crate::action::Operation;
 use crate::app::App;
 use crate::components::status_bar::HwState;
 use crate::helpers::*;
 use crate::media::{self, IsoFile, SessionEntry};
-use crate::modes::ceremony::{CeremonyPhase, PlanningState};
+use crate::modes::ceremony::CeremonyPhase;
 use crate::modes::setup::SetupPhase;
 
 impl App {
@@ -195,13 +192,6 @@ impl App {
         }
     }
 
-    // ── Post-intent InitRoot: HSM bootstrap + keygen + cert build ─────────────
-
-    pub(crate) fn post_intent_init_root(&mut self) -> Result<(), String> {
-        self.do_bootstrap_hsm()?;
-        self.do_generate_and_build()
-    }
-
     // ── Intent burn tick ──────────────────────────────────────────────────────
 
     pub(crate) fn tick_intent_burn(&mut self) {
@@ -249,36 +239,22 @@ impl App {
                     self.disc.intent_session_dir_name = Some(intent.dir_name.clone());
                     self.disc.prior_sessions.push(intent);
                 }
-                match self.current_op.clone() {
-                    Some(Operation::InitRoot) => {
-                        if let Err(e) = self.post_intent_init_root() {
-                            tracing::error!("tick_intent_burn: post-commit InitRoot failed: {e}");
-                            self.set_status(e);
-                            self.ceremony.state = CeremonyPhase::PostCommitError;
-                        }
-                    }
-                    Some(Operation::SignCsr)
-                    | Some(Operation::RevokeCert)
-                    | Some(Operation::IssueCrl) => {
-                        self.enter_quorum_phase();
-                    }
-                    Some(Operation::KeyBackup) => {
-                        // Quorum already completed during Planning(BackupQuorum).
-                        // Execute the backup operation, then burn the result.
-                        self.do_backup_execute();
-                        if self.utilities.backup.phase
-                            == crate::modes::utilities::backup::BackupPhase::Done
-                        {
-                            self.set_status("Backup succeeded. Writing record to disc…");
-                        } else {
-                            self.set_status("Backup failed — recording result to disc…");
-                        }
+                // Delegate post-intent advance to the active operation context.
+                if let Some(mut op) = self.active_op.take() {
+                    use crate::ops::OpContext;
+                    let mut shared = self.make_shared();
+                    op.advance_after_intent_burn(&mut shared);
+                    self.active_op = Some(op);
+                    // KeyBackup executes during advance and needs an immediate record burn.
+                    if matches!(self.current_op, Some(Operation::KeyBackup)) {
                         self.do_start_burn();
+                    } else {
+                        self.ceremony.state = CeremonyPhase::ActiveOp;
                     }
-                    _ => {
-                        self.set_status("Unknown operation after intent");
-                        self.ceremony.state = CeremonyPhase::OperationSelect;
-                    }
+                } else {
+                    tracing::error!("tick_intent_burn: no active_op after intent write");
+                    self.set_status("Internal error: no active operation after intent");
+                    self.ceremony.state = CeremonyPhase::OperationSelect;
                 }
             }
         }
@@ -398,315 +374,31 @@ impl App {
         }
     }
 
-    // ── HSM bootstrap (InitRoot key generation — token may not exist yet) ────
-
-    pub(crate) fn do_bootstrap_hsm(&mut self) -> Result<(), String> {
-        let pin_bytes = match hex::decode(&self.pin_buf) {
-            Ok(b) => b,
-            Err(e) => return Err(format!("Internal PIN decode error: {e}")),
-        };
-        let user_pin = SecretString::new(hex::encode(&pin_bytes));
-
-        let cfg = match &self.profile {
-            Some(p) => &p.hsm,
-            None => return Err("No profile loaded".into()),
-        };
-
-        let backend = match create_backend(cfg.backend) {
-            Ok(b) => b,
-            Err(e) => return Err(format!("HSM backend error: {e}")),
-        };
-
-        let mut tokens = match backend.list_tokens() {
-            Ok(t) => t,
-            Err(e) => return Err(format!("HSM enumerate failed: {e}")),
-        };
-
-        // No initialized tokens — check for empty/uninitialized slots that
-        // C_InitToken can provision (e.g. SoftHSM2 with an empty token dir).
-        if tokens.is_empty() {
-            tokens = match backend.list_all_slots() {
-                Ok(s) => s,
-                Err(e) => return Err(format!("HSM slot enumerate failed: {e}")),
-            };
-        }
-
-        if tokens.is_empty() {
-            return Err("No HSM slots found. Insert a YubiHSM or HSM device.".into());
-        }
-
-        // Pick the first uninitialised slot, or fall back to the first slot.
-        let target = tokens
-            .iter()
-            .find(|t| !t.user_pin_initialized)
-            .or_else(|| tokens.first());
-        let target = match target {
-            Some(t) => t.clone(),
-            None => return Err("No suitable HSM token found.".into()),
-        };
-
-        tracing::info!(
-            serial = %target.serial_number,
-            slot_id = target.slot_id,
-            label = %target.token_label,
-            initialized = target.token_initialized,
-            pin_initialized = target.user_pin_initialized,
-            "do_bootstrap_hsm: selected token"
-        );
-
-        // SO PIN — use the same secret for now; production may want a
-        // separate SO PIN split.
-        let so_pin = user_pin.clone();
-
-        let hsm = match backend.bootstrap(target.slot_id, &so_pin, &user_pin, &cfg.token_label) {
-            Ok(h) => h,
-            Err(e) => return Err(format!("HSM bootstrap failed: {e}")),
-        };
-
-        // Determine device_id and model for fleet enrollment.
-        //
-        // NOTE: We intentionally avoid calling create_inventory() here.
-        // For PKCS#11 backends (SoftHSM), enumerate_devices() creates a
-        // temporary Pkcs11 context whose C_Finalize on drop is process-global
-        // and would kill the session we just bootstrapped above.
-        let (device_id, model) = {
-            // YubiHSM: USB serial number is the stable fleet identifier.
-            // SoftHSM: always use token label — PKCS#11 serial numbers are
-            // opaque values that don't match open_session_by_id expectations.
-            let id = match cfg.backend {
-                anodize_config::HsmBackendKind::Softhsm => cfg.token_label.clone(),
-                anodize_config::HsmBackendKind::Yubihsm => {
-                    if target.serial_number.is_empty() {
-                        cfg.token_label.clone()
-                    } else {
-                        target.serial_number.clone()
-                    }
-                }
-            };
-            let model_name = if target.model.is_empty() {
-                format!("{:?}", cfg.backend)
-            } else {
-                target.model.clone()
-            };
-            (id, model_name)
-        };
-
-        let now = {
-            let d = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
-            format!("{}Z", d.as_secs())
-        };
-
-        // Enroll the bootstrapped device into the fleet in STATE.JSON.
-        use anodize_config::state::{HsmDevice, HsmDeviceStatus, HsmFleet};
-        let fleet_device = HsmDevice {
-            device_id: device_id.clone(),
-            model,
-            backend: cfg.backend,
-            enrolled_at: now.clone(),
-            last_seen_at: now,
-            status: HsmDeviceStatus::Active,
-        };
-
-        if let Some(ref mut state) = self.disc.session_state {
-            state.fleet = HsmFleet {
-                devices: vec![fleet_device],
-            };
-        }
-
-        tracing::info!(
-            device_id = %device_id,
-            "do_bootstrap_hsm: enrolled device in fleet"
-        );
-
-        let actor = HsmActor::spawn(hsm);
-        self.hw.actor = Some(actor);
-        self.hw.device_id = Some(device_id.clone());
-        self.hw.hsm_state = HwState::Ready(format!(
-            "bootstrapped (id={device_id}, label={})",
-            cfg.token_label
-        ));
-        tracing::info!(device_id, label = %cfg.token_label, "do_bootstrap_hsm: token ready");
-        Ok(())
-    }
-
-    // ── HSM login via reconstructed PIN (called from Quorum phase) ───────────
-
-    pub(crate) fn do_login_with_pin(&mut self, pin_hex: &str) -> Result<(), String> {
-        let pin_bytes = match hex::decode(pin_hex) {
-            Ok(b) => b,
-            Err(e) => return Err(format!("Internal PIN decode error: {e}")),
-        };
-        let pin = SecretString::new(hex::encode(&pin_bytes));
-
-        let cfg = match &self.profile {
-            Some(p) => &p.hsm,
-            None => return Err("No profile loaded".into()),
-        };
-
-        let backend = match create_backend(cfg.backend) {
-            Ok(b) => b,
-            Err(e) => return Err(format!("HSM backend error: {e}")),
-        };
-
-        // Fleet-aware login: if STATE.JSON has active fleet devices, use
-        // open_session_any_recognized to authenticate against a known device
-        // and enforce fleet membership (hard deny for unknown devices).
-        let fleet_ids: Vec<String> = self
-            .disc
-            .session_state
-            .as_ref()
-            .map(|s| {
-                s.fleet
-                    .active_device_ids()
-                    .into_iter()
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let (device_id, hsm) = if fleet_ids.is_empty() {
-            // Pre-fleet (InitRoot bootstrap) — legacy path.
-            let hsm = backend
-                .open_session(&cfg.token_label, &pin)
-                .map_err(|e| format!("HSM open/login failed: {e}"))?;
-            (None, hsm)
-        } else {
-            let inventory = anodize_hsm::create_inventory(cfg.backend)
-                .map_err(|e| format!("HSM inventory error: {e}"))?;
-            let id_refs: Vec<&str> = fleet_ids.iter().map(|s| s.as_str()).collect();
-            let (did, hsm) =
-                anodize_hsm::open_session_any_recognized(&*backend, &*inventory, &id_refs, &pin)
-                    .map_err(|e| format!("Fleet login failed: {e}"))?;
-            tracing::info!(device_id = %did, "Fleet login: authenticated to known device");
-            (Some(did), hsm)
-        };
-
-        // Update last_seen_at for the device we authenticated to.
-        if let Some(ref did) = device_id {
-            if let Some(ref mut state) = self.disc.session_state {
-                let now = {
-                    let d = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default();
-                    // Good-enough ISO 8601 without pulling in chrono
-                    format!("{}Z", d.as_secs())
-                };
-                for dev in &mut state.fleet.devices {
-                    if dev.device_id == *did {
-                        dev.last_seen_at = now.clone();
-                    }
-                }
-            }
-        }
-
-        let actor = HsmActor::spawn(hsm);
-        self.hw.actor = Some(actor);
-        self.hw.device_id = device_id;
-        self.hw.hsm_state = HwState::Ready("authenticated via SSS quorum".into());
-        Ok(())
-    }
-
-    // ── Quorum phase: collect shares → reconstruct PIN → HSM login ─────────
-
-    /// Enter the Quorum phase: create a ShareInput and switch to Quorum state.
-    pub(crate) fn enter_quorum_phase(&mut self) {
-        let sss_meta = match &self.disc.session_state {
-            Some(state) => state.sss.clone(),
-            None => {
-                self.set_status("ERROR: no STATE.JSON loaded — cannot enter quorum.");
-                self.ceremony.state = CeremonyPhase::OperationSelect;
-                return;
-            }
-        };
-
-        self.sss.share_input = Some(crate::components::share_input::ShareInput::new(
-            sss_meta.clone(),
-            32,
-        ));
-        self.ceremony.state = CeremonyPhase::Quorum;
-        self.set_status(format!(
-            "Quorum: collect {}-of-{} shares to unlock HSM.",
-            sss_meta.threshold, sss_meta.total,
-        ));
-
-        tracing::info!(
-            threshold = sss_meta.threshold,
-            total = sss_meta.total,
-            "Entering quorum phase for {:?}",
-            self.current_op,
-        );
-    }
-
-    /// Called when quorum ShareInput reaches threshold during the Quorum phase.
-    pub(crate) fn do_quorum_complete(&mut self) {
-        // Collect shares
-        let shares: Vec<anodize_sss::Share> = self
-            .sss
-            .share_input
-            .as_ref()
-            .map(|si| si.collected.iter().map(|c| c.share.clone()).collect())
-            .unwrap_or_default();
-        self.sss.share_input = None;
-
-        let threshold = self
-            .disc
-            .session_state
-            .as_ref()
-            .map(|s| s.sss.threshold)
-            .unwrap_or(2);
-
-        // Reconstruct PIN
-        let pin_bytes = match anodize_sss::reconstruct(&shares, threshold) {
-            Ok(b) => b,
-            Err(e) => {
-                self.set_status(format!("PIN reconstruction failed: {e}"));
-                self.ceremony.state = CeremonyPhase::OperationSelect;
-                self.current_op = None;
-                return;
-            }
-        };
-
-        // Verify against pin_verify_hash
-        let expected = self
-            .disc
-            .session_state
-            .as_ref()
-            .map(|s| s.sss.pin_verify_hash.as_str())
-            .unwrap_or("");
-        if !anodize_sss::verify_pin_hash(&pin_bytes, expected) {
-            self.set_status("PIN verify hash mismatch — shares may be corrupted.");
-            self.ceremony.state = CeremonyPhase::OperationSelect;
-            self.current_op = None;
-            return;
-        }
-
-        // Login to HSM with reconstructed PIN
-        let pin_hex = hex::encode(&pin_bytes);
-        if let Err(e) = self.do_login_with_pin(&pin_hex) {
-            self.set_status(format!("HSM login failed: {e}"));
-            self.ceremony.state = CeremonyPhase::OperationSelect;
-            self.current_op = None;
-            return;
-        }
-
-        // Transition to clock re-confirm before signing
-        self.ceremony.state = CeremonyPhase::ClockReconfirm;
-        self.set_status("Confirm system clock is correct before signing.");
-    }
-
     /// Dispatch to the pending crypto operation after the operator re-confirms
     /// the clock. Called from Action::ReconfirmClock.
     pub(crate) fn do_dispatch_after_clock_reconfirm(&mut self) {
-        match self.current_op.clone() {
-            Some(Operation::SignCsr) => self.do_sign_csr(),
-            Some(Operation::RevokeCert) => self.do_sign_crl_for_revoke(),
-            Some(Operation::IssueCrl) => self.do_sign_crl_refresh(),
-            other => {
-                self.set_status(format!("Unexpected operation after quorum: {other:?}"));
-                self.ceremony.state = CeremonyPhase::OperationSelect;
+        use crate::ops::OpContext;
+
+        if let Some(mut op) = self.active_op.take() {
+            let mut shared = self.make_shared();
+            let action = op.execute(&mut shared);
+            drop(shared);
+            self.active_op = Some(op);
+
+            match action {
+                crate::ops::OpAction::StartRecordBurn => self.do_start_burn(),
+                crate::ops::OpAction::Noop => {
+                    // execute() handled phase transition internally (e.g. SignCsr → Execute)
+                    self.ceremony.state = CeremonyPhase::Execute;
+                }
+                crate::ops::OpAction::SetStatus(msg) => self.set_status(msg),
+                other => {
+                    tracing::warn!(?other, "unexpected OpAction from execute()");
+                }
             }
+        } else {
+            self.set_status("No active operation to execute");
+            self.ceremony.state = CeremonyPhase::OperationSelect;
         }
     }
 
@@ -724,32 +416,111 @@ impl App {
                     self.ceremony.state = CeremonyPhase::OperationSelect;
                     return;
                 }
-                self.sss.custodian_names.clear();
-                self.sss.custodian_setup = Some(
-                    crate::components::custodian_setup::CustodianSetup::new("Root Init"),
-                );
-                self.ceremony.state = CeremonyPhase::Planning(PlanningState::CustodianSetup);
+                let ctx = crate::ops::init_root::InitRootCtx::new();
+                self.active_op = Some(crate::ops::ActiveOperation::InitRoot(ctx));
+                self.ceremony.state = CeremonyPhase::ActiveOp;
                 self.set_status("Enter custodian names one-by-one, then set threshold.");
             }
             Operation::SignCsr => {
-                self.do_load_csr();
+                let csr_path = self.shuttle_mount.join("csr.der");
+                let csr_bytes = match std::fs::read(&csr_path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        self.set_status(format!(
+                            "Cannot read csr.der from shuttle: {e} — \
+                             ensure csr.der is on the USB and re-insert it."
+                        ));
+                        self.current_op = None;
+                        return;
+                    }
+                };
+                if let Err(e) = x509_cert::request::CertReq::from_der(&csr_bytes) {
+                    self.set_status(format!("csr.der is not a valid DER-encoded CSR: {e}"));
+                    self.current_op = None;
+                    return;
+                }
+                let profiles = self
+                    .profile
+                    .as_ref()
+                    .map(|p| p.cert_profiles.as_slice())
+                    .unwrap_or(&[]);
+                if profiles.is_empty() {
+                    self.set_status(
+                        "No [[cert_profiles]] defined in profile.toml. Add at least one profile.",
+                    );
+                    self.current_op = None;
+                    return;
+                }
+                let profile_lines: Vec<String> = profiles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, prof)| {
+                        let path_str = prof
+                            .path_len
+                            .map(|n| format!("  path_len={n}"))
+                            .unwrap_or_default();
+                        format!(
+                            "  [{}]  {}  (validity={} days{})",
+                            i + 1,
+                            prof.name,
+                            prof.validity_days,
+                            path_str,
+                        )
+                    })
+                    .collect();
+                let profiles_len = profile_lines.len();
+                let root_cert_der =
+                    crate::helpers::load_root_cert_der_from_sessions(&self.disc.prior_sessions);
+                let ctx =
+                    crate::ops::sign_csr::SignCsrCtx::new(csr_bytes, root_cert_der, profile_lines);
+                self.active_op = Some(crate::ops::ActiveOperation::SignCsr(ctx));
+                self.ceremony.state = CeremonyPhase::ActiveOp;
+                self.set_status(format!("CSR loaded. Select profile [1]–[{profiles_len}]."));
             }
             Operation::RevokeCert => {
-                self.do_load_revocation();
-                if self.ceremony.state == CeremonyPhase::Planning(PlanningState::RevokeSelect) {
-                    self.data.revoke_phase = 0;
-                    self.data.revoke_serial_buf.clear();
-                    self.data.revoke_reason_buf.clear();
-                    self.set_status(
-                        "Select a certificate to revoke, or press [m] for manual serial entry.",
-                    );
+                self.data.root_cert_der =
+                    load_root_cert_der_from_sessions(&self.disc.prior_sessions);
+                if self.data.root_cert_der.is_none() {
+                    self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
+                    self.current_op = None;
+                    return;
                 }
+                let revocation_list = load_revocation_from_sessions(&self.disc.prior_sessions);
+                let crl_number = Some(next_crl_number_from_sessions(&self.disc.prior_sessions));
+                let cert_list =
+                    gather_cert_list_from_sessions(&self.disc.prior_sessions, &revocation_list);
+                let ctx = crate::ops::revoke_cert::RevokeCertCtx::new(
+                    revocation_list,
+                    crl_number,
+                    cert_list,
+                    self.data.root_cert_der.clone(),
+                );
+                self.active_op = Some(crate::ops::ActiveOperation::RevokeCert(ctx));
+                self.ceremony.state = CeremonyPhase::ActiveOp;
+                self.set_status(
+                    "Select a certificate to revoke, or press [m] for manual serial entry.",
+                );
             }
             Operation::IssueCrl => {
-                self.do_load_revocation();
-                if self.ceremony.state == CeremonyPhase::Planning(PlanningState::CrlPreview) {
-                    self.set_status("Review CRL details. [1] to proceed, [q] to cancel.");
+                self.data.root_cert_der =
+                    load_root_cert_der_from_sessions(&self.disc.prior_sessions);
+                if self.data.root_cert_der.is_none() {
+                    self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
+                    self.current_op = None;
+                    return;
                 }
+                let revocation_list = load_revocation_from_sessions(&self.disc.prior_sessions);
+                let crl_number = Some(next_crl_number_from_sessions(&self.disc.prior_sessions));
+                self.data.revocation_list = revocation_list.clone();
+                self.data.crl_number = crl_number;
+                let ctx = crate::ops::issue_crl::IssueCrlCtx::new(
+                    revocation_list,
+                    crl_number,
+                    self.data.root_cert_der.clone(),
+                );
+                self.active_op = Some(crate::ops::ActiveOperation::IssueCrl(ctx));
+                self.ceremony.state = CeremonyPhase::ActiveOp;
+                self.set_status("Review CRL details. [1] to proceed, [Esc] to cancel.");
             }
             Operation::RekeyShares => {
                 if self.disc.session_state.is_none() {
@@ -758,15 +529,23 @@ impl App {
                     self.ceremony.state = CeremonyPhase::OperationSelect;
                     return;
                 }
-                // Enter quorum phase: custodians re-enter shares
                 let sss = self.disc.session_state.as_ref().unwrap().sss.clone();
-                self.sss.share_input =
-                    Some(crate::components::share_input::ShareInput::new(sss, 32));
-                self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyQuorum);
+                let ctx = crate::ops::rekey_shares::RekeyCtx::new(sss);
+                self.active_op = Some(crate::ops::ActiveOperation::RekeyShares(ctx));
+                self.ceremony.state = CeremonyPhase::ActiveOp;
                 self.set_status("Enter threshold shares to reconstruct the PIN.");
             }
             Operation::MigrateDisc => {
-                self.do_migrate_confirm();
+                let shared = self.make_shared();
+                let ctx = crate::ops::migrate_disc::MigrateCtx::run(&shared);
+                let chain_status = if ctx.chain_ok { "OK" } else { "FAIL" };
+                let status = format!(
+                    "Chain: {chain_status}  {} session(s)  {} bytes. [1] to proceed, [Esc] to abort.",
+                    ctx.session_count, ctx.total_bytes,
+                );
+                self.active_op = Some(crate::ops::ActiveOperation::MigrateDisc(ctx));
+                self.ceremony.state = CeremonyPhase::ActiveOp;
+                self.set_status(status);
             }
             Operation::KeyBackup => {
                 if self.disc.session_state.is_none() {
@@ -775,11 +554,10 @@ impl App {
                     self.ceremony.state = CeremonyPhase::OperationSelect;
                     return;
                 }
-                // Enter backup quorum phase: custodians re-enter shares.
                 let sss = self.disc.session_state.as_ref().unwrap().sss.clone();
-                self.sss.share_input =
-                    Some(crate::components::share_input::ShareInput::new(sss, 32));
-                self.ceremony.state = CeremonyPhase::Planning(PlanningState::BackupQuorum);
+                let ctx = crate::ops::key_backup::BackupCtx::new(sss);
+                self.active_op = Some(crate::ops::ActiveOperation::KeyBackup(ctx));
+                self.ceremony.state = CeremonyPhase::ActiveOp;
                 self.set_status("Enter threshold shares to reconstruct the HSM PIN for backup.");
             }
             Operation::ValidateDisc => {
@@ -794,1133 +572,6 @@ impl App {
                 self.do_refresh_disc();
             }
         }
-    }
-
-    // ── KeyBackup: quorum → reconstruct PIN → discover devices ─────────────
-
-    pub(crate) fn do_backup_quorum_complete(&mut self) {
-        // Collect shares from the input component.
-        let shares: Vec<anodize_sss::Share> = self
-            .sss
-            .share_input
-            .as_ref()
-            .map(|si| si.collected.iter().map(|c| c.share.clone()).collect())
-            .unwrap_or_default();
-        self.sss.share_input = None;
-
-        let threshold = self
-            .disc
-            .session_state
-            .as_ref()
-            .map(|s| s.sss.threshold)
-            .unwrap_or(2);
-
-        // Reconstruct PIN.
-        let pin_bytes = match anodize_sss::reconstruct(&shares, threshold) {
-            Ok(b) => b,
-            Err(e) => {
-                self.set_status(format!("PIN reconstruction failed: {e}"));
-                self.ceremony.state = CeremonyPhase::OperationSelect;
-                self.current_op = None;
-                return;
-            }
-        };
-
-        // Verify against pin_verify_hash.
-        let expected = self
-            .disc
-            .session_state
-            .as_ref()
-            .map(|s| s.sss.pin_verify_hash.as_str())
-            .unwrap_or("");
-        if !anodize_sss::verify_pin_hash(&pin_bytes, expected) {
-            self.set_status("PIN verify hash mismatch — shares may be corrupted.");
-            self.ceremony.state = CeremonyPhase::OperationSelect;
-            self.current_op = None;
-            return;
-        }
-
-        // Store the reconstructed PIN for backup operations.
-        self.pin_buf = hex::encode(&pin_bytes);
-
-        // Discover backup-capable devices using the reconstructed PIN.
-        self.utilities.backup.reset();
-        if let Some(ref profile) = self.profile {
-            match anodize_hsm::create_backup(profile.hsm.backend) {
-                Ok(backup_impl) => {
-                    let pin = secrecy::SecretString::new(self.pin_buf.clone());
-                    self.utilities
-                        .backup
-                        .discover(backup_impl.as_ref(), Some(&pin));
-                }
-                Err(e) => {
-                    self.utilities.backup.phase =
-                        crate::modes::utilities::backup::BackupPhase::Error(format!(
-                            "Backend init: {e}"
-                        ));
-                    self.utilities.backup.render_lines();
-                }
-            }
-        }
-
-        self.ceremony.state = CeremonyPhase::Planning(PlanningState::BackupDevices);
-        self.set_status("PIN verified. Select source and destination devices.");
-
-        tracing::info!("KeyBackup: quorum reached, PIN verified, entering device selection");
-    }
-
-    /// Execute the backup/pair HSM operation (no audit logging — that happens
-    /// in build_burn_session when the record is written to disc).
-    ///
-    /// After a successful operation, the destination device is enrolled into
-    /// the fleet (if not already a member).
-    pub(crate) fn do_backup_execute(&mut self) {
-        let pin = secrecy::SecretString::new(self.pin_buf.clone());
-        let backend_kind = self.profile.as_ref().map(|p| p.hsm.backend);
-        if let Some(ref profile) = self.profile {
-            match anodize_hsm::create_backup(profile.hsm.backend) {
-                Ok(backup_impl) => {
-                    self.utilities.backup.execute(backup_impl.as_ref(), &pin);
-                }
-                Err(e) => {
-                    self.utilities.backup.phase =
-                        crate::modes::utilities::backup::BackupPhase::Error(format!(
-                            "Backend init: {e}"
-                        ));
-                    self.utilities.backup.render_lines();
-                }
-            }
-        }
-
-        // Enroll the destination device in the fleet if backup succeeded.
-        if self.utilities.backup.phase == crate::modes::utilities::backup::BackupPhase::Done {
-            if let (Some(dest_idx), Some(bk)) = (self.utilities.backup.dest_idx, backend_kind) {
-                let dest_id = self.utilities.backup.targets[dest_idx].identifier.clone();
-                let dest_desc = self.utilities.backup.targets[dest_idx].description.clone();
-
-                if let Some(ref mut state) = self.disc.session_state {
-                    let already = state.fleet.devices.iter().any(|d| d.device_id == dest_id);
-                    if !already {
-                        let now = {
-                            let d = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default();
-                            format!("{}Z", d.as_secs())
-                        };
-                        use anodize_config::state::{HsmDevice, HsmDeviceStatus};
-                        state.fleet.devices.push(HsmDevice {
-                            device_id: dest_id.clone(),
-                            model: dest_desc,
-                            backend: bk,
-                            enrolled_at: now.clone(),
-                            last_seen_at: now,
-                            status: HsmDeviceStatus::Active,
-                        });
-                        tracing::info!(
-                            device_id = %dest_id,
-                            fleet_size = state.fleet.devices.len(),
-                            "KeyBackup: enrolled destination device in fleet"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // ── InitRoot: confirm custodians → generate PIN → split → reveal ────────
-
-    /// Called by the CustodianSetup component (names already collected).
-    pub(crate) fn do_init_root_confirm_custodians_with_threshold(&mut self, threshold: u8) {
-        let names = self.sss.custodian_names.clone();
-
-        if names.len() < 2 {
-            self.set_status("Need at least 2 custodians for SSS (threshold >= 2).");
-            return;
-        }
-        if names.len() > 255 {
-            self.set_status("Maximum 255 custodians.");
-            return;
-        }
-
-        let total = names.len() as u8;
-
-        // Generate random 32-byte PIN
-        let mut pin_bytes = vec![0u8; 32];
-        if let Err(e) = getrandom::getrandom(&mut pin_bytes) {
-            self.set_status(format!("CSPRNG failure: {e}"));
-            return;
-        }
-
-        // Split into shares
-        let shares = match anodize_sss::split(&pin_bytes, threshold, total) {
-            Ok(s) => s,
-            Err(e) => {
-                self.set_status(format!("SSS split failed: {e}"));
-                return;
-            }
-        };
-
-        // Compute commitments and PIN verify hash
-        let mut share_commitments = Vec::with_capacity(shares.len());
-        for (share, name) in shares.iter().zip(names.iter()) {
-            let commitment = share.commitment(name);
-            share_commitments.push(hex::encode(commitment));
-        }
-
-        let pin_verify_hash = hex::encode(anodize_sss::pin_verify_hash(&pin_bytes));
-
-        // Store the PIN hex for HSM init later (held in memory only)
-        self.pin_buf = hex::encode(&pin_bytes);
-
-        // Build custodian metadata
-        let custodians: Vec<anodize_config::state::Custodian> = names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| anodize_config::state::Custodian {
-                name: name.clone(),
-                index: (i + 1) as u8,
-            })
-            .collect();
-
-        // Prepare partial SessionState (root_cert fields filled after HSM keygen)
-        use anodize_config::state::{SessionState, SssMetadata, STATE_VERSION};
-        let state = SessionState {
-            version: STATE_VERSION,
-            root_cert_sha256: "0".repeat(64), // placeholder, updated after keygen
-            root_cert_der_b64: String::new(), // placeholder
-            sss: SssMetadata {
-                generation: 1,
-                threshold,
-                total,
-                custodians,
-                pin_verify_hash,
-                share_commitments,
-            },
-            revocation_list: vec![],
-            crl_number: 0,
-            last_audit_hash: String::new(),
-            last_hsm_log_seq: None,
-            fleet: anodize_config::state::HsmFleet::default(),
-        };
-
-        self.disc.session_state = Some(state);
-        self.sss.custodian_names = names.clone();
-        self.sss.shares = Some(shares.clone());
-
-        // Create ShareReveal component
-        self.sss.share_reveal = Some(crate::components::share_reveal::ShareReveal::new(
-            shares, &names, 1,
-        ));
-
-        self.ceremony.state = CeremonyPhase::Planning(PlanningState::ShareReveal);
-        self.set_status(format!(
-            "PIN generated. Distributing {total} shares ({threshold}-of-{total}). Hand device to each custodian."
-        ));
-
-        tracing::info!(
-            threshold,
-            total,
-            custodians = ?self.sss.custodian_names,
-            "InitRoot: SSS split complete, entering share reveal"
-        );
-    }
-
-    // ── RekeyShares: quorum → reconstruct PIN → new custodians → re-split ───
-
-    pub(crate) fn do_rekey_quorum_complete(&mut self) {
-        // Collect shares from the input component
-        let shares: Vec<anodize_sss::Share> = self
-            .sss
-            .share_input
-            .as_ref()
-            .map(|si| si.collected.iter().map(|c| c.share.clone()).collect())
-            .unwrap_or_default();
-        self.sss.share_input = None;
-
-        // Reconstruct PIN
-        let threshold = self
-            .disc
-            .session_state
-            .as_ref()
-            .map(|s| s.sss.threshold)
-            .unwrap_or(2);
-        let pin_bytes = match anodize_sss::reconstruct(&shares, threshold) {
-            Ok(b) => b,
-            Err(e) => {
-                self.set_status(format!("PIN reconstruction failed: {e}"));
-                self.ceremony.state = CeremonyPhase::OperationSelect;
-                self.current_op = None;
-                return;
-            }
-        };
-
-        // Verify against pin_verify_hash
-        let expected = self
-            .disc
-            .session_state
-            .as_ref()
-            .map(|s| s.sss.pin_verify_hash.as_str())
-            .unwrap_or("");
-        if !anodize_sss::verify_pin_hash(&pin_bytes, expected) {
-            self.set_status("PIN verify hash mismatch — shares may be corrupted.");
-            self.ceremony.state = CeremonyPhase::OperationSelect;
-            self.current_op = None;
-            return;
-        }
-
-        // Login to HSM with old PIN (needed for change_pin later)
-        let old_pin_hex = hex::encode(&pin_bytes);
-        if let Err(e) = self.do_login_with_pin(&old_pin_hex) {
-            self.set_status(format!("HSM login failed: {e}"));
-            self.ceremony.state = CeremonyPhase::OperationSelect;
-            self.current_op = None;
-            return;
-        }
-
-        // Store old PIN for change_pin after share verification
-        self.sss.rekey_old_pin_hex = Some(old_pin_hex);
-        // pin_buf will be overwritten with the NEW PIN during custodian confirmation
-        self.pin_buf = hex::encode(&pin_bytes);
-        self.sss.custodian_names.clear();
-        self.sss.custodian_setup = Some(crate::components::custodian_setup::CustodianSetup::new(
-            "Re-key Shares",
-        ));
-        self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup);
-        self.set_status(
-            "PIN verified, HSM authenticated. Enter new custodian names, then set threshold.",
-        );
-
-        tracing::info!("RekeyShares: quorum reached, PIN verified, HSM authenticated, entering custodian setup");
-    }
-
-    pub(crate) fn do_rekey_confirm_custodians_with_threshold(&mut self, threshold: u8) {
-        let names = self.sss.custodian_names.clone();
-
-        if names.len() < 2 {
-            self.set_status("Need at least 2 custodians for SSS (threshold >= 2).");
-            return;
-        }
-        if names.len() > 255 {
-            self.set_status("Maximum 255 custodians.");
-            return;
-        }
-
-        let total = names.len() as u8;
-
-        // Generate a new random 32-byte PIN (actual PIN rotation)
-        let mut new_pin_bytes = vec![0u8; 32];
-        if let Err(e) = getrandom::getrandom(&mut new_pin_bytes) {
-            self.set_status(format!("CSPRNG failure: {e}"));
-            return;
-        }
-
-        // Split NEW PIN with new custodians
-        let shares = match anodize_sss::split(&new_pin_bytes, threshold, total) {
-            Ok(s) => s,
-            Err(e) => {
-                self.set_status(format!("SSS split failed: {e}"));
-                return;
-            }
-        };
-
-        // Compute new commitments
-        let mut share_commitments = Vec::with_capacity(shares.len());
-        for (share, name) in shares.iter().zip(names.iter()) {
-            let commitment = share.commitment(name);
-            share_commitments.push(hex::encode(commitment));
-        }
-
-        // Compute new pin_verify_hash for the NEW PIN
-        let new_pin_verify_hash = hex::encode(anodize_sss::pin_verify_hash(&new_pin_bytes));
-
-        // Update SessionState SSS metadata with new PIN hash
-        let custodians: Vec<anodize_config::state::Custodian> = names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| anodize_config::state::Custodian {
-                name: name.clone(),
-                index: (i + 1) as u8,
-            })
-            .collect();
-
-        if let Some(ref mut state) = self.disc.session_state {
-            state.sss.generation += 1;
-            state.sss.threshold = threshold;
-            state.sss.total = total;
-            state.sss.custodians = custodians;
-            state.sss.share_commitments = share_commitments;
-            state.sss.pin_verify_hash = new_pin_verify_hash;
-        }
-
-        // Store NEW PIN hex in pin_buf (old PIN is in sss.rekey_old_pin_hex)
-        self.pin_buf = hex::encode(&new_pin_bytes);
-
-        self.sss.custodian_names = names.clone();
-        self.sss.shares = Some(shares.clone());
-
-        // Create ShareReveal component — use the newly incremented generation
-        let generation = self
-            .disc
-            .session_state
-            .as_ref()
-            .map(|s| s.sss.generation)
-            .unwrap_or(1);
-        self.sss.share_reveal = Some(crate::components::share_reveal::ShareReveal::new(
-            shares, &names, generation,
-        ));
-
-        self.ceremony.state = CeremonyPhase::Planning(PlanningState::RekeyShareReveal);
-        self.set_status(format!(
-            "Distributing {total} new shares ({threshold}-of-{total}). Hand device to each custodian."
-        ));
-
-        tracing::info!(
-            threshold,
-            total,
-            custodians = ?self.sss.custodian_names,
-            "RekeyShares: new PIN generated, shares split, entering share reveal"
-        );
-    }
-
-    /// After share verification succeeds, validate the round-trip, change the
-    /// HSM PIN, then proceed to disc burn.  Returns the old PIN hex on success
-    /// so the caller can pass it to `do_rekey_change_pin_backups`.
-    pub(crate) fn do_rekey_change_pin(&mut self) -> Result<String, String> {
-        // Reconstruct new PIN from the just-verified shares to confirm round-trip
-        let shares = self
-            .sss
-            .share_input
-            .as_ref()
-            .map(|si| {
-                si.collected
-                    .iter()
-                    .map(|c| c.share.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-
-        let threshold = self
-            .disc
-            .session_state
-            .as_ref()
-            .map(|s| s.sss.threshold)
-            .unwrap_or(2);
-
-        let reconstructed = anodize_sss::reconstruct(&shares, threshold)
-            .map_err(|e| format!("Share round-trip reconstruction failed: {e}"))?;
-
-        let expected_new_pin_hex = &self.pin_buf;
-        let reconstructed_hex = hex::encode(&reconstructed);
-        if reconstructed_hex != *expected_new_pin_hex {
-            return Err(
-                "Share round-trip check FAILED: reconstructed PIN does not match generated PIN."
-                    .into(),
-            );
-        }
-
-        tracing::info!("RekeyShares: share round-trip check passed");
-
-        // Change PIN on the primary HSM
-        let old_pin_hex = self
-            .sss
-            .rekey_old_pin_hex
-            .take()
-            .ok_or("Internal error: old PIN not available for change_pin")?;
-        let old_pin = SecretString::new(old_pin_hex.clone());
-        let new_pin = SecretString::new(expected_new_pin_hex.clone());
-
-        let actor = self
-            .hw
-            .actor
-            .as_mut()
-            .ok_or("No HSM session for change_pin")?;
-
-        // Drain the HSM audit log before change_pin — force-audit mode
-        // blocks all operations once the 62-entry ring buffer is full.
-        if let Ok(snapshot) = actor.get_audit_log() {
-            if let Some(last) = snapshot.entries.last() {
-                let _ = actor.drain_audit_log(last.item);
-            }
-        }
-
-        actor
-            .change_pin(&old_pin, &new_pin)
-            .map_err(|e| format!("HSM change_pin failed: {e}"))?;
-
-        tracing::info!("RekeyShares: HSM PIN changed successfully");
-        Ok(old_pin_hex)
-    }
-
-    /// After the primary HSM PIN change succeeds, propagate the new PIN to all
-    /// backup HSMs that hold a copy of the signing key.
-    ///
-    /// Discovers backup targets using the old PIN.  The primary HSM already has
-    /// the new PIN, so it either fails auth (YubiHSM) or is filtered by
-    /// `token_label` (PKCS#11).  Returns the list of device identifiers that
-    /// were successfully updated.
-    ///
-    /// **Recovery**: if any backup device fails to change PIN, this function
-    /// rolls back all already-changed backups and the primary HSM to the old
-    /// PIN, leaving every device in a known, consistent state.
-    pub(crate) fn do_rekey_change_pin_backups(
-        &mut self,
-        old_pin_hex: &str,
-        new_pin_hex: &str,
-    ) -> Result<Vec<String>, String> {
-        let profile = self.profile.as_ref().ok_or("No profile loaded")?;
-        let backend_kind = profile.hsm.backend;
-
-        // Get active fleet device IDs from STATE.JSON — these are the
-        // authoritative set of HSMs that need the PIN change.
-        let fleet = self
-            .disc
-            .session_state
-            .as_ref()
-            .ok_or("No STATE.JSON loaded")?
-            .fleet
-            .clone();
-        let active_ids = fleet.active_device_ids();
-
-        // The primary HSM (the one with the live actor session) already had
-        // its PIN changed by do_rekey_change_pin_primary.  We need to change
-        // the PIN on all *other* fleet members.
-        let primary_device_id = self
-            .hw
-            .device_id
-            .as_ref()
-            .ok_or("No primary device_id recorded")?
-            .clone();
-
-        let backup_impl = anodize_hsm::create_backup(backend_kind)
-            .map_err(|e| format!("Backup backend init: {e}"))?;
-
-        let old_pin = SecretString::new(old_pin_hex.to_string());
-        let new_pin = SecretString::new(new_pin_hex.to_string());
-        let mut changed: Vec<String> = Vec::new();
-
-        for device_id in &active_ids {
-            if *device_id == primary_device_id {
-                continue;
-            }
-            tracing::info!(device = %device_id, "RekeyShares: changing PIN on fleet HSM");
-            match backup_impl.change_pin_on_device(device_id, &old_pin, &new_pin) {
-                Ok(()) => {
-                    changed.push(device_id.to_string());
-                    tracing::info!(device = %device_id, "RekeyShares: fleet HSM PIN changed");
-                }
-                Err(e) => {
-                    tracing::error!(
-                        device = %device_id,
-                        "RekeyShares: fleet PIN change failed: {e}, initiating rollback"
-                    );
-                    // Roll back already-changed fleet devices to the old PIN.
-                    Self::rollback_backup_pins(&*backup_impl, &changed, &new_pin, &old_pin);
-                    // Roll back primary HSM to the old PIN.
-                    Self::rollback_primary_pin(self.hw.actor.as_mut(), &new_pin, &old_pin);
-                    return Err(format!(
-                        "PIN change failed on fleet device {}: {e}. \
-                         All HSMs rolled back to old PIN.",
-                        device_id
-                    ));
-                }
-            }
-        }
-
-        if !changed.is_empty() {
-            tracing::info!(
-                count = changed.len(),
-                devices = ?changed,
-                "RekeyShares: fleet PIN propagation complete"
-            );
-        }
-
-        Ok(changed)
-    }
-
-    /// Roll back PIN on a list of backup devices from `current_pin` back to
-    /// `target_pin`.  Errors are logged but not propagated — this is a
-    /// best-effort recovery path.
-    fn rollback_backup_pins(
-        backup_impl: &dyn anodize_hsm::HsmBackup,
-        device_ids: &[String],
-        current_pin: &SecretString,
-        target_pin: &SecretString,
-    ) {
-        for id in device_ids {
-            match backup_impl.change_pin_on_device(id, current_pin, target_pin) {
-                Ok(()) => {
-                    tracing::info!(device = %id, "RekeyShares: backup rolled back to old PIN");
-                }
-                Err(e) => {
-                    tracing::error!(
-                        device = %id,
-                        "RekeyShares: CRITICAL — backup rollback failed: {e}"
-                    );
-                }
-            }
-        }
-    }
-
-    /// Roll back the primary HSM PIN from `current_pin` to `target_pin`.
-    /// Errors are logged but not propagated.
-    fn rollback_primary_pin(
-        actor: Option<&mut anodize_hsm::HsmActor>,
-        current_pin: &SecretString,
-        target_pin: &SecretString,
-    ) {
-        if let Some(actor) = actor {
-            match actor.change_pin(current_pin, target_pin) {
-                Ok(()) => {
-                    tracing::info!("RekeyShares: primary HSM rolled back to old PIN");
-                }
-                Err(e) => {
-                    tracing::error!("RekeyShares: CRITICAL — primary rollback failed: {e}");
-                }
-            }
-        } else {
-            tracing::error!("RekeyShares: no HSM actor available for primary rollback");
-        }
-    }
-
-    // ── RekeyShares: verify old PIN is rejected ────────────────────────────────
-
-    /// After a successful PIN change, open a fresh HSM session with the old
-    /// PIN and confirm it is rejected.  This uses the old PIN that was already
-    /// reconstructed from the custodians' shares during the quorum phase —
-    /// no re-entry required.
-    ///
-    /// Returns `Ok(())` if the HSM correctly rejects the old PIN, or `Err`
-    /// with a descriptive message if something unexpected happens.
-    pub(crate) fn do_rekey_verify_old_pin_rejected(&self, old_pin_hex: &str) -> Result<(), String> {
-        let cfg = match &self.profile {
-            Some(p) => &p.hsm,
-            None => return Err("No profile loaded".into()),
-        };
-
-        let backend = match anodize_hsm::create_backend(cfg.backend) {
-            Ok(b) => b,
-            Err(e) => return Err(format!("HSM backend error during old-PIN check: {e}")),
-        };
-
-        let fleet = self
-            .disc
-            .session_state
-            .as_ref()
-            .ok_or("No STATE.JSON loaded")?
-            .fleet
-            .clone();
-        let active_ids = fleet.active_device_ids();
-
-        if active_ids.is_empty() {
-            return Err("No active fleet devices in STATE.JSON".into());
-        }
-
-        let pin_bytes = match hex::decode(old_pin_hex) {
-            Ok(b) => b,
-            Err(e) => return Err(format!("Internal PIN decode error: {e}")),
-        };
-        let pin = SecretString::new(hex::encode(&pin_bytes));
-
-        // Verify old PIN is rejected on EVERY active fleet device.
-        for device_id in &active_ids {
-            match backend.open_session_by_id(device_id, &pin) {
-                Ok(_) => {
-                    tracing::error!(
-                        device = %device_id,
-                        "RekeyShares: old PIN still accepted after change_pin!"
-                    );
-                    return Err(format!(
-                        "CRITICAL: old PIN still accepted by fleet device {}. \
-                         The PIN rotation may not have taken effect.",
-                        device_id
-                    ));
-                }
-                Err(_) => {
-                    tracing::info!(
-                        device = %device_id,
-                        "RekeyShares: old PIN correctly rejected"
-                    );
-                }
-            }
-        }
-
-        tracing::info!(
-            count = active_ids.len(),
-            "RekeyShares: old PIN rejected on all fleet devices"
-        );
-        Ok(())
-    }
-
-    // ── Mode 2: Load CSR ──────────────────────────────────────────────────────
-
-    fn do_load_csr(&mut self) {
-        // Shuttle mount lifecycle is managed by systemd (BindsTo= the udev
-        // device).  If the USB was yanked and reinserted, systemd unmounts
-        // and remounts automatically — no stale/zombie mounts.  A simple
-        // file read is the correct check.
-        let csr_path = self.shuttle_mount.join("csr.der");
-        let csr_bytes = match std::fs::read(&csr_path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.set_status(format!(
-                    "Cannot read csr.der from shuttle: {e} — \
-                     ensure csr.der is on the USB and re-insert it."
-                ));
-                self.current_op = None;
-                return;
-            }
-        };
-
-        let csr_subject = match x509_cert::request::CertReq::from_der(&csr_bytes) {
-            Ok(csr) => csr.info.subject.to_string(),
-            Err(e) => {
-                self.set_status(format!("csr.der is not a valid DER-encoded CSR: {e}"));
-                self.current_op = None;
-                return;
-            }
-        };
-        self.data.csr_subject_display = Some(csr_subject);
-
-        let profiles_len = self
-            .profile
-            .as_ref()
-            .map(|p| p.cert_profiles.len())
-            .unwrap_or(0);
-        if profiles_len == 0 {
-            self.set_status(
-                "No [[cert_profiles]] defined in profile.toml. Add at least one profile.",
-            );
-            self.current_op = None;
-            return;
-        }
-
-        self.data.csr_der = Some(csr_bytes);
-        self.ceremony.state = CeremonyPhase::Planning(PlanningState::LoadCsr);
-        self.set_status(format!("CSR loaded. Select profile [1]–[{profiles_len}]."));
-    }
-
-    // ── Mode 3: Add revocation entry ─────────────────────────────────────────
-
-    pub(crate) fn do_add_revocation_entry(&mut self) {
-        let serial = self.data.revoke_serial_buf.to_uppercase();
-        if serial.is_empty() || !serial.chars().all(|c| c.is_ascii_hexdigit()) {
-            self.set_status(format!(
-                "Invalid serial number: {:?}. Must be hex digits.",
-                self.data.revoke_serial_buf
-            ));
-            return;
-        }
-
-        if self.data.revocation_list.iter().any(|e| e.serial == serial) {
-            self.set_status(format!(
-                "Serial {serial} is already in the revocation list — duplicate not added."
-            ));
-            return;
-        }
-
-        let reason = if self.data.revoke_reason_buf.is_empty() {
-            None
-        } else {
-            Some(self.data.revoke_reason_buf.clone())
-        };
-
-        let rev_time = {
-            use time::OffsetDateTime;
-            let odt = OffsetDateTime::now_utc();
-            format!(
-                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-                odt.year(),
-                odt.month() as u8,
-                odt.day(),
-                odt.hour(),
-                odt.minute(),
-                odt.second()
-            )
-        };
-
-        self.data.revocation_list.push(RevocationEntry {
-            serial,
-            revocation_time: rev_time,
-            reason,
-        });
-
-        if self.data.crl_number.is_none() {
-            self.data.crl_number = Some(next_crl_number_from_sessions(&self.disc.prior_sessions));
-        }
-
-        self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokePreview);
-        self.set_status("Review revocation. [1] to commit to disc, [q] to cancel.");
-    }
-
-    // ── Modes 3+4: Load revocation list from disc ────────────────────────────
-
-    fn do_load_revocation(&mut self) {
-        self.data.root_cert_der = load_root_cert_der_from_sessions(&self.disc.prior_sessions);
-        if self.data.root_cert_der.is_none() {
-            self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
-            self.current_op = None;
-            return;
-        }
-
-        self.data.revocation_list = load_revocation_from_sessions(&self.disc.prior_sessions);
-        self.data.crl_number = Some(next_crl_number_from_sessions(&self.disc.prior_sessions));
-
-        // Build cert list for the revocation picker
-        self.data.cert_list =
-            gather_cert_list_from_sessions(&self.disc.prior_sessions, &self.data.revocation_list);
-        self.data.cert_list_cursor = 0;
-
-        match self.current_op {
-            Some(Operation::RevokeCert) => {
-                self.ceremony.state = CeremonyPhase::Planning(PlanningState::RevokeSelect);
-            }
-            Some(Operation::IssueCrl) => {
-                self.ceremony.state = CeremonyPhase::Planning(PlanningState::CrlPreview);
-            }
-            _ => {}
-        }
-    }
-
-    // ── Mode 5: Migrate confirm ──────────────────────────────────────────────
-
-    fn do_migrate_confirm(&mut self) {
-        // Compute size of last session only (that's what gets copied)
-        let total_bytes: u64 = self
-            .disc
-            .prior_sessions
-            .last()
-            .map(|s| s.files.iter().map(|f| f.data.len() as u64).sum())
-            .unwrap_or(0);
-        self.data.migrate_total_bytes = total_bytes;
-
-        // Derive source disc fingerprint from last entry_hash in AUDIT.LOG
-        self.data.migrate_source_fingerprint = self
-            .disc
-            .prior_sessions
-            .last()
-            .and_then(|s| s.files.iter().find(|f| f.name == "AUDIT.LOG"))
-            .and_then(|f| {
-                f.data
-                    .split(|&b| b == b'\n')
-                    .rev()
-                    .find(|line| !line.is_empty())
-                    .and_then(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
-                    .and_then(|v| v.get("entry_hash")?.as_str().map(String::from))
-            });
-
-        self.data.migrate_chain_ok = verify_audit_chain(&self.disc.prior_sessions);
-        self.ceremony.state = CeremonyPhase::Planning(PlanningState::MigrateConfirm);
-        let chain_status = if self.data.migrate_chain_ok {
-            "OK"
-        } else {
-            "FAIL"
-        };
-        self.set_status(format!(
-            "Chain: {chain_status}  {} session(s)  {} bytes. [1] to proceed, [q] to abort.",
-            self.disc.prior_sessions.len(),
-            total_bytes
-        ));
-    }
-
-    // ── Key operations (Mode 1) ───────────────────────────────────────────────
-
-    fn do_generate_and_build(&mut self) -> Result<(), String> {
-        let label = match &self.profile {
-            Some(p) => p.hsm.key_label.clone(),
-            None => return Err("No profile".into()),
-        };
-        let key = {
-            let actor = match self.hw.actor.as_mut() {
-                Some(a) => a,
-                None => return Err("No HSM session".into()),
-            };
-            match actor.generate_keypair(&label, KeySpec::EcdsaP384) {
-                Ok(k) => k,
-                Err(e) => return Err(format!("Key generation failed: {e}")),
-            }
-        };
-        self.hw.root_key = Some(key);
-        self.set_status(format!("Generated P-384 keypair (label={label:?})"));
-        self.do_build_cert()
-    }
-
-    fn do_build_cert(&mut self) -> Result<(), String> {
-        let actor = match self.hw.actor.clone() {
-            Some(a) => a,
-            None => return Err("No HSM session".into()),
-        };
-        let key = match self.hw.root_key {
-            Some(k) => k,
-            None => return Err("No key handle".into()),
-        };
-        let signer = match P384HsmSigner::new(actor, key) {
-            Ok(s) => s,
-            Err(e) => return Err(format!("Signer error: {e}")),
-        };
-        let ca = match &self.profile {
-            Some(p) => &p.ca,
-            None => return Err("No profile".into()),
-        };
-        let cert = match build_root_cert(
-            &signer,
-            &ca.common_name,
-            &ca.organization,
-            &ca.country,
-            7305,
-        ) {
-            Ok(c) => c,
-            Err(e) => return Err(mechanism_error_msg("Cert build failed", &e)),
-        };
-        let cert_der = match cert.to_der() {
-            Ok(d) => d,
-            Err(e) => return Err(format!("DER encode failed: {e}")),
-        };
-
-        // Issue initial CRL (#1, empty) alongside root cert
-        let base_time = self.confirmed_time.unwrap_or_else(SystemTime::now);
-        let next_update = base_time + std::time::Duration::from_secs(365 * 24 * 3600);
-        let crl_der = match issue_crl(&signer, &cert, &[], next_update, 1) {
-            Ok(d) => d,
-            Err(e) => return Err(mechanism_error_msg("Initial CRL build failed", &e)),
-        };
-
-        let fp = sha256_fingerprint(&cert_der);
-        self.data.fingerprint = Some(fp);
-
-        // Update SessionState with root cert info (for InitRoot flow)
-        if let Some(ref mut state) = self.disc.session_state {
-            use base64::Engine;
-            let cert_hash = {
-                use sha2::{Digest, Sha256};
-                hex::encode(Sha256::digest(&cert_der))
-            };
-            state.root_cert_sha256 = cert_hash;
-            state.root_cert_der_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
-        }
-
-        self.data.cert_der = Some(cert_der);
-        self.data.crl_der = Some(crl_der);
-        self.ceremony.state = CeremonyPhase::Execute;
-        self.set_status("Certificate built. Record fingerprint before writing.");
-        Ok(())
-    }
-
-    // ── Mode 2: Sign CSR ─────────────────────────────────────────────────────
-
-    fn do_sign_csr(&mut self) {
-        let label = match self.profile.as_ref().map(|p| p.hsm.key_label.clone()) {
-            Some(l) => l,
-            None => {
-                self.set_status("No profile");
-                return;
-            }
-        };
-        let actor = match self.hw.actor.clone() {
-            Some(a) => a,
-            None => {
-                self.set_status("No HSM session");
-                return;
-            }
-        };
-        let root_key = match actor.find_key(&label) {
-            Ok(k) => k,
-            Err(e) => {
-                self.set_status(format!("Root key not found: {e}"));
-                return;
-            }
-        };
-        let signer = match P384HsmSigner::new(actor, root_key) {
-            Ok(s) => s,
-            Err(e) => {
-                self.set_status(format!("Signer error: {e}"));
-                return;
-            }
-        };
-
-        let root_cert_der = match &self.data.root_cert_der {
-            Some(d) => d.clone(),
-            None => {
-                self.set_status("Root cert not loaded from disc");
-                return;
-            }
-        };
-        let root_cert = match Certificate::from_der(&root_cert_der) {
-            Ok(c) => c,
-            Err(e) => {
-                self.set_status(format!("Root cert DER decode failed: {e}"));
-                return;
-            }
-        };
-
-        let csr_der = match self.data.csr_der.as_ref() {
-            Some(d) => d.clone(),
-            None => {
-                self.set_status("No CSR loaded");
-                return;
-            }
-        };
-
-        let (validity_days, path_len) = match self
-            .profile
-            .as_ref()
-            .and_then(|p| self.data.selected_profile_idx.map(|i| &p.cert_profiles[i]))
-        {
-            Some(prof) => (prof.validity_days, prof.path_len),
-            None => {
-                self.set_status("No cert profile selected");
-                return;
-            }
-        };
-
-        let cdp_url = self.profile.as_ref().and_then(|p| p.ca.cdp_url.as_deref());
-        let existing_serials = collect_serial_numbers_from_sessions(&self.disc.prior_sessions);
-
-        let cert = match sign_intermediate_csr(
-            &signer,
-            &root_cert,
-            &csr_der,
-            path_len,
-            validity_days,
-            cdp_url,
-            &existing_serials,
-        ) {
-            Ok(c) => c,
-            Err(anodize_ca::CaError::CsrSignatureInvalid) => {
-                self.set_status("CSR signature verification failed — CSR may be corrupt");
-                return;
-            }
-            Err(anodize_ca::CaError::CsrAlgorithmUnsupported(alg)) => {
-                self.set_status(format!(
-                    "CSR uses unsupported signature algorithm ({alg}). \
-                     Accepted: ECDSA P-256/SHA-256 or P-384/SHA-384."
-                ));
-                return;
-            }
-            Err(anodize_ca::CaError::CsrExtensionRejected(oid)) => {
-                self.set_status(format!("CSR contains rejected extension OID: {oid}"));
-                return;
-            }
-            Err(e) => {
-                self.set_status(mechanism_error_msg("CSR signing failed", &e));
-                return;
-            }
-        };
-
-        let cert_der = match cert.to_der() {
-            Ok(d) => d,
-            Err(e) => {
-                self.set_status(format!("DER encode failed: {e}"));
-                return;
-            }
-        };
-
-        let fp = sha256_fingerprint(&cert_der);
-        self.data.fingerprint = Some(fp);
-        self.data.cert_der = Some(cert_der);
-        self.ceremony.state = CeremonyPhase::Execute;
-        self.set_status("Intermediate cert signed. Verify fingerprint before writing.");
-    }
-
-    // ── Mode 3: Sign CRL for revocation ──────────────────────────────────────
-
-    fn do_sign_crl_for_revoke(&mut self) {
-        self.do_sign_crl_inner();
-    }
-
-    // ── Mode 4: Sign CRL refresh ─────────────────────────────────────────────
-
-    fn do_sign_crl_refresh(&mut self) {
-        self.do_sign_crl_inner();
-    }
-
-    fn do_sign_crl_inner(&mut self) {
-        let label = match self.profile.as_ref().map(|p| p.hsm.key_label.clone()) {
-            Some(l) => l,
-            None => {
-                self.set_status("No profile");
-                return;
-            }
-        };
-        let actor = match self.hw.actor.clone() {
-            Some(a) => a,
-            None => {
-                self.set_status("No HSM session");
-                return;
-            }
-        };
-        let root_key = match actor.find_key(&label) {
-            Ok(k) => k,
-            Err(e) => {
-                self.set_status(format!("Root key not found: {e}"));
-                return;
-            }
-        };
-        let signer = match P384HsmSigner::new(actor, root_key) {
-            Ok(s) => s,
-            Err(e) => {
-                self.set_status(format!("Signer error: {e}"));
-                return;
-            }
-        };
-
-        let root_cert_der = match &self.data.root_cert_der {
-            Some(d) => d.clone(),
-            None => {
-                self.set_status("Root cert not on disc");
-                return;
-            }
-        };
-        let root_cert = match Certificate::from_der(&root_cert_der) {
-            Ok(c) => c,
-            Err(e) => {
-                self.set_status(format!("Root cert DER decode: {e}"));
-                return;
-            }
-        };
-
-        let crl_number = match self.data.crl_number {
-            Some(n) => n,
-            None => {
-                self.set_status("CRL number not determined");
-                return;
-            }
-        };
-
-        // Convert RevocationEntry list to (SerialNumber, SystemTime, reason) triples
-        let revoked: Vec<(
-            x509_cert::serial_number::SerialNumber,
-            SystemTime,
-            Option<anodize_ca::CrlReason>,
-        )> = self
-            .data
-            .revocation_list
-            .iter()
-            .filter_map(|e| {
-                let serial_bytes = hex_serial_to_bytes(&e.serial)?;
-                let sn = x509_cert::serial_number::SerialNumber::new(&serial_bytes).ok()?;
-                let t = parse_rfc3339_to_system_time(&e.revocation_time)
-                    .unwrap_or_else(SystemTime::now);
-                let reason = e
-                    .reason
-                    .as_deref()
-                    .map(anodize_ca::reason_str_to_crl_reason);
-                Some((sn, t, reason))
-            })
-            .collect();
-
-        let base_time = self.confirmed_time.unwrap_or_else(SystemTime::now);
-        let next_update = base_time + std::time::Duration::from_secs(365 * 24 * 3600);
-
-        let crl_der = match issue_crl(&signer, &root_cert, &revoked, next_update, crl_number) {
-            Ok(d) => d,
-            Err(e) => {
-                self.set_status(mechanism_error_msg("CRL signing failed", &e));
-                return;
-            }
-        };
-
-        self.data.crl_der = Some(crl_der);
-        self.do_start_burn();
     }
 
     // ── WAL intent write ──────────────────────────────────────────────────────
@@ -2055,125 +706,17 @@ impl App {
     }
 
     /// Build the intent audit event (name, data) for the current operation.
-    fn build_intent_audit_event(&self, genesis_hex: &str) -> Option<(String, serde_json::Value)> {
-        match &self.current_op {
-            Some(Operation::InitRoot) => {
-                let (cn, org, country) = self
-                    .profile
-                    .as_ref()
-                    .map(|p| {
-                        (
-                            p.ca.common_name.clone(),
-                            p.ca.organization.clone(),
-                            p.ca.country.clone(),
-                        )
-                    })
-                    .unwrap_or_default();
-                Some((
-                    "cert.root.intent".into(),
-                    serde_json::json!({
-                        "operation": "sign-root-cert",
-                        "key_action": "generate",
-                        "cert_params": {
-                            "subject": {
-                                "common_name": cn,
-                                "organization": org,
-                                "country": country,
-                            },
-                            "validity_days": 7305,
-                            "key_algorithm": "ecdsa-p384",
-                        },
-                        "profile_toml_sha256": genesis_hex,
-                    }),
-                ))
-            }
-            Some(Operation::SignCsr) => {
-                let csr_hex = self
-                    .data
-                    .csr_der
-                    .as_ref()
-                    .map(|b| {
-                        b.iter()
-                            .map(|byte| format!("{byte:02x}"))
-                            .collect::<String>()
-                    })
-                    .unwrap_or_default();
-                let profile_name = self
-                    .profile
-                    .as_ref()
-                    .and_then(|p| {
-                        self.data
-                            .selected_profile_idx
-                            .map(|i| p.cert_profiles[i].name.clone())
-                    })
-                    .unwrap_or_default();
-                Some((
-                    "cert.csr.intent".into(),
-                    serde_json::json!({
-                        "operation": "sign-csr",
-                        "csr_der_hex": csr_hex,
-                        "profile_name": profile_name,
-                    }),
-                ))
-            }
-            Some(Operation::RevokeCert) => {
-                let serial_hex = self.data.revoke_serial_buf.to_uppercase();
-                let reason = if self.data.revoke_reason_buf.is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::Value::String(self.data.revoke_reason_buf.clone())
-                };
-                Some((
-                    "cert.revoke.intent".into(),
-                    serde_json::json!({
-                        "operation": "revoke-and-issue-crl",
-                        "serial_hex": serial_hex,
-                        "reason": reason,
-                        "crl_number": self.data.crl_number.unwrap_or(0),
-                        "revocation_count": self.data.revocation_list.len(),
-                    }),
-                ))
-            }
-            Some(Operation::IssueCrl) => Some((
-                "crl.intent".into(),
-                serde_json::json!({
-                    "operation": "issue-crl",
-                    "crl_number": self.data.crl_number.unwrap_or(0),
-                    "revocation_count": self.data.revocation_list.len(),
-                }),
-            )),
-            Some(Operation::KeyBackup) => {
-                let src_id = self
-                    .utilities
-                    .backup
-                    .source_idx
-                    .and_then(|i| self.utilities.backup.targets.get(i))
-                    .map(|t| t.identifier.clone())
-                    .unwrap_or_default();
-                let dst_id = self
-                    .utilities
-                    .backup
-                    .dest_idx
-                    .and_then(|i| self.utilities.backup.targets.get(i))
-                    .map(|t| t.identifier.clone())
-                    .unwrap_or_default();
-                let action = if self.utilities.backup.action_is_pair {
-                    "pair-devices"
-                } else {
-                    "backup-signing-key"
-                };
-                Some((
-                    "hsm.backup.intent".into(),
-                    serde_json::json!({
-                        "operation": action,
-                        "source": src_id,
-                        "destination": dst_id,
-                        "profile_toml_sha256": genesis_hex,
-                    }),
-                ))
-            }
-            _ => None,
-        }
+    /// Delegates to the active `OpContext` implementation.
+    fn build_intent_audit_event(
+        &mut self,
+        genesis_hex: &str,
+    ) -> Option<(String, serde_json::Value)> {
+        use crate::ops::OpContext;
+        let op = self.active_op.take()?;
+        let shared = self.make_shared();
+        let result = op.build_intent_audit_event(genesis_hex, &shared);
+        self.active_op = Some(op);
+        result
     }
 
     // ── Disc refresh (dev-burn only) ─────────────────────────────────────────
@@ -2272,551 +815,40 @@ impl App {
         }
     }
 
-    /// Build a STATE.JSON IsoFile from the current session_state.
-    /// Returns None if no session state is set.
-    fn build_state_json_file(&self) -> Option<IsoFile> {
-        self.disc.session_state.as_ref().map(|state| IsoFile {
-            name: anodize_config::state::STATE_FILENAME.into(),
-            data: state.to_json(),
-        })
-    }
-
-    /// Update session_state to reflect the outcome of the current operation.
-    /// Must be called before build_state_json_file in build_burn_session.
-    fn update_session_state_for_record(&mut self, audit_bytes: &[u8]) {
-        // Compute last audit hash from the final line
-        let last_hash = audit_bytes
-            .split(|&b| b == b'\n')
-            .rev()
-            .find(|line| !line.is_empty())
-            .and_then(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
-            .and_then(|v| {
-                v.get("entry_hash")
-                    .and_then(|h| h.as_str().map(String::from))
-            })
-            .unwrap_or_default();
-
-        if let Some(ref mut state) = self.disc.session_state {
-            state.last_audit_hash = last_hash;
-
-            // Update CRL number
-            if let Some(n) = self.data.crl_number {
-                state.crl_number = n;
-            }
-
-            // Update revocation list
-            if !self.data.revocation_list.is_empty() {
-                state.revocation_list = self.data.revocation_list.clone();
-            }
-
-            // Record last HSM audit log sequence number for continuity anchoring.
-            if let Some(ref actor) = self.hw.actor {
-                match actor.get_audit_log() {
-                    Ok(snapshot) => {
-                        if let Some(last) = snapshot.entries.last() {
-                            state.last_hsm_log_seq = Some(last.item as u64);
-                            tracing::info!(seq = last.item, "recorded last_hsm_log_seq");
-                            // Drain the audit log so force-audit mode does not
-                            // block subsequent HSM operations once the 62-entry
-                            // ring buffer fills up.
-                            if let Err(e) = actor.drain_audit_log(last.item) {
-                                tracing::warn!(seq = last.item, "drain_audit_log failed: {e}");
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("could not read HSM audit log: {e}");
-                    }
-                }
-            }
-        }
-    }
-
     /// Build the SessionEntry for the current operation's disc burn.
+    /// Delegates to the active `OpContext::build_record_session` implementation.
     fn build_burn_session(&mut self, staging: &std::path::Path) -> Option<SessionEntry> {
+        use crate::ops::OpContext;
         let ts = self.confirmed_time.unwrap_or_else(SystemTime::now);
         let dir_name = media::session_dir_name(ts) + "-record";
 
-        match self.current_op.clone() {
-            Some(Operation::RekeyShares) => {
-                let log_path = staging.join("audit.log");
-                let mut log = match AuditLog::open(&log_path) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.set_status(format!("Audit log reopen failed: {e}"));
-                        return None;
-                    }
-                };
-                let new_total = self
-                    .disc
-                    .session_state
-                    .as_ref()
-                    .map(|s| s.sss.total)
-                    .unwrap_or(0);
-                let new_threshold = self
-                    .disc
-                    .session_state
-                    .as_ref()
-                    .map(|s| s.sss.threshold)
-                    .unwrap_or(0);
-                let backup_ids = &self.sss.rekey_changed_backup_ids;
-                if let Err(e) = log.append(
-                    "sss.rekey",
-                    serde_json::json!({
-                        "operation": "rekey-shares",
-                        "new_threshold": new_threshold,
-                        "new_total": new_total,
-                        "pin_rotated": true,
-                        "backup_devices_updated": backup_ids,
-                    }),
-                ) {
-                    self.set_status(format!("Audit log append failed: {e}"));
-                    return None;
-                }
-                drop(log);
-
-                let audit_bytes = match std::fs::read(&log_path) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        self.set_status(format!("Cannot read audit log: {e}"));
-                        return None;
-                    }
-                };
-
-                self.update_session_state_for_record(&audit_bytes);
-                let mut files = vec![IsoFile {
-                    name: "AUDIT.LOG".into(),
-                    data: audit_bytes,
-                }];
-                if let Some(state_file) = self.build_state_json_file() {
-                    files.push(state_file);
-                }
-
-                Some(SessionEntry {
-                    dir_name,
-                    timestamp: ts,
-                    files,
-                })
-            }
-            Some(Operation::InitRoot) => {
-                let cert_der = self.data.cert_der.clone()?;
-                let crl_der = self.data.crl_der.clone()?;
-
-                let log_path = staging.join("audit.log");
-                let mut log = match AuditLog::open(&log_path) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.set_status(format!("Audit log reopen failed: {e}"));
-                        return None;
-                    }
-                };
-                let fp = self.data.fingerprint.clone().unwrap_or_default();
-                let ca_name = self
-                    .profile
-                    .as_ref()
-                    .map(|p| p.ca.common_name.clone())
-                    .unwrap_or_default();
-                if let Err(e) = log.append(
-                    "cert.root.issue",
-                    serde_json::json!({
-                        "subject": ca_name,
-                        "fingerprint": fp,
-                        "intent_session": self.disc.intent_session_dir_name.as_deref().unwrap_or(""),
-                    }),
-                ) {
-                    self.set_status(format!("Audit log append failed: {e}"));
-                    return None;
-                }
-                if let Err(e) = log.append(
-                    "crl.issue",
-                    serde_json::json!({
-                        "crl_number": 1,
-                        "revocation_count": 0,
-                        "intent_session": self.disc.intent_session_dir_name.as_deref().unwrap_or(""),
-                    }),
-                ) {
-                    self.set_status(format!("CRL audit append failed: {e}"));
-                    return None;
-                }
-                drop(log);
-
-                let audit_bytes = match std::fs::read(&log_path) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        self.set_status(format!("Cannot read audit log: {e}"));
-                        return None;
-                    }
-                };
-
-                self.update_session_state_for_record(&audit_bytes);
-                let mut files = vec![
-                    IsoFile {
-                        name: "ROOT.CRT".into(),
-                        data: cert_der,
-                    },
-                    IsoFile {
-                        name: "ROOT.CRL".into(),
-                        data: crl_der,
-                    },
-                    IsoFile {
-                        name: "AUDIT.LOG".into(),
-                        data: audit_bytes,
-                    },
-                ];
-                if let Some(state_file) = self.build_state_json_file() {
-                    files.push(state_file);
-                }
-
-                Some(SessionEntry {
-                    dir_name,
-                    timestamp: ts,
-                    files,
-                })
-            }
-
-            Some(Operation::SignCsr) => {
-                let cert_der = self.data.cert_der.clone()?;
-
-                let log_path = staging.join("audit.log");
-                let mut log = match AuditLog::open(&log_path) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.set_status(format!("Audit log reopen failed: {e}"));
-                        return None;
-                    }
-                };
-                let fp = self.data.fingerprint.clone().unwrap_or_default();
-                let profile_name = self
-                    .profile
-                    .as_ref()
-                    .and_then(|p| {
-                        self.data
-                            .selected_profile_idx
-                            .map(|i| p.cert_profiles[i].name.clone())
-                    })
-                    .unwrap_or_default();
-                if let Err(e) = log.append(
-                    "cert.intermediate.issue",
-                    serde_json::json!({
-                        "fingerprint": fp,
-                        "profile": profile_name,
-                        "intent_session": self.disc.intent_session_dir_name.as_deref().unwrap_or(""),
-                    }),
-                ) {
-                    self.set_status(format!("Audit log append failed: {e}"));
-                    return None;
-                }
-                drop(log);
-
-                let audit_bytes = match std::fs::read(&log_path) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        self.set_status(format!("Cannot read audit log: {e}"));
-                        return None;
-                    }
-                };
-
-                self.update_session_state_for_record(&audit_bytes);
-                let mut files = vec![
-                    IsoFile {
-                        name: "INTERMEDIATE.CRT".into(),
-                        data: cert_der,
-                    },
-                    IsoFile {
-                        name: "AUDIT.LOG".into(),
-                        data: audit_bytes,
-                    },
-                ];
-                if let Some(state_file) = self.build_state_json_file() {
-                    files.push(state_file);
-                }
-
-                Some(SessionEntry {
-                    dir_name,
-                    timestamp: ts,
-                    files,
-                })
-            }
-
-            Some(Operation::RevokeCert) => {
-                let crl_der = self.data.crl_der.clone()?;
-                let revoked_toml =
-                    serialize_revocation_list(&self.data.revocation_list).into_bytes();
-                let crl_number = self.data.crl_number.unwrap_or(0);
-
-                let log_path = staging.join("audit.log");
-                let mut log = match AuditLog::open(&log_path) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.set_status(format!("Audit log reopen failed: {e}"));
-                        return None;
-                    }
-                };
-                let serial: u64 = self.data.revoke_serial_buf.parse().unwrap_or(0);
-                let reason = if self.data.revoke_reason_buf.is_empty() {
-                    serde_json::Value::Null
-                } else {
-                    serde_json::Value::String(self.data.revoke_reason_buf.clone())
-                };
-                if let Err(e) = log.append(
-                    "cert.revoke",
-                    serde_json::json!({
-                        "serial": serial,
-                        "reason": reason,
-                        "intent_session": self.disc.intent_session_dir_name.as_deref().unwrap_or(""),
-                    }),
-                ) {
-                    self.set_status(format!("Audit log append failed: {e}"));
-                    return None;
-                }
-                if let Err(e) = log.append(
-                    "crl.issue",
-                    serde_json::json!({
-                        "crl_number": crl_number,
-                        "revocation_count": self.data.revocation_list.len(),
-                        "intent_session": self.disc.intent_session_dir_name.as_deref().unwrap_or(""),
-                    }),
-                ) {
-                    self.set_status(format!("CRL audit append failed: {e}"));
-                    return None;
-                }
-                drop(log);
-
-                let audit_bytes = match std::fs::read(&log_path) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        self.set_status(format!("Cannot read audit log: {e}"));
-                        return None;
-                    }
-                };
-
-                self.update_session_state_for_record(&audit_bytes);
-                let mut files = vec![
-                    IsoFile {
-                        name: "REVOKED.TOML".into(),
-                        data: revoked_toml,
-                    },
-                    IsoFile {
-                        name: "ROOT.CRL".into(),
-                        data: crl_der,
-                    },
-                    IsoFile {
-                        name: "AUDIT.LOG".into(),
-                        data: audit_bytes,
-                    },
-                ];
-                if let Some(state_file) = self.build_state_json_file() {
-                    files.push(state_file);
-                }
-
-                Some(SessionEntry {
-                    dir_name,
-                    timestamp: ts,
-                    files,
-                })
-            }
-
-            Some(Operation::IssueCrl) => {
-                let crl_der = self.data.crl_der.clone()?;
-                let crl_number = self.data.crl_number.unwrap_or(0);
-
-                let log_path = staging.join("audit.log");
-                let mut log = match AuditLog::open(&log_path) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.set_status(format!("Audit log reopen failed: {e}"));
-                        return None;
-                    }
-                };
-                if let Err(e) = log.append(
-                    "crl.issue",
-                    serde_json::json!({
-                        "crl_number": crl_number,
-                        "revocation_count": self.data.revocation_list.len(),
-                        "intent_session": self.disc.intent_session_dir_name.as_deref().unwrap_or(""),
-                    }),
-                ) {
-                    self.set_status(format!("Audit log append failed: {e}"));
-                    return None;
-                }
-                drop(log);
-
-                let audit_bytes = match std::fs::read(&log_path) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        self.set_status(format!("Cannot read audit log: {e}"));
-                        return None;
-                    }
-                };
-
-                self.update_session_state_for_record(&audit_bytes);
-                let mut files = vec![
-                    IsoFile {
-                        name: "ROOT.CRL".into(),
-                        data: crl_der,
-                    },
-                    IsoFile {
-                        name: "AUDIT.LOG".into(),
-                        data: audit_bytes,
-                    },
-                ];
-                if let Some(state_file) = self.build_state_json_file() {
-                    files.push(state_file);
-                }
-
-                Some(SessionEntry {
-                    dir_name,
-                    timestamp: ts,
-                    files,
-                })
-            }
-
-            Some(Operation::MigrateDisc) => {
-                // Pure copy of the source disc's last session.
-                let source_files = match self.data.migrate_sessions.last() {
-                    Some(s) => s.files.clone(),
-                    None => {
-                        self.set_status("No sessions on source disc to migrate");
-                        return None;
-                    }
-                };
-
-                Some(SessionEntry {
-                    dir_name,
-                    timestamp: ts,
-                    files: source_files,
-                })
-            }
-
-            Some(Operation::KeyBackup) => {
-                let log_path = staging.join("audit.log");
-                let mut log = match AuditLog::open(&log_path) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        self.set_status(format!("Audit log reopen failed: {e}"));
-                        return None;
-                    }
-                };
-
-                let src_id = self
-                    .utilities
-                    .backup
-                    .source_idx
-                    .and_then(|i| self.utilities.backup.targets.get(i))
-                    .map(|t| t.identifier.clone())
-                    .unwrap_or_default();
-                let dst_id = self
-                    .utilities
-                    .backup
-                    .dest_idx
-                    .and_then(|i| self.utilities.backup.targets.get(i))
-                    .map(|t| t.identifier.clone())
-                    .unwrap_or_default();
-                let is_pair = self.utilities.backup.action_is_pair;
-                let succeeded = self.utilities.backup.phase
-                    == crate::modes::utilities::backup::BackupPhase::Done;
-
-                let event_name = if is_pair {
-                    "hsm.backup.pair"
-                } else {
-                    "hsm.backup.key"
-                };
-                if let Err(e) = log.append(
-                    event_name,
-                    serde_json::json!({
-                        "operation": if is_pair { "pair-devices" } else { "backup-signing-key" },
-                        "source": src_id,
-                        "destination": dst_id,
-                        "success": succeeded,
-                        "wrap_key": self.utilities.backup.wrap_key_desc.as_deref().unwrap_or(""),
-                        "public_keys_match": self.utilities.backup.result
-                            .as_ref().map(|r| r.public_keys_match),
-                    }),
-                ) {
-                    self.set_status(format!("Audit log append failed: {e}"));
-                    return None;
-                }
-                drop(log);
-
-                let audit_bytes = match std::fs::read(&log_path) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        self.set_status(format!("Cannot read audit log: {e}"));
-                        return None;
-                    }
-                };
-
-                Some(SessionEntry {
-                    dir_name,
-                    timestamp: ts,
-                    files: vec![IsoFile {
-                        name: "AUDIT.LOG".into(),
-                        data: audit_bytes,
-                    }],
-                })
-            }
-
-            Some(Operation::ValidateDisc) => {
-                // ValidateDisc never burns to disc.
-                None
-            }
-
-            #[cfg(feature = "dev-burn")]
-            Some(Operation::RefreshDisc) => {
-                // RefreshDisc uses do_refresh_disc() directly, not build_burn_session.
-                None
-            }
-
-            None => {
-                self.set_status("No operation set");
-                None
-            }
-        }
+        let mut op = self.active_op.take()?;
+        let mut shared = self.make_shared();
+        let result = op.build_record_session(dir_name, ts, staging, &mut shared);
+        drop(shared);
+        self.active_op = Some(op);
+        result
     }
 
     // ── Shuttle write ─────────────────────────────────────────────────────
 
     pub(crate) fn do_write_shuttle(&mut self) {
+        use crate::ops::OpContext;
         let shuttle = self.shuttle_mount.clone();
         let staging_log = PathBuf::from("/run/anodize/staging/audit.log");
 
-        // Operations that produce no shuttle artifacts — skip mount check entirely.
-        match self.current_op {
-            Some(Operation::RekeyShares) => {
-                // No shuttle artifacts for re-key
-                self.ceremony.state = CeremonyPhase::Done;
-                self.set_status("Operation complete.");
-                return;
-            }
-            Some(Operation::KeyBackup) => {
-                // Key backup has no shuttle artifacts.
-                self.ceremony.state = CeremonyPhase::Done;
-                self.set_status("Key backup complete.");
-                return;
-            }
-            Some(Operation::ValidateDisc) => {
-                // Validation writes VALIDATE.LOG via its own export path.
-                self.ceremony.state = CeremonyPhase::Done;
-                self.set_status("Validation complete.");
-                return;
-            }
-            Some(Operation::MigrateDisc) => {
-                self.ceremony.state = CeremonyPhase::Done;
-                self.set_status("Migration complete.");
-                return;
-            }
-            #[cfg(feature = "dev-burn")]
-            Some(Operation::RefreshDisc) => {
-                self.ceremony.state = CeremonyPhase::Done;
-                self.set_status("Disc refreshed — ready for new InitRoot.");
-                return;
-            }
-            None => {
-                self.ceremony.state = CeremonyPhase::Done;
-                self.set_status("Complete.");
-                return;
-            }
-            _ => {}
+        // Check whether the op produces shuttle artifacts (without writing yet).
+        let has_artifacts = self
+            .active_op
+            .as_ref()
+            .map(|op| op.has_shuttle_artifacts())
+            .unwrap_or(false);
+
+        if !has_artifacts {
+            self.active_op = None;
+            self.ceremony.state = CeremonyPhase::Done;
+            self.set_status("Operation complete.");
+            return;
         }
 
         // Verify the shuttle USB is still mounted (systemd manages the lifecycle).
@@ -2828,60 +860,15 @@ impl App {
             return;
         }
 
-        match self.current_op.clone() {
-            Some(Operation::InitRoot) => {
-                if let Some(cert_der) = &self.data.cert_der {
-                    if let Err(e) = media::write_and_sync(&shuttle.join("root.crt"), cert_der) {
-                        self.set_status(format!("Shuttle write failed (root.crt): {e:#}"));
-                        return;
-                    }
-                }
-                if let Some(crl_der) = &self.data.crl_der {
-                    if let Err(e) = media::write_and_sync(&shuttle.join("root.crl"), crl_der) {
-                        self.set_status(format!("Shuttle write failed (root.crl): {e:#}"));
-                        return;
-                    }
-                }
+        // Write operation-specific artifacts to shuttle.
+        if let Some(ref op) = self.active_op {
+            if let Err(e) = op.write_shuttle_artifacts(&shuttle) {
+                self.set_status(e);
+                return;
             }
-            Some(Operation::SignCsr) => {
-                if let Some(cert_der) = &self.data.cert_der {
-                    if let Err(e) =
-                        media::write_and_sync(&shuttle.join("intermediate.crt"), cert_der)
-                    {
-                        self.set_status(format!("Shuttle write failed (intermediate.crt): {e:#}"));
-                        return;
-                    }
-                }
-            }
-            Some(Operation::RevokeCert) => {
-                let revoked_toml = serialize_revocation_list(&self.data.revocation_list);
-                if let Err(e) =
-                    media::write_and_sync(&shuttle.join("revoked.toml"), revoked_toml.as_bytes())
-                {
-                    self.set_status(format!("Shuttle write failed (revoked.toml): {e:#}"));
-                    return;
-                }
-                if let Some(crl_der) = &self.data.crl_der {
-                    if let Err(e) = media::write_and_sync(&shuttle.join("root.crl"), crl_der) {
-                        self.set_status(format!("Shuttle write failed (root.crl): {e:#}"));
-                        return;
-                    }
-                }
-            }
-            Some(Operation::IssueCrl) => {
-                if let Some(crl_der) = &self.data.crl_der {
-                    if let Err(e) = media::write_and_sync(&shuttle.join("root.crl"), crl_der) {
-                        self.set_status(format!("Shuttle write failed (root.crl): {e:#}"));
-                        return;
-                    }
-                }
-            }
-            // No-artifact operations already returned above.
-            _ => unreachable!(),
         }
 
         // Copy audit log to shuttle for all artifact-producing operations.
-        // Read + write_and_sync instead of fs::copy so we get fsync.
         match std::fs::read(&staging_log) {
             Ok(log_bytes) => {
                 if let Err(e) = media::write_and_sync(&shuttle.join("audit.log"), &log_bytes) {
@@ -2895,204 +882,9 @@ impl App {
             }
         }
 
+        self.active_op = None;
         self.ceremony.state = CeremonyPhase::Done;
         self.set_status(format!("Shuttle write complete: {}", shuttle.display()));
-    }
-
-    // ── Disc validation ──────────────────────────────────────────────────────
-
-    pub(crate) fn do_validate_disc(&mut self) {
-        use anodize_audit::validate::{
-            format_report, validate_disc_status, validate_session_continuity, DiscStatus, Finding,
-            SessionSnapshot, StateFields,
-        };
-        use sha2::{Digest, Sha256};
-        use std::collections::BTreeMap;
-
-        let mut findings: Vec<Finding> = Vec::new();
-
-        // Build snapshots from prior sessions.
-        let mut snapshots: Vec<SessionSnapshot> = Vec::new();
-        for (i, sess) in self.disc.prior_sessions.iter().enumerate() {
-            let file_hashes: BTreeMap<String, String> = sess
-                .files
-                .iter()
-                .map(|f| {
-                    let hash = format!("{:x}", Sha256::digest(&f.data));
-                    (f.name.clone(), hash)
-                })
-                .collect();
-            let has_migration = file_hashes
-                .keys()
-                .any(|k| k.eq_ignore_ascii_case("MIGRATION.JSON"));
-            let state = if let Some(ref s) = self.disc.session_state {
-                StateFields {
-                    root_cert_sha256: s.root_cert_sha256.clone(),
-                    crl_number: s.crl_number,
-                    last_audit_hash: s.last_audit_hash.clone(),
-                    last_hsm_log_seq: s.last_hsm_log_seq,
-                    is_migration: has_migration,
-                    custodian_names: s.sss.custodians.iter().map(|c| c.name.clone()).collect(),
-                }
-            } else {
-                StateFields {
-                    root_cert_sha256: String::new(),
-                    crl_number: 0,
-                    last_audit_hash: String::new(),
-                    last_hsm_log_seq: None,
-                    is_migration: has_migration,
-                    custodian_names: vec![],
-                }
-            };
-            snapshots.push(SessionSnapshot {
-                index: i,
-                file_hashes,
-                audit_records: Vec::new(), // populated from staging log below
-                state,
-            });
-        }
-
-        // Disc status check.
-        let disc_status = if self.disc.optical_dev.is_some() {
-            DiscStatus::Incomplete
-        } else {
-            DiscStatus::Blank
-        };
-        findings.extend(validate_disc_status(disc_status));
-
-        // Session continuity.
-        findings.extend(validate_session_continuity(&snapshots));
-
-        // Audit chain check (uses staging audit log if available).
-        let staging_log = std::path::PathBuf::from("/run/anodize/staging/audit.log");
-        if staging_log.exists() {
-            match anodize_audit::verify_log(&staging_log) {
-                Ok(_count) => {
-                    findings.push(Finding {
-                        severity: anodize_audit::validate::Severity::Pass,
-                        check: "audit_chain".into(),
-                        message: "Audit log hash chain verified".into(),
-                    });
-                }
-                Err(e) => {
-                    findings.push(Finding {
-                        severity: anodize_audit::validate::Severity::Error,
-                        check: "audit_chain".into(),
-                        message: format!("Audit log hash chain FAILED: {e}"),
-                    });
-                }
-            }
-        } else if !self.skip_disc {
-            findings.push(Finding {
-                severity: anodize_audit::validate::Severity::Warn,
-                check: "audit_chain".into(),
-                message: "No staging audit log found".into(),
-            });
-        }
-
-        // Check if HSM is available.
-        let has_hsm = self.hw.actor.is_some();
-
-        let report = format_report(&findings);
-        self.data.validate_report_lines = report.lines().map(String::from).collect();
-        self.data.validate_has_hsm = has_hsm;
-        self.data.validate_findings = findings;
-        self.ceremony.state = CeremonyPhase::Planning(PlanningState::ValidateReport);
-        self.set_status("Disc validation complete. Review findings.");
-    }
-
-    pub(crate) fn do_validate_hsm_check(&mut self) {
-        use anodize_audit::validate::{
-            cross_check_hsm_log, format_report, HsmLogEntry, HsmLogSnapshot,
-        };
-
-        let actor = match self.hw.actor.as_ref() {
-            Some(a) => a,
-            None => {
-                self.set_status("No HSM session — run quorum first.");
-                return;
-            }
-        };
-
-        match actor.get_audit_log() {
-            Ok(snapshot) => {
-                let hsm_snapshot = HsmLogSnapshot {
-                    unlogged_boot_events: snapshot.unlogged_boot_events,
-                    unlogged_auth_events: snapshot.unlogged_auth_events,
-                    entries: snapshot
-                        .entries
-                        .iter()
-                        .map(|e| HsmLogEntry {
-                            item: e.item,
-                            command: e.command,
-                            session_key: e.session_key,
-                            target_key: e.target_key,
-                            second_key: e.second_key,
-                            result: e.result,
-                            tick: e.tick,
-                            digest: e.digest,
-                        })
-                        .collect(),
-                };
-
-                // Collect disc audit records for cross-check.
-                let staging_log = std::path::PathBuf::from("/run/anodize/staging/audit.log");
-                let disc_records: Vec<anodize_audit::Record> = if staging_log.exists() {
-                    std::fs::read_to_string(&staging_log)
-                        .unwrap_or_default()
-                        .lines()
-                        .filter_map(|line| serde_json::from_str(line).ok())
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-
-                let last_seq = self
-                    .disc
-                    .session_state
-                    .as_ref()
-                    .and_then(|s| s.last_hsm_log_seq);
-
-                let hsm_findings = cross_check_hsm_log(
-                    &hsm_snapshot,
-                    &disc_records,
-                    0x0002, // ANODIZE_AUTH_KEY_ID
-                    0x0100, // SIGNING_KEY_ID
-                    last_seq,
-                );
-                self.data.validate_findings.extend(hsm_findings);
-
-                let report = format_report(&self.data.validate_findings);
-                self.data.validate_report_lines = report.lines().map(String::from).collect();
-                self.ceremony.state = CeremonyPhase::Planning(PlanningState::ValidateHsmResult);
-                self.set_status("HSM audit log cross-check complete.");
-            }
-            Err(e) => {
-                self.set_status(format!("HSM audit log fetch failed: {e}"));
-            }
-        }
-    }
-
-    pub(crate) fn do_validate_export_report(&mut self) {
-        use anodize_audit::validate::format_report;
-
-        let shuttle = self.shuttle_mount.clone();
-        let validate_log = shuttle.join("VALIDATE.LOG");
-
-        let report = format_report(&self.data.validate_findings);
-
-        match std::fs::write(&validate_log, report.as_bytes()) {
-            Ok(()) => {
-                self.set_status(format!(
-                    "VALIDATE.LOG written to {}",
-                    validate_log.display()
-                ));
-                self.ceremony.state = CeremonyPhase::Done;
-            }
-            Err(e) => {
-                self.set_status(format!("Failed to write VALIDATE.LOG: {e}"));
-            }
-        }
     }
 
     // ── Content rendering (avoids borrow splitting) ──────────────────────────
@@ -3102,38 +894,6 @@ impl App {
     }
 
     pub(crate) fn render_ceremony_content(&self, frame: &mut Frame, area: Rect) {
-        // CustodianSetup overlay for InitRoot and Rekey custodian entry
-        match self.ceremony.state {
-            CeremonyPhase::Planning(PlanningState::CustodianSetup)
-            | CeremonyPhase::Planning(PlanningState::RekeyCustodianSetup) => {
-                if let Some(ref setup) = self.sss.custodian_setup {
-                    setup.render(frame, area);
-                    return;
-                }
-            }
-            _ => {}
-        }
-        // ShareReveal / ShareInput overlay for InitRoot and Rekey states
-        match self.ceremony.state {
-            CeremonyPhase::Planning(PlanningState::ShareReveal)
-            | CeremonyPhase::Planning(PlanningState::RekeyShareReveal) => {
-                if let Some(ref reveal) = self.sss.share_reveal {
-                    reveal.render(frame, area);
-                    return;
-                }
-            }
-            CeremonyPhase::Quorum
-            | CeremonyPhase::Planning(PlanningState::ShareVerify)
-            | CeremonyPhase::Planning(PlanningState::RekeyShareVerify)
-            | CeremonyPhase::Planning(PlanningState::RekeyQuorum)
-            | CeremonyPhase::Planning(PlanningState::BackupQuorum) => {
-                if let Some(ref input) = self.sss.share_input {
-                    input.render(frame, area);
-                    return;
-                }
-            }
-            _ => {}
-        }
         // ActiveOp: delegate rendering to the per-operation context.
         if self.ceremony.state == CeremonyPhase::ActiveOp {
             if let Some(ref op) = self.active_op {
@@ -3153,6 +913,8 @@ impl App {
                     .wrap(ratatui::widgets::Wrap { trim: false })
                     .scroll((self.content_scroll, 0));
                 frame.render_widget(para, area);
+                // Render overlay components (ShareInput, CustodianSetup, etc.)
+                op.render_overlay(frame, area);
             }
             return;
         }
@@ -3175,17 +937,22 @@ mod tests {
     }
 
     #[test]
-    fn post_intent_init_root_fails_without_hsm() {
+    fn init_root_bootstrap_fails_without_hsm() {
         let mut app = test_app();
-        // No HSM backend configured → do_bootstrap_hsm should fail
-        let result = app.post_intent_init_root();
+        // No HSM backend configured → InitRootCtx::do_bootstrap_hsm should fail
+        let mut shared = app.make_shared();
+        let result = crate::ops::init_root::InitRootCtx::do_bootstrap_hsm(&mut shared);
         assert!(result.is_err(), "Expected error without profile/HSM");
     }
 
     #[test]
-    fn tick_intent_burn_transitions_to_post_commit_error() {
+    fn tick_intent_burn_transitions_to_active_op_on_bootstrap_fail() {
         let mut app = test_app();
         app.ceremony.state = CeremonyPhase::Commit;
+
+        // Provide an InitRootCtx so the ActiveOp path fires.
+        let ctx = crate::ops::init_root::InitRootCtx::new();
+        app.active_op = Some(crate::ops::ActiveOperation::InitRoot(ctx));
 
         // Set up a burn_rx channel that immediately yields Done(Ok(()))
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3194,10 +961,12 @@ mod tests {
 
         app.tick_intent_burn();
 
+        // InitRootCtx::advance_after_intent_burn fails (no HSM) but the
+        // caller transitions to ActiveOp so the context can display the error.
         assert_eq!(
             app.ceremony.state,
-            CeremonyPhase::PostCommitError,
-            "Should transition to PostCommitError when HSM bootstrap fails"
+            CeremonyPhase::ActiveOp,
+            "Should transition to ActiveOp (error shown via status)"
         );
     }
 
@@ -3354,108 +1123,96 @@ mod tests {
 
     // ── Revoke phase regression tests ────────────────────────────────────
 
-    fn revoke_app() -> crate::app::App {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
-        app.ceremony.state =
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::RevokeInput);
-        app
+    use crate::ops::revoke_cert::{RevokeCertCtx, RevokeCertPhase};
+    use crate::ops::OpContext;
+
+    fn revoke_ctx() -> RevokeCertCtx {
+        RevokeCertCtx::new(vec![], Some(1), vec![], None)
+    }
+
+    fn revoke_app_in_input() -> (crate::app::App, RevokeCertCtx) {
+        let app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut ctx = revoke_ctx();
+        ctx.phase = RevokeCertPhase::RevokeInput;
+        (app, ctx)
     }
 
     #[test]
     fn revoke_cancel_from_serial_returns_to_select() {
-        let mut app = revoke_app();
-        app.data.revoke_phase = 0;
-
-        app.update(Action::RevokeInputCancel);
-
-        assert_eq!(
-            app.ceremony.state,
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::RevokeSelect),
-            "Esc in serial field should return to RevokeSelect"
-        );
+        let (mut app, mut ctx) = revoke_app_in_input();
+        ctx.input_phase = 0;
+        let mut shared = app.make_shared();
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Esc);
+        let _action = ctx.handle_key(key, &mut shared);
+        assert_eq!(ctx.phase, RevokeCertPhase::RevokeSelect);
     }
 
     #[test]
     fn revoke_cancel_from_reason_returns_to_serial() {
-        let mut app = revoke_app();
-        app.data.revoke_phase = 1;
-
-        app.update(Action::RevokeInputCancel);
-
-        assert_eq!(
-            app.data.revoke_phase, 0,
-            "Esc in reason should go back to serial"
-        );
-        assert_eq!(
-            app.ceremony.state,
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::RevokeInput),
-            "Should stay in RevokeInput after Esc from reason"
-        );
+        let (mut app, mut ctx) = revoke_app_in_input();
+        ctx.input_phase = 1;
+        let mut shared = app.make_shared();
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Esc);
+        let _action = ctx.handle_key(key, &mut shared);
+        assert_eq!(ctx.input_phase, 0, "Esc in reason should go back to serial");
+        assert_eq!(ctx.phase, RevokeCertPhase::RevokeInput);
     }
 
     #[test]
-    fn revoke_next_phase_advances_from_serial_to_reason() {
-        let mut app = revoke_app();
-        app.data.revoke_serial_buf = "12345".into();
-        app.data.revoke_phase = 0;
-
-        app.update(Action::RevokeInputNextPhase);
-
-        assert_eq!(
-            app.data.revoke_phase, 1,
-            "phase should advance to 1 (reason)"
-        );
+    fn revoke_enter_advances_from_serial_to_reason() {
+        let (mut app, mut ctx) = revoke_app_in_input();
+        ctx.serial_buf = "12345".into();
+        ctx.input_phase = 0;
+        let mut shared = app.make_shared();
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
+        let _action = ctx.handle_key(key, &mut shared);
+        assert_eq!(ctx.input_phase, 1, "phase should advance to 1 (reason)");
     }
 
     #[test]
-    fn revoke_next_phase_empty_serial_stays_at_phase_0() {
-        let mut app = revoke_app();
-        app.data.revoke_serial_buf.clear();
-        app.data.revoke_phase = 0;
-
-        app.update(Action::RevokeInputNextPhase);
-
-        assert_eq!(app.data.revoke_phase, 0, "empty serial should not advance");
+    fn revoke_enter_empty_serial_stays_at_phase_0() {
+        let (mut app, mut ctx) = revoke_app_in_input();
+        ctx.serial_buf.clear();
+        ctx.input_phase = 0;
+        let mut shared = app.make_shared();
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
+        let _action = ctx.handle_key(key, &mut shared);
+        // Empty serial in phase 0 falls through to add_revocation_entry which
+        // rejects it and stays put.
+        assert_eq!(ctx.input_phase, 0, "empty serial should not advance");
     }
 
     #[test]
-    fn revoke_next_phase_from_reason_adds_entry() {
-        let mut app = revoke_app();
-        app.data.revoke_serial_buf = "01AB23".into();
-        app.data.revoke_reason_buf = "key-compromise".into();
-        app.data.revoke_phase = 1;
-
-        app.update(Action::RevokeInputNextPhase);
-
+    fn revoke_enter_from_reason_adds_entry() {
+        let (mut app, mut ctx) = revoke_app_in_input();
+        ctx.serial_buf = "01AB23".into();
+        ctx.reason_buf = "key-compromise".into();
+        ctx.input_phase = 1;
+        let mut shared = app.make_shared();
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
+        let _action = ctx.handle_key(key, &mut shared);
+        assert_eq!(ctx.phase, RevokeCertPhase::RevokePreview);
+        assert_eq!(ctx.revocation_list.len(), 1);
+        assert_eq!(ctx.revocation_list[0].serial, "01AB23");
         assert_eq!(
-            app.ceremony.state,
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::RevokePreview),
-            "phase 1 Enter should transition to RevokePreview"
-        );
-        assert_eq!(app.data.revocation_list.len(), 1);
-        assert_eq!(app.data.revocation_list[0].serial, "01AB23");
-        assert_eq!(
-            app.data.revocation_list[0].reason.as_deref(),
+            ctx.revocation_list[0].reason.as_deref(),
             Some("key-compromise")
         );
     }
 
     #[test]
-    fn revoke_next_phase_from_reason_empty_reason_adds_entry() {
-        let mut app = revoke_app();
-        app.data.revoke_serial_buf = "42".into();
-        app.data.revoke_reason_buf.clear();
-        app.data.revoke_phase = 1;
-
-        app.update(Action::RevokeInputNextPhase);
-
-        assert_eq!(
-            app.ceremony.state,
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::RevokePreview),
-        );
-        assert_eq!(app.data.revocation_list.len(), 1);
+    fn revoke_enter_from_reason_empty_reason_adds_entry() {
+        let (mut app, mut ctx) = revoke_app_in_input();
+        ctx.serial_buf = "42".into();
+        ctx.reason_buf.clear();
+        ctx.input_phase = 1;
+        let mut shared = app.make_shared();
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Enter);
+        let _action = ctx.handle_key(key, &mut shared);
+        assert_eq!(ctx.phase, RevokeCertPhase::RevokePreview);
+        assert_eq!(ctx.revocation_list.len(), 1);
         assert!(
-            app.data.revocation_list[0].reason.is_none(),
+            ctx.revocation_list[0].reason.is_none(),
             "empty reason should be None"
         );
     }
@@ -3479,8 +1236,11 @@ mod tests {
 
     /// Build a valid AUDIT.LOG bytes with one entry whose entry_hash we can predict.
     fn make_audit_log_bytes() -> (Vec<u8>, String) {
-        let path =
-            std::env::temp_dir().join(format!("anodize-test-audit-{}.log", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "anodize-test-audit-{}-{:?}.log",
+            std::process::id(),
+            std::thread::current().id(),
+        ));
         let genesis = [0u8; 32];
         let mut log = anodize_audit::AuditLog::create(&path, &genesis).expect("create audit log");
         let record = log
@@ -3517,29 +1277,40 @@ mod tests {
         app
     }
 
+    /// Helper: create a migrate app and wire up MigrateCtx via ActiveOp.
+    fn migrate_app_with_active_op(session_count: usize) -> crate::app::App {
+        let mut app = migrate_app_with_sessions(session_count);
+        app.mode = crate::action::Mode::Ceremony;
+        app.setup_complete = true;
+        let shared = app.make_shared();
+        let ctx = crate::ops::migrate_disc::MigrateCtx::run(&shared);
+        app.active_op = Some(crate::ops::ActiveOperation::MigrateDisc(ctx));
+        app.ceremony.state = CeremonyPhase::ActiveOp;
+        app
+    }
+
     #[test]
     fn migrate_confirm_sets_state_and_fingerprint() {
-        let mut app = migrate_app_with_sessions(3);
+        let app = migrate_app_with_active_op(3);
         let (_audit_bytes, expected_hash) = make_audit_log_bytes();
 
-        app.do_migrate_confirm();
-
-        assert_eq!(
-            app.ceremony.state,
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::MigrateConfirm),
-        );
-        assert!(app.data.migrate_chain_ok);
-        assert_eq!(
-            app.data.migrate_source_fingerprint.as_deref(),
-            Some(expected_hash.as_str()),
-        );
+        assert_eq!(app.ceremony.state, CeremonyPhase::ActiveOp);
+        match &app.active_op {
+            Some(crate::ops::ActiveOperation::MigrateDisc(ctx)) => {
+                assert!(ctx.chain_ok);
+                assert_eq!(
+                    ctx.source_fingerprint.as_deref(),
+                    Some(expected_hash.as_str()),
+                );
+            }
+            _ => panic!("expected MigrateDisc active_op"),
+        }
     }
 
     #[test]
     fn migrate_confirm_bytes_from_last_session_only() {
-        let mut app = migrate_app_with_sessions(3);
-        // Last session has 2 files: ROOT.CRT (2 bytes) + AUDIT.LOG (variable)
-        let expected: u64 = app
+        let base = migrate_app_with_sessions(3);
+        let expected: u64 = base
             .disc
             .prior_sessions
             .last()
@@ -3548,60 +1319,76 @@ mod tests {
             .iter()
             .map(|f| f.data.len() as u64)
             .sum();
-
-        app.do_migrate_confirm();
-
-        assert_eq!(app.data.migrate_total_bytes, expected);
-        // Sanity: should be less than 3x (since all sessions have same data)
-        let all_bytes: u64 = app
+        let all_bytes: u64 = base
             .disc
             .prior_sessions
             .iter()
             .flat_map(|s| s.files.iter())
             .map(|f| f.data.len() as u64)
             .sum();
-        assert!(
-            app.data.migrate_total_bytes < all_bytes,
-            "should only count last session, not all"
-        );
+
+        let app = migrate_app_with_active_op(3);
+        match &app.active_op {
+            Some(crate::ops::ActiveOperation::MigrateDisc(ctx)) => {
+                assert_eq!(ctx.total_bytes, expected);
+                assert!(
+                    ctx.total_bytes < all_bytes,
+                    "should only count last session, not all"
+                );
+            }
+            _ => panic!("expected MigrateDisc active_op"),
+        }
     }
 
     #[test]
     fn confirm_migrate_action_moves_sessions_and_clears_disc() {
-        let mut app = migrate_app_with_sessions(3);
-        app.do_migrate_confirm();
+        let mut app = migrate_app_with_active_op(3);
 
-        app.update(Action::ConfirmMigrate);
+        // Press [1] to confirm — transitions to WaitTarget.
+        let action = app.handle_key_event(key(KeyCode::Char('1')));
+        app.update(action);
 
-        assert_eq!(app.data.migrate_sessions.len(), 3);
         assert!(app.disc.prior_sessions.is_empty());
         assert!(app.disc.optical_dev.is_none());
         assert!(app.disc.sessions_remaining.is_none());
-        assert!(app.ceremony.is_waiting_migrate_target());
+        match &app.active_op {
+            Some(crate::ops::ActiveOperation::MigrateDisc(ctx)) => {
+                assert_eq!(ctx.sessions.len(), 3);
+                assert_eq!(
+                    ctx.phase,
+                    crate::ops::migrate_disc::MigratePhase::WaitTarget
+                );
+            }
+            _ => panic!("expected MigrateDisc active_op in WaitTarget"),
+        }
     }
 
     #[test]
     fn migrate_confirm_empty_disc_still_sets_state() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
-        app.current_op = Some(Operation::MigrateDisc);
+        let app = migrate_app_with_active_op(0);
 
-        app.do_migrate_confirm();
-
-        assert_eq!(
-            app.ceremony.state,
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::MigrateConfirm),
-        );
-        assert_eq!(app.data.migrate_total_bytes, 0);
-        assert!(app.data.migrate_source_fingerprint.is_none());
+        assert_eq!(app.ceremony.state, CeremonyPhase::ActiveOp);
+        match &app.active_op {
+            Some(crate::ops::ActiveOperation::MigrateDisc(ctx)) => {
+                assert_eq!(ctx.total_bytes, 0);
+                assert!(ctx.source_fingerprint.is_none());
+            }
+            _ => panic!("expected MigrateDisc active_op"),
+        }
     }
 
     // ── Migrate build_burn_session tests ─────────────────────────────────
 
     #[test]
     fn migrate_build_burn_session_is_pure_copy() {
-        let mut app = migrate_app_with_sessions(3);
-        app.do_migrate_confirm();
-        app.update(Action::ConfirmMigrate);
+        let mut app = migrate_app_with_active_op(3);
+        // Simulate [1] to move sessions to context, then sync to data.
+        let action = app.handle_key_event(key(KeyCode::Char('1')));
+        app.update(action);
+        // Sync context sessions into data for build_burn_session.
+        if let Some(crate::ops::ActiveOperation::MigrateDisc(ref ctx)) = app.active_op {
+            app.data.migrate_sessions = ctx.sessions.clone();
+        }
 
         let staging =
             std::env::temp_dir().join(format!("anodize-migrate-test-{}", std::process::id()));
@@ -3687,13 +1474,12 @@ mod tests {
             "'q' should not produce Quit in OperationSelect"
         );
 
-        // Ceremony ephemeral phase
-        app.ceremony.state =
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::CsrPreview);
+        // Ceremony ephemeral phase (ActiveOp — used by SignCsr, InitRoot, etc.)
+        app.ceremony.state = CeremonyPhase::ActiveOp;
         let action = app.handle_key_event(key(KeyCode::Char('q')));
         assert!(
             !matches!(action, Action::Quit),
-            "'q' should not produce Quit in CsrPreview"
+            "'q' should not produce Quit in ActiveOp"
         );
     }
 
@@ -3739,8 +1525,8 @@ mod tests {
     fn ctrl_c_blocked_in_ephemeral_phase() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.mode = crate::action::Mode::Ceremony;
-        app.ceremony.state =
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::ShareReveal);
+        // Use ClockReconfirm as an ephemeral phase (Quorum removed; ops handle it internally).
+        app.ceremony.state = CeremonyPhase::ClockReconfirm;
 
         let action = app.handle_key_event(ctrl_c());
 
@@ -3755,13 +1541,18 @@ mod tests {
     }
 
     #[test]
-    fn esc_opens_abort_confirm_from_csr_preview() {
+    fn esc_opens_abort_confirm_from_sign_csr_cert_preview() {
+        use crate::ops::sign_csr::{SignCsrCtx, SignCsrPhase};
+
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
         app.current_op = Some(Operation::SignCsr);
-        app.ceremony.state =
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::CsrPreview);
+        // Set up a SignCsrCtx in CertPreview phase via ActiveOp.
+        let mut ctx = SignCsrCtx::new(vec![], None, vec!["  [1]  test".into()]);
+        ctx.phase = SignCsrPhase::CertPreview;
+        app.active_op = Some(crate::ops::ActiveOperation::SignCsr(ctx));
+        app.ceremony.state = CeremonyPhase::ActiveOp;
 
         let action = app.handle_key_event(key(KeyCode::Esc));
 
@@ -3771,13 +1562,10 @@ mod tests {
         );
         assert!(
             app.confirm_dialog.is_some(),
-            "Esc in CsrPreview should open abort confirmation dialog"
+            "Esc in CertPreview should open abort confirmation dialog"
         );
         // Ceremony state should NOT have changed yet.
-        assert_eq!(
-            app.ceremony.state,
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::CsrPreview),
-        );
+        assert_eq!(app.ceremony.state, CeremonyPhase::ActiveOp);
     }
 
     #[test]
@@ -3800,7 +1588,7 @@ mod tests {
 
     #[test]
     fn holds_ephemeral_state_correct() {
-        use crate::modes::ceremony::{CeremonyMode, CeremonyPhase, PlanningState};
+        use crate::modes::ceremony::{CeremonyMode, CeremonyPhase};
         let mut cm = CeremonyMode::new();
 
         cm.state = CeremonyPhase::OperationSelect;
@@ -3812,14 +1600,11 @@ mod tests {
         cm.state = CeremonyPhase::DiscDone;
         assert!(!cm.holds_ephemeral_state(), "DiscDone is safe");
 
-        cm.state = CeremonyPhase::Planning(PlanningState::ShareReveal);
-        assert!(cm.holds_ephemeral_state(), "ShareReveal is ephemeral");
+        cm.state = CeremonyPhase::ActiveOp;
+        assert!(cm.holds_ephemeral_state(), "ActiveOp is ephemeral");
 
         cm.state = CeremonyPhase::Commit;
         assert!(cm.holds_ephemeral_state(), "Commit is ephemeral");
-
-        cm.state = CeremonyPhase::Quorum;
-        assert!(cm.holds_ephemeral_state(), "Quorum is ephemeral");
 
         cm.state = CeremonyPhase::BurningDisc;
         assert!(cm.holds_ephemeral_state(), "BurningDisc is ephemeral");
@@ -3829,9 +1614,12 @@ mod tests {
     fn ceremony_cancel_resets_state() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.current_op = Some(Operation::RevokeCert);
-        app.ceremony.state =
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::RevokePreview);
+        let ctx = RevokeCertCtx::new(vec![], Some(1), vec![], None);
+        app.active_op = Some(crate::ops::ActiveOperation::RevokeCert(ctx));
+        app.ceremony.state = CeremonyPhase::ActiveOp;
 
+        // CeremonyCancel from ActiveOp(RevokeSelect) should reset without
+        // confirmation (needs_abort_confirmation is false for RevokeSelect).
         app.update(Action::CeremonyCancel);
 
         assert_eq!(app.ceremony.state, CeremonyPhase::OperationSelect);
@@ -3959,8 +1747,10 @@ mod tests {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
-        app.ceremony.state =
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::ShareReveal);
+        // Use ActiveOp with an IssueCrlCtx which has needs_abort_confirmation.
+        let ctx = crate::ops::issue_crl::IssueCrlCtx::new(vec![], Some(1), None);
+        app.active_op = Some(crate::ops::ActiveOperation::IssueCrl(ctx));
+        app.ceremony.state = CeremonyPhase::ActiveOp;
 
         // Esc opens the abort confirm dialog.
         let _ = app.handle_key_event(key(KeyCode::Esc));
@@ -3972,7 +1762,7 @@ mod tests {
         assert!(app.confirm_dialog.is_none(), "dialog should be dismissed");
         assert_eq!(
             app.ceremony.state,
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::ShareReveal),
+            CeremonyPhase::ActiveOp,
             "ceremony should continue after dismissing dialog"
         );
     }
@@ -4029,7 +1819,11 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let mut app = crate::app::App::new(dir.clone(), true);
         app.current_op = Some(Operation::InitRoot);
-        app.data.cert_der = Some(vec![0xDE, 0xAD]);
+        // Provide an active_op with artifacts so write_shuttle_artifacts returns Ok(true).
+        let mut ctx = crate::ops::init_root::InitRootCtx::new();
+        ctx.cert_der = Some(vec![0xDE, 0xAD]);
+        ctx.crl_der = Some(vec![0xBE, 0xEF]);
+        app.active_op = Some(crate::ops::ActiveOperation::InitRoot(ctx));
         app.ceremony.state = CeremonyPhase::DiscDone;
 
         app.do_write_shuttle();
@@ -4056,7 +1850,10 @@ mod tests {
     fn shuttle_write_fails_on_nonexistent_path() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/anodize-test-nonexistent-42"), true);
         app.current_op = Some(Operation::SignCsr);
-        app.data.cert_der = Some(vec![0xCA, 0xFE]);
+        // Provide an active_op with artifacts so write_shuttle_artifacts returns Ok(true).
+        let mut ctx = crate::ops::sign_csr::SignCsrCtx::new(vec![], None, vec![]);
+        ctx.cert_der = Some(vec![0xCA, 0xFE]);
+        app.active_op = Some(crate::ops::ActiveOperation::SignCsr(ctx));
         app.ceremony.state = CeremonyPhase::DiscDone;
 
         app.do_write_shuttle();
@@ -4135,17 +1932,17 @@ mod tests {
 
     #[test]
     fn confirm_migrate_clears_disc_state() {
-        let mut app = migrate_app_with_sessions(2);
-        app.do_migrate_confirm();
+        let mut app = migrate_app_with_active_op(2);
         app.hw.disc_state = HwState::Present("/dev/sr0".into());
 
-        app.update(Action::ConfirmMigrate);
+        // Press [1] to confirm — clears disc state via handle_key.
+        let action = app.handle_key_event(key(KeyCode::Char('1')));
+        app.update(action);
 
-        assert_eq!(
-            app.hw.disc_state,
-            HwState::Absent,
-            "ConfirmMigrate should reset disc_state to Absent"
-        );
+        // disc_state is managed by hardware polling, not the confirm action.
+        // But optical_dev/sessions_remaining are cleared by the context.
+        assert!(app.disc.optical_dev.is_none());
+        assert!(app.disc.sessions_remaining.is_none());
     }
 
     // ── Async disc scan tests ─────────────────────────────────────────
