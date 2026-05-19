@@ -16,13 +16,13 @@ pub mod validate_disc;
 use std::path::Path;
 use std::time::SystemTime;
 
+use anodize_hsm::Hsm as _;
 use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
 use crate::app::DiscContext;
 use crate::hardware::HardwareManager;
-use crate::media::SessionEntry;
 use anodize_config::Profile;
 
 // ── ActiveOperation ─────────────────────────────────────────────────────────
@@ -44,24 +44,6 @@ pub enum ActiveOperation {
 #[cfg(feature = "dev-burn")]
 pub struct RefreshCtx;
 
-// ── DiscTransaction ─────────────────────────────────────────────────────────
-
-/// Typed state machine for the intent → record disc-write lifecycle.
-///
-/// Transitions are consuming methods that enforce the correct ordering
-/// at the type level.
-#[derive(Debug)]
-pub enum DiscTransaction {
-    /// Intent session built in memory, not yet written to disc.
-    Pending { session: SessionEntry },
-    /// Intent session burned to disc; crypto operation may proceed.
-    IntentBurned { intent_dir_name: String },
-    /// Record session built and ready to burn.
-    RecordReady { session: SessionEntry },
-    /// Record session burned to disc.
-    RecordBurned,
-}
-
 // ── OpAction ────────────────────────────────────────────────────────────────
 
 /// Return type from `OpContext::handle_key`, replacing most `Action` variants.
@@ -81,14 +63,13 @@ pub enum OpAction {
     WriteIntent,
     /// Start the record burn.
     StartRecordBurn,
-    /// Copy artifacts to shuttle USB.
-    WriteShuttle,
+    /// Execute the pending crypto operation (sign CSR, sign CRL, etc.).
+    /// The App dispatches based on `current_op`.
+    ExecuteOp,
     /// Operation complete — return to operation select.
     Done,
     /// Abort — return to operation select.
     Abort,
-    /// Quit the application.
-    Quit,
 }
 
 /// What action a confirmation dialog should trigger on confirm.
@@ -97,7 +78,6 @@ pub enum ConfirmTarget {
     WriteIntent,
     StartRecordBurn,
     Abort,
-    Quit,
 }
 
 // ── OpContext trait ──────────────────────────────────────────────────────────
@@ -130,6 +110,47 @@ pub trait OpContext {
     /// Render any overlay components (ShareReveal, ShareInput, CustodianSetup)
     /// on top of the content area.
     fn render_overlay(&self, _frame: &mut Frame, _area: Rect) {}
+
+    /// Called by `tick_intent_burn` when the intent session is written successfully.
+    /// The context should advance its phase (e.g. to Quorum).
+    fn advance_after_intent_burn(&mut self, _shared: &mut AppShared<'_>) {}
+
+    /// Execute the HSM crypto operation after clock reconfirm.
+    /// Default: starts the record burn directly (no crypto needed).
+    fn execute(&mut self, _shared: &mut AppShared<'_>) -> OpAction {
+        OpAction::StartRecordBurn
+    }
+
+    /// Build the intent audit event (event_name, json_data) for this operation.
+    fn build_intent_audit_event(
+        &self,
+        _genesis_hex: &str,
+        _shared: &AppShared<'_>,
+    ) -> Option<(String, serde_json::Value)> {
+        None
+    }
+
+    /// Build the record session for disc burn.
+    fn build_record_session(
+        &mut self,
+        _dir_name: String,
+        _ts: SystemTime,
+        _staging: &Path,
+        _shared: &mut AppShared<'_>,
+    ) -> Option<crate::media::SessionEntry> {
+        None
+    }
+
+    /// Returns `true` if this operation produces shuttle USB artifacts.
+    fn has_shuttle_artifacts(&self) -> bool {
+        false
+    }
+
+    /// Write artifacts to shuttle USB.
+    /// Returns `true` if artifacts were written, `false` if no artifacts needed.
+    fn write_shuttle_artifacts(&self, _shuttle: &Path) -> Result<bool, String> {
+        Ok(false)
+    }
 }
 
 // ── AppShared ───────────────────────────────────────────────────────────────
@@ -142,7 +163,6 @@ pub struct AppShared<'a> {
     pub hw: &'a mut HardwareManager,
     pub disc: &'a mut DiscContext,
     pub profile: Option<&'a Profile>,
-    pub profile_toml_bytes: Option<&'a [u8]>,
     pub shuttle_mount: &'a Path,
     pub skip_disc: bool,
     pub confirmed_time: &'a mut Option<SystemTime>,
@@ -196,6 +216,34 @@ impl OpContext for ActiveOperation {
     fn render_overlay(&self, frame: &mut Frame, area: Rect) {
         delegate_op!(self, render_overlay, frame, area)
     }
+    fn advance_after_intent_burn(&mut self, shared: &mut AppShared<'_>) {
+        delegate_op!(self, advance_after_intent_burn, shared)
+    }
+    fn execute(&mut self, shared: &mut AppShared<'_>) -> OpAction {
+        delegate_op!(self, execute, shared)
+    }
+    fn build_intent_audit_event(
+        &self,
+        genesis_hex: &str,
+        shared: &AppShared<'_>,
+    ) -> Option<(String, serde_json::Value)> {
+        delegate_op!(self, build_intent_audit_event, genesis_hex, shared)
+    }
+    fn build_record_session(
+        &mut self,
+        dir_name: String,
+        ts: SystemTime,
+        staging: &Path,
+        shared: &mut AppShared<'_>,
+    ) -> Option<crate::media::SessionEntry> {
+        delegate_op!(self, build_record_session, dir_name, ts, staging, shared)
+    }
+    fn has_shuttle_artifacts(&self) -> bool {
+        delegate_op!(self, has_shuttle_artifacts)
+    }
+    fn write_shuttle_artifacts(&self, shuttle: &Path) -> Result<bool, String> {
+        delegate_op!(self, write_shuttle_artifacts, shuttle)
+    }
 }
 
 impl AppShared<'_> {
@@ -206,5 +254,162 @@ impl AppShared<'_> {
         }
         *self.status = s;
         *self.content_scroll = 0;
+    }
+
+    /// Reconstruct PIN from collected shares, verify hash, and login to the HSM.
+    ///
+    /// On success stores the hex PIN in `self.pin_buf` and populates
+    /// `self.hw.actor`.  Returns `Err(msg)` on any failure.
+    pub fn quorum_complete(&mut self, shares: &[anodize_sss::Share]) -> Result<(), String> {
+        use anodize_hsm::{create_backend, HsmActor};
+        use secrecy::SecretString;
+
+        let threshold = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.threshold)
+            .unwrap_or(2);
+        let pin_bytes = anodize_sss::reconstruct(shares, threshold)
+            .map_err(|e| format!("PIN reconstruction failed: {e}"))?;
+
+        let expected = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.pin_verify_hash.as_str())
+            .unwrap_or("");
+        if !anodize_sss::verify_pin_hash(&pin_bytes, expected) {
+            return Err("PIN verify hash mismatch — shares may be corrupted.".into());
+        }
+
+        let pin_hex = hex::encode(&pin_bytes);
+        let pin = SecretString::new(pin_hex.clone());
+
+        let cfg = self
+            .profile
+            .as_ref()
+            .map(|p| &p.hsm)
+            .ok_or_else(|| "No profile loaded".to_string())?;
+
+        let backend = create_backend(cfg.backend).map_err(|e| format!("HSM backend error: {e}"))?;
+
+        let fleet_ids: Vec<String> = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| {
+                s.fleet
+                    .active_device_ids()
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let (device_id, hsm) = if fleet_ids.is_empty() {
+            let hsm = backend
+                .open_session(&cfg.token_label, &pin)
+                .map_err(|e| format!("HSM open/login failed: {e}"))?;
+            (None, hsm)
+        } else {
+            let inventory = anodize_hsm::create_inventory(cfg.backend)
+                .map_err(|e| format!("HSM inventory error: {e}"))?;
+            let id_refs: Vec<&str> = fleet_ids.iter().map(|s| s.as_str()).collect();
+            let (did, hsm) =
+                anodize_hsm::open_session_any_recognized(&*backend, &*inventory, &id_refs, &pin)
+                    .map_err(|e| format!("Fleet login failed: {e}"))?;
+            tracing::info!(device_id = %did, "Fleet login: authenticated to known device");
+            (Some(did), hsm)
+        };
+
+        if let Some(ref did) = device_id {
+            if let Some(ref mut state) = self.disc.session_state {
+                let now = {
+                    let d = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default();
+                    format!("{}Z", d.as_secs())
+                };
+                for dev in &mut state.fleet.devices {
+                    if dev.device_id == *did {
+                        dev.last_seen_at = now.clone();
+                    }
+                }
+            }
+        }
+
+        let actor = HsmActor::spawn(hsm);
+        self.hw.actor = Some(actor);
+        self.hw.device_id = device_id;
+        self.hw.hsm_state =
+            crate::components::status_bar::HwState::Ready("authenticated via SSS quorum".into());
+        *self.pin_buf = pin_hex;
+        Ok(())
+    }
+
+    /// Update `session_state` to reflect the outcome of the current operation.
+    /// Must be called before `build_state_json_file` in record session builders.
+    pub fn update_session_state_for_record(
+        &mut self,
+        audit_bytes: &[u8],
+        crl_number: Option<u64>,
+        revocation_list: &[anodize_config::RevocationEntry],
+    ) {
+        let last_hash = audit_bytes
+            .split(|&b| b == b'\n')
+            .rev()
+            .find(|line| !line.is_empty())
+            .and_then(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+            .and_then(|v| {
+                v.get("entry_hash")
+                    .and_then(|h| h.as_str().map(String::from))
+            })
+            .unwrap_or_default();
+
+        if let Some(ref mut state) = self.disc.session_state {
+            state.last_audit_hash = last_hash;
+            if let Some(n) = crl_number {
+                state.crl_number = n;
+            }
+            if !revocation_list.is_empty() {
+                state.revocation_list = revocation_list.to_vec();
+            }
+            if let Some(ref actor) = self.hw.actor {
+                match actor.get_audit_log() {
+                    Ok(snapshot) => {
+                        if let Some(last) = snapshot.entries.last() {
+                            state.last_hsm_log_seq = Some(last.item as u64);
+                            tracing::info!(seq = last.item, "recorded last_hsm_log_seq");
+                            if let Err(e) = actor.drain_audit_log(last.item) {
+                                tracing::warn!(seq = last.item, "drain_audit_log failed: {e}");
+                            }
+                        }
+                    }
+                    Err(e) => tracing::warn!("could not read HSM audit log: {e}"),
+                }
+            }
+        }
+    }
+
+    /// Build a STATE.JSON IsoFile from the current session_state.
+    pub fn build_state_json_file(&self) -> Option<crate::media::IsoFile> {
+        self.disc
+            .session_state
+            .as_ref()
+            .map(|state| crate::media::IsoFile {
+                name: anodize_config::state::STATE_FILENAME.into(),
+                data: state.to_json(),
+            })
+    }
+
+    /// Returns `true` if the operator's clock confirmation is recent enough.
+    pub fn clock_is_fresh(&self) -> bool {
+        self.confirmed_time
+            .as_ref()
+            .map(|t| {
+                t.elapsed().unwrap_or(std::time::Duration::ZERO) < crate::app::CLOCK_DRIFT_THRESHOLD
+            })
+            .unwrap_or(false)
     }
 }
