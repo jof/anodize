@@ -45,6 +45,23 @@ pub enum ActiveOperation {
 pub struct RefreshCtx;
 
 impl ActiveOperation {
+    /// Which `Operation` variant this context corresponds to.
+    pub fn operation(&self) -> crate::action::Operation {
+        use crate::action::Operation;
+        match self {
+            Self::InitRoot(_) => Operation::InitRoot,
+            Self::SignCsr(_) => Operation::SignCsr,
+            Self::RevokeCert(_) => Operation::RevokeCert,
+            Self::IssueCrl(_) => Operation::IssueCrl,
+            Self::RekeyShares(_) => Operation::RekeyShares,
+            Self::KeyBackup(_) => Operation::KeyBackup,
+            Self::MigrateDisc(_) => Operation::MigrateDisc,
+            Self::ValidateDisc(_) => Operation::ValidateDisc,
+            #[cfg(feature = "dev-burn")]
+            Self::RefreshDisc(_) => Operation::RefreshDisc,
+        }
+    }
+
     /// SHA-256 fingerprint of the signed cert (if produced by this operation).
     pub fn fingerprint(&self) -> Option<&str> {
         match self {

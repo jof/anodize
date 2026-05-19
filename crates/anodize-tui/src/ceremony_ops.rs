@@ -244,7 +244,7 @@ impl App {
                     op.advance_after_intent_burn(&mut shared);
                     self.active_op = Some(op);
                     // KeyBackup executes during advance and needs an immediate record burn.
-                    if matches!(self.current_op, Some(Operation::KeyBackup)) {
+                    if matches!(self.current_op(), Some(Operation::KeyBackup)) {
                         self.do_start_burn();
                     } else {
                         self.ceremony.state = CeremonyPhase::ActiveOp;
@@ -289,7 +289,7 @@ impl App {
                     .as_deref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| "/run/anodize/staging".into());
-                let op_label = match self.current_op {
+                let op_label = match self.current_op() {
                     Some(Operation::InitRoot) => "Root init",
                     Some(Operation::SignCsr) => "Intermediate cert",
                     Some(Operation::RevokeCert) => "Revocation + CRL",
@@ -305,7 +305,7 @@ impl App {
                 // After a disc refresh, clear prior sessions so the TUI
                 // treats the disc as fresh for the next InitRoot.
                 #[cfg(feature = "dev-burn")]
-                if self.current_op == Some(Operation::RefreshDisc) {
+                if self.current_op() == Some(Operation::RefreshDisc) {
                     self.disc.prior_sessions.clear();
                     self.disc.session_state = None;
                 }
@@ -403,14 +403,12 @@ impl App {
     // ── Operation selection ───────────────────────────────────────────────────
 
     pub(crate) fn do_select_operation(&mut self, op: Operation) {
-        self.current_op = Some(op.clone());
         match op {
             Operation::InitRoot => {
                 if self.disc.session_state.is_some() {
                     self.set_status(
                         "Root already initialized on this disc. Use RekeyShares to change PIN.",
                     );
-                    self.current_op = None;
                     self.ceremony.state = CeremonyPhase::OperationSelect;
                     return;
                 }
@@ -428,13 +426,11 @@ impl App {
                             "Cannot read csr.der from shuttle: {e} — \
                              ensure csr.der is on the USB and re-insert it."
                         ));
-                        self.current_op = None;
                         return;
                     }
                 };
                 if let Err(e) = x509_cert::request::CertReq::from_der(&csr_bytes) {
                     self.set_status(format!("csr.der is not a valid DER-encoded CSR: {e}"));
-                    self.current_op = None;
                     return;
                 }
                 let profiles = self
@@ -446,7 +442,6 @@ impl App {
                     self.set_status(
                         "No [[cert_profiles]] defined in profile.toml. Add at least one profile.",
                     );
-                    self.current_op = None;
                     return;
                 }
                 let profile_lines: Vec<String> = profiles
@@ -479,7 +474,6 @@ impl App {
                 let root_cert_der = load_root_cert_der_from_sessions(&self.disc.prior_sessions);
                 if root_cert_der.is_none() {
                     self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
-                    self.current_op = None;
                     return;
                 }
                 let revocation_list = load_revocation_from_sessions(&self.disc.prior_sessions);
@@ -502,7 +496,6 @@ impl App {
                 let root_cert_der = load_root_cert_der_from_sessions(&self.disc.prior_sessions);
                 if root_cert_der.is_none() {
                     self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
-                    self.current_op = None;
                     return;
                 }
                 let revocation_list = load_revocation_from_sessions(&self.disc.prior_sessions);
@@ -519,7 +512,6 @@ impl App {
             Operation::RekeyShares => {
                 if self.disc.session_state.is_none() {
                     self.set_status("No STATE.JSON — run InitRoot first.");
-                    self.current_op = None;
                     self.ceremony.state = CeremonyPhase::OperationSelect;
                     return;
                 }
@@ -544,7 +536,6 @@ impl App {
             Operation::KeyBackup => {
                 if self.disc.session_state.is_none() {
                     self.set_status("No STATE.JSON \u{2014} run InitRoot first.");
-                    self.current_op = None;
                     self.ceremony.state = CeremonyPhase::OperationSelect;
                     return;
                 }
@@ -708,14 +699,12 @@ impl App {
 
         let Some(dev) = &self.disc.optical_dev else {
             self.set_status("No optical device — cannot refresh");
-            self.current_op = None;
             self.ceremony.state = CeremonyPhase::OperationSelect;
             return;
         };
 
         if self.disc.sessions_remaining == Some(0) {
             self.set_status("Disc has no remaining sessions");
-            self.current_op = None;
             self.ceremony.state = CeremonyPhase::OperationSelect;
             return;
         }
@@ -912,7 +901,6 @@ mod tests {
 
     fn test_app() -> crate::app::App {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
-        app.current_op = Some(Operation::InitRoot);
         app.pin_buf = hex::encode(vec![0u8; 32]);
         app
     }
@@ -1210,7 +1198,7 @@ mod tests {
             CeremonyPhase::OperationSelect,
             "InitRootAbort should reset to OperationSelect"
         );
-        assert!(app.current_op.is_none());
+        assert!(app.current_op().is_none());
     }
 
     // ── Migrate disc tests ──────────────────────────────────────────────
@@ -1234,7 +1222,6 @@ mod tests {
 
     fn migrate_app_with_sessions(session_count: usize) -> crate::app::App {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
-        app.current_op = Some(Operation::MigrateDisc);
 
         let (audit_bytes, _hash) = make_audit_log_bytes();
         for i in 0..session_count {
@@ -1403,7 +1390,6 @@ mod tests {
     #[test]
     fn migrate_build_burn_session_empty_returns_none() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
-        app.current_op = Some(Operation::MigrateDisc);
         // migrate_sessions is empty — no source data.
 
         let staging =
@@ -1532,7 +1518,6 @@ mod tests {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
-        app.current_op = Some(Operation::SignCsr);
         // Set up a SignCsrCtx in CertPreview phase via ActiveOp.
         let mut ctx = SignCsrCtx::new(vec![], None, vec!["  [1]  test".into()]);
         ctx.phase = SignCsrPhase::CertPreview;
@@ -1558,7 +1543,6 @@ mod tests {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
-        app.current_op = Some(Operation::SignCsr);
         app.ceremony.state = CeremonyPhase::ClockReconfirm;
 
         let action = app.handle_key_event(key(KeyCode::Esc));
@@ -1598,7 +1582,6 @@ mod tests {
     #[test]
     fn ceremony_cancel_resets_state() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
-        app.current_op = Some(Operation::RevokeCert);
         let ctx = RevokeCertCtx::new(vec![], Some(1), vec![], None);
         app.active_op = Some(crate::ops::ActiveOperation::RevokeCert(ctx));
         app.ceremony.state = CeremonyPhase::ActiveOp;
@@ -1608,7 +1591,7 @@ mod tests {
         app.update(Action::CeremonyCancel);
 
         assert_eq!(app.ceremony.state, CeremonyPhase::OperationSelect);
-        assert!(app.current_op.is_none());
+        assert!(app.current_op().is_none());
     }
 
     // ── Clock drift guard tests ────────────────────────────────────────
@@ -1641,8 +1624,6 @@ mod tests {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.confirmed_time = Some(std::time::SystemTime::now());
         app.ceremony.state = CeremonyPhase::Execute;
-        app.current_op = Some(Operation::InitRoot);
-
         app.update(Action::ConfirmCertBurn);
 
         // No confirmation dialog — proceeds directly to do_start_burn().
@@ -1659,8 +1640,6 @@ mod tests {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.confirmed_time = Some(std::time::SystemTime::now() - crate::app::CLOCK_DRIFT_THRESHOLD);
         app.ceremony.state = CeremonyPhase::Execute;
-        app.current_op = Some(Operation::InitRoot);
-
         app.update(Action::ConfirmCertBurn);
 
         assert!(
@@ -1680,8 +1659,6 @@ mod tests {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.pending_burn_reconfirm = true;
         app.ceremony.state = CeremonyPhase::ClockReconfirm;
-        app.current_op = Some(Operation::InitRoot);
-
         app.update(Action::ReconfirmClock);
 
         assert!(
@@ -1703,7 +1680,6 @@ mod tests {
         app.setup_complete = true;
         app.pending_burn_reconfirm = true;
         app.ceremony.state = CeremonyPhase::ClockReconfirm;
-        app.current_op = Some(Operation::InitRoot);
 
         // Esc opens the abort confirm dialog.
         let action = app.handle_key_event(key(KeyCode::Esc));
@@ -1757,7 +1733,6 @@ mod tests {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
-        app.current_op = Some(Operation::ValidateDisc);
         // Set up a ValidateCtx via the new ActiveOp system.
         app.active_op = Some(crate::ops::ActiveOperation::ValidateDisc(
             crate::ops::validate_disc::ValidateCtx::run(&app.make_shared()),
@@ -1784,7 +1759,6 @@ mod tests {
         ] {
             let mut app =
                 crate::app::App::new(PathBuf::from("/tmp/nonexistent-shuttle-path"), true);
-            app.current_op = Some(op.clone());
             app.ceremony.state = CeremonyPhase::DiscDone;
 
             app.do_write_shuttle();
@@ -1803,7 +1777,6 @@ mod tests {
         let dir = std::env::temp_dir().join("anodize-test-stale-shuttle");
         let _ = std::fs::create_dir_all(&dir);
         let mut app = crate::app::App::new(dir.clone(), true);
-        app.current_op = Some(Operation::InitRoot);
         // Provide an active_op with artifacts so write_shuttle_artifacts returns Ok(true).
         let mut ctx = crate::ops::init_root::InitRootCtx::new();
         ctx.cert_der = Some(vec![0xDE, 0xAD]);
@@ -1834,7 +1807,6 @@ mod tests {
     #[test]
     fn shuttle_write_fails_on_nonexistent_path() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/anodize-test-nonexistent-42"), true);
-        app.current_op = Some(Operation::SignCsr);
         // Provide an active_op with artifacts so write_shuttle_artifacts returns Ok(true).
         let mut ctx = crate::ops::sign_csr::SignCsrCtx::new(vec![], None, vec![]);
         ctx.cert_der = Some(vec![0xCA, 0xFE]);

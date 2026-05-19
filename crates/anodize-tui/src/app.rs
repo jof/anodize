@@ -118,10 +118,7 @@ pub struct App {
     pub profile: Option<Profile>,
     pub profile_toml_bytes: Option<Vec<u8>>,
 
-    // Active operation (legacy — will be removed once all ops migrated)
-    pub current_op: Option<Operation>,
-
-    // New per-operation context (replaces current_op + data + sss)
+    // Per-operation context — owns all op-specific state and phase.
     pub active_op: Option<ActiveOperation>,
 
     // Temporary PIN buffer — used internally by SSS operations, never displayed
@@ -163,13 +160,17 @@ impl App {
             confirmed_time: None,
             profile: None,
             profile_toml_bytes: None,
-            current_op: None,
             active_op: None,
             pin_buf: String::new(),
             confirm_dialog: None,
             pending_burn_reconfirm: false,
             content_scroll: 0,
         }
+    }
+
+    /// Derive which `Operation` is active from `active_op`.
+    pub fn current_op(&self) -> Option<Operation> {
+        self.active_op.as_ref().map(|op| op.operation())
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
@@ -496,7 +497,6 @@ impl App {
                                     self.show_abort_confirm(Action::CeremonyCancel);
                                 } else {
                                     self.active_op = None;
-                                    self.current_op = None;
                                     self.ceremony.state = CeremonyPhase::OperationSelect;
                                 }
                                 return Action::Noop;
@@ -715,7 +715,6 @@ impl App {
             // InitRoot ceremony abort (from PostCommitError Esc)
             Action::InitRootAbort => {
                 self.active_op = None;
-                self.current_op = None;
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.set_status("InitRoot aborted.");
             }
@@ -778,7 +777,6 @@ impl App {
 
             Action::CeremonyCancel => {
                 self.active_op = None;
-                self.current_op = None;
                 self.pending_burn_reconfirm = false;
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.set_status("Cancelled.");

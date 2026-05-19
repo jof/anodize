@@ -127,9 +127,9 @@ impl CeremonyMode {
             CeremonyPhase::OperationSelect => "Select Operation",
             CeremonyPhase::Commit => "Committing Intent to Disc\u{2026}",
             CeremonyPhase::PostCommitError => "Post-Commit Error",
-            CeremonyPhase::Execute => Self::execute_phase_title(app.current_op),
+            CeremonyPhase::Execute => Self::execute_phase_title(app.current_op()),
             CeremonyPhase::BurningDisc => "Writing Session\u{2026}",
-            CeremonyPhase::DiscDone => match app.current_op {
+            CeremonyPhase::DiscDone => match app.current_op() {
                 Some(Operation::InitRoot) => "Root Init Written",
                 Some(Operation::SignCsr) => "Certificate Written",
                 Some(Operation::RevokeCert) => "Revocation Record Written",
@@ -309,7 +309,7 @@ impl CeremonyMode {
                     lines.push("  Initial CRL #1 (empty) will be included in this session.".into());
                 }
                 lines.push(String::new());
-                lines.push(Self::fingerprint_instruction(app.current_op).into());
+                lines.push(Self::fingerprint_instruction(app.current_op()).into());
                 lines.push(String::new());
                 lines.push("  [1]  Proceed to disc write".into());
                 lines.push("  [Esc]  Abort".into());
@@ -341,7 +341,7 @@ impl CeremonyMode {
             }
 
             CeremonyPhase::DiscDone => {
-                let op_label = match app.current_op {
+                let op_label = match app.current_op() {
                     Some(Operation::InitRoot) => "Root init",
                     Some(Operation::SignCsr) => "Intermediate certificate",
                     Some(Operation::RevokeCert) => "Revocation record + CRL",
@@ -364,7 +364,7 @@ impl CeremonyMode {
                     lines.push(format!("  Fingerprint: {fp}"));
                 }
                 lines.push(String::new());
-                match app.current_op {
+                match app.current_op() {
                     Some(Operation::MigrateDisc) => {
                         lines.push("  [Q]  Quit (migration complete; no USB export)".into());
                     }
@@ -413,7 +413,7 @@ impl CeremonyMode {
                     String::new(),
                     "  Ceremony complete.".into(),
                     String::new(),
-                    match app.current_op {
+                    match app.current_op() {
                         Some(Operation::MigrateDisc) => {
                             "  Disc migration finished. Store new disc and archive old disc.".into()
                         }
