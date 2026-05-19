@@ -1,0 +1,8 @@
+{
+  "verity_root_hash": "934ba55e347c065a7a6ff84feb7cb2ee344cab10af557d8a3ece6c8517e01f67",
+  "squashfs_sha256":  "53009e6b00a7a83ac8d12e5ef4528780e1c09d68ec36454bffdbd09553df6c47",
+  "kernel_sha256":    "16aa7caaa576bd9747491d543813fa040389bd714bf9c3c4b740cad8b0a7aa07",
+  "initrd_sha256":    "bc76eaf6e21400bfe06bd096f0fbe4f739962cd0585d6cf2232394a2730ac330",
+  "flake_rev":        "ea68235a07272fde83af67ff8ff0ba57ae650dee",
+  "nixpkgs_rev":      "10e7ad5bbcb421fe07e3a4ad53a634b0cd57ffac"
+}

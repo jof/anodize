@@ -65,6 +65,7 @@ pub enum DiscTransaction {
 // ── OpAction ────────────────────────────────────────────────────────────────
 
 /// Return type from `OpContext::handle_key`, replacing most `Action` variants.
+#[derive(Debug)]
 pub enum OpAction {
     /// No-op — event consumed, no side effects.
     Noop,
@@ -110,7 +111,9 @@ pub trait OpContext {
     fn title(&self) -> &str;
 
     /// Build the body lines for the content area.
-    fn build_body(&self, shared: &AppShared<'_>) -> Vec<String>;
+    ///
+    /// The context should contain all data needed for rendering.
+    fn build_body(&self) -> Vec<String>;
 
     /// Handle a key event. Returns an `OpAction` describing what the app should do.
     fn handle_key(&mut self, key: KeyEvent, shared: &mut AppShared<'_>) -> OpAction;
@@ -147,6 +150,52 @@ pub struct AppShared<'a> {
     pub status: &'a mut String,
     pub log_lines: &'a mut Vec<String>,
     pub content_scroll: &'a mut u16,
+}
+
+// ── ActiveOperation delegation ──────────────────────────────────────────────
+
+macro_rules! delegate_op {
+    ($self:expr, $method:ident $(, $arg:expr)*) => {
+        match $self {
+            ActiveOperation::InitRoot(ctx) => ctx.$method($($arg),*),
+            ActiveOperation::SignCsr(ctx) => ctx.$method($($arg),*),
+            ActiveOperation::RevokeCert(ctx) => ctx.$method($($arg),*),
+            ActiveOperation::IssueCrl(ctx) => ctx.$method($($arg),*),
+            ActiveOperation::RekeyShares(ctx) => ctx.$method($($arg),*),
+            ActiveOperation::KeyBackup(ctx) => ctx.$method($($arg),*),
+            ActiveOperation::MigrateDisc(ctx) => ctx.$method($($arg),*),
+            ActiveOperation::ValidateDisc(ctx) => ctx.$method($($arg),*),
+            #[cfg(feature = "dev-burn")]
+            ActiveOperation::RefreshDisc(_) => unimplemented!("RefreshDisc"),
+        }
+    };
+}
+
+impl OpContext for ActiveOperation {
+    fn phase_index(&self) -> usize {
+        delegate_op!(self, phase_index)
+    }
+    fn title(&self) -> &str {
+        delegate_op!(self, title)
+    }
+    fn build_body(&self) -> Vec<String> {
+        delegate_op!(self, build_body)
+    }
+    fn handle_key(&mut self, key: KeyEvent, shared: &mut AppShared<'_>) -> OpAction {
+        delegate_op!(self, handle_key, key, shared)
+    }
+    fn holds_ephemeral_state(&self) -> bool {
+        delegate_op!(self, holds_ephemeral_state)
+    }
+    fn needs_abort_confirmation(&self) -> bool {
+        delegate_op!(self, needs_abort_confirmation)
+    }
+    fn in_text_entry(&self) -> bool {
+        delegate_op!(self, in_text_entry)
+    }
+    fn render_overlay(&self, frame: &mut Frame, area: Rect) {
+        delegate_op!(self, render_overlay, frame, area)
+    }
 }
 
 impl AppShared<'_> {

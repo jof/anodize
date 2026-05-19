@@ -56,6 +56,8 @@ pub enum CeremonyPhase {
     Quorum,
     /// Phase 4b: re-confirm clock before signing.
     ClockReconfirm,
+    /// Delegation: the active operation context owns state + rendering.
+    ActiveOp,
     /// Phase 5: HSM crypto operation complete, verify result.
     Execute,
     /// Post-commit error: HSM/keygen/cert-build failed after intent write.
@@ -177,6 +179,8 @@ impl CeremonyMode {
             CeremonyPhase::Execute => 4,
             // 5 — Export (write record to disc + shuttle copy)
             CeremonyPhase::BurningDisc | CeremonyPhase::DiscDone | CeremonyPhase::Done => 5,
+            // Delegated — ask the active operation context
+            CeremonyPhase::ActiveOp => 1,
         }
     }
 
@@ -261,6 +265,10 @@ impl CeremonyMode {
             CeremonyPhase::Planning(PlanningState::ValidateReport) => "Disc Validation Report",
             CeremonyPhase::Planning(PlanningState::ValidateHsmResult) => {
                 "HSM Audit Log Cross-Check"
+            }
+            CeremonyPhase::ActiveOp => {
+                // Title comes from the active operation context; rendered in render_with_app.
+                "Operation"
             }
             CeremonyPhase::Quorum => "Quorum \u{2014} Reconstruct PIN",
             CeremonyPhase::ClockReconfirm => "Clock Re-confirm \u{2014} Verify Before Signing",
@@ -861,6 +869,7 @@ impl CeremonyMode {
 
             CeremonyPhase::Planning(PlanningState::ValidateReport)
             | CeremonyPhase::Planning(PlanningState::ValidateHsmResult) => {
+                // Legacy path — kept for backwards compat during migration.
                 let mut lines = Vec::new();
                 lines.push(String::new());
                 for line in &app.data.validate_report_lines {
@@ -881,6 +890,11 @@ impl CeremonyMode {
                     lines.push("  [Esc]  Done".into());
                 }
                 lines
+            }
+
+            CeremonyPhase::ActiveOp => {
+                // Body is rendered by App via OpContext; this shouldn't be reached.
+                vec![String::new(), "  (delegated to active operation)".into()]
             }
 
             CeremonyPhase::Done => {
@@ -1034,6 +1048,8 @@ impl Component for CeremonyMode {
                 KeyCode::Esc => Action::CeremonyCancel,
                 _ => Action::Noop,
             },
+
+            CeremonyPhase::ActiveOp => Action::Noop, // handled by App via OpContext
 
             CeremonyPhase::Quorum => Action::Noop, // handled by ShareInput component
 

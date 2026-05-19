@@ -80,7 +80,7 @@ impl OpContext for RevokeCertCtx {
         }
     }
 
-    fn build_body(&self, _shared: &AppShared<'_>) -> Vec<String> {
+    fn build_body(&self) -> Vec<String> {
         vec![String::new(), "  (RevokeCert — not yet wired)".into()]
     }
 

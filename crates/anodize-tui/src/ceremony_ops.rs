@@ -783,7 +783,11 @@ impl App {
                 self.set_status("Enter threshold shares to reconstruct the HSM PIN for backup.");
             }
             Operation::ValidateDisc => {
-                self.do_validate_disc();
+                let shared = self.make_shared();
+                let ctx = crate::ops::validate_disc::ValidateCtx::run(&shared);
+                self.active_op = Some(crate::ops::ActiveOperation::ValidateDisc(ctx));
+                self.ceremony.state = CeremonyPhase::ActiveOp;
+                self.set_status("Disc validation complete. Review findings.");
             }
             #[cfg(feature = "dev-burn")]
             Operation::RefreshDisc => {
@@ -3130,6 +3134,28 @@ impl App {
             }
             _ => {}
         }
+        // ActiveOp: delegate rendering to the per-operation context.
+        if self.ceremony.state == CeremonyPhase::ActiveOp {
+            if let Some(ref op) = self.active_op {
+                use crate::ops::OpContext;
+                let title = op.title().to_string();
+                let content = op.build_body();
+                let block = ratatui::widgets::Block::default()
+                    .borders(ratatui::widgets::Borders::ALL)
+                    .title(title)
+                    .style(crate::theme::BLOCK)
+                    .border_style(crate::theme::BORDER)
+                    .title_style(crate::theme::TITLE);
+                let lines: Vec<ratatui::text::Line> =
+                    content.into_iter().map(ratatui::text::Line::from).collect();
+                let para = ratatui::widgets::Paragraph::new(ratatui::text::Text::from(lines))
+                    .block(block)
+                    .wrap(ratatui::widgets::Wrap { trim: false })
+                    .scroll((self.content_scroll, 0));
+                frame.render_widget(para, area);
+            }
+            return;
+        }
         self.ceremony.render_with_app(frame, area, self);
     }
 }
@@ -3957,8 +3983,11 @@ mod tests {
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
         app.current_op = Some(Operation::ValidateDisc);
-        app.ceremony.state =
-            CeremonyPhase::Planning(crate::modes::ceremony::PlanningState::ValidateReport);
+        // Set up a ValidateCtx via the new ActiveOp system.
+        app.active_op = Some(crate::ops::ActiveOperation::ValidateDisc(
+            crate::ops::validate_disc::ValidateCtx::run(&app.make_shared()),
+        ));
+        app.ceremony.state = CeremonyPhase::ActiveOp;
 
         let action = app.handle_key_event(key(KeyCode::Esc));
         app.update(action);

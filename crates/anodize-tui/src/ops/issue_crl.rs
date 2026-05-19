@@ -62,7 +62,7 @@ impl OpContext for IssueCrlCtx {
         }
     }
 
-    fn build_body(&self, _shared: &AppShared<'_>) -> Vec<String> {
+    fn build_body(&self) -> Vec<String> {
         vec![String::new(), "  (IssueCrl — not yet wired)".into()]
     }
 

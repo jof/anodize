@@ -28,6 +28,7 @@ use crate::modes::ceremony::CeremonyMode;
 use crate::modes::ceremony::{CeremonyPhase, PlanningState};
 use crate::modes::setup::{SetupMode, SetupPhase};
 use crate::modes::utilities::UtilitiesMode;
+use crate::ops::{ActiveOperation, OpContext};
 
 /// Disc / session management state.
 pub struct DiscContext {
@@ -209,8 +210,11 @@ pub struct App {
     pub profile: Option<Profile>,
     pub profile_toml_bytes: Option<Vec<u8>>,
 
-    // Active operation
+    // Active operation (legacy — will be removed once all ops migrated)
     pub current_op: Option<Operation>,
+
+    // New per-operation context (replaces current_op + data + sss)
+    pub active_op: Option<ActiveOperation>,
 
     // Temporary PIN buffer — used internally by SSS operations, never displayed
     pub pin_buf: String,
@@ -254,6 +258,7 @@ impl App {
             profile: None,
             profile_toml_bytes: None,
             current_op: None,
+            active_op: None,
             pin_buf: String::new(),
             confirm_dialog: None,
             pending_burn_reconfirm: false,
@@ -268,6 +273,25 @@ impl App {
         }
         self.status = s;
         self.content_scroll = 0;
+    }
+
+    /// Construct an `AppShared` borrow-split view for `OpContext` methods.
+    ///
+    /// Caller must ensure `self.active_op` is not simultaneously borrowed mutably.
+    pub fn make_shared(&mut self) -> crate::ops::AppShared<'_> {
+        crate::ops::AppShared {
+            hw: &mut self.hw,
+            disc: &mut self.disc,
+            profile: self.profile.as_ref(),
+            profile_toml_bytes: self.profile_toml_bytes.as_deref(),
+            shuttle_mount: &self.shuttle_mount,
+            skip_disc: self.skip_disc,
+            confirmed_time: &mut self.confirmed_time,
+            pin_buf: &mut self.pin_buf,
+            status: &mut self.status,
+            log_lines: &mut self.log_lines,
+            content_scroll: &mut self.content_scroll,
+        }
     }
 
     /// Returns `true` if the operator's clock confirmation is recent enough
@@ -292,7 +316,18 @@ impl App {
 
         // Ctrl+C: quit with confirmation (blocked during ephemeral ceremony phases)
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            if self.mode == Mode::Ceremony && self.ceremony.holds_ephemeral_state() {
+            let blocked = if self.mode == Mode::Ceremony {
+                if self.ceremony.state == CeremonyPhase::ActiveOp {
+                    self.active_op
+                        .as_ref()
+                        .map_or(false, |op| op.holds_ephemeral_state())
+                } else {
+                    self.ceremony.holds_ephemeral_state()
+                }
+            } else {
+                false
+            };
+            if blocked {
                 self.set_status("Ctrl+C blocked: press Esc to go back to the menu first.");
                 return Action::Noop;
             }
@@ -306,7 +341,14 @@ impl App {
         }
 
         // Log view toggle (except during text entry)
-        let in_text_entry = self.mode == Mode::Ceremony && self.ceremony.in_text_entry();
+        let in_text_entry = self.mode == Mode::Ceremony
+            && if self.ceremony.state == CeremonyPhase::ActiveOp {
+                self.active_op
+                    .as_ref()
+                    .map_or(false, |op| op.in_text_entry())
+            } else {
+                self.ceremony.in_text_entry()
+            };
 
         if !in_text_entry {
             match key.code {
@@ -783,6 +825,43 @@ impl App {
         match self.mode {
             Mode::Setup => self.setup.handle_key_event(key),
             Mode::Ceremony => {
+                // ActiveOp: delegate key handling to the per-operation context.
+                if self.ceremony.state == CeremonyPhase::ActiveOp {
+                    if let Some(mut op) = self.active_op.take() {
+                        let mut shared = self.make_shared();
+                        let result = op.handle_key(key, &mut shared);
+                        self.active_op = Some(op);
+                        match result {
+                            crate::ops::OpAction::Noop => return Action::Noop,
+                            crate::ops::OpAction::Done => {
+                                self.active_op = None;
+                                self.ceremony.state = CeremonyPhase::Done;
+                                return Action::Noop;
+                            }
+                            crate::ops::OpAction::Abort => {
+                                self.active_op = None;
+                                self.ceremony.state = CeremonyPhase::OperationSelect;
+                                return Action::Noop;
+                            }
+                            crate::ops::OpAction::SetStatus(msg) => {
+                                return Action::SetStatus(msg);
+                            }
+                            crate::ops::OpAction::Quit => {
+                                return Action::Quit;
+                            }
+                            // Future: wire these up as operations are migrated.
+                            crate::ops::OpAction::ShowConfirm { .. }
+                            | crate::ops::OpAction::WriteIntent
+                            | crate::ops::OpAction::StartRecordBurn
+                            | crate::ops::OpAction::WriteShuttle => {
+                                tracing::warn!("OpAction not yet wired: {:?}", result);
+                                return Action::Noop;
+                            }
+                        }
+                    }
+                    return Action::Noop;
+                }
+
                 let action = self.ceremony.handle_key_event(key);
                 // Gate full-ceremony-abort actions behind a confirmation
                 // dialog when the current phase warrants it.

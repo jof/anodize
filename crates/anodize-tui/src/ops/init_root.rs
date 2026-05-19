@@ -80,7 +80,7 @@ impl OpContext for InitRootCtx {
         }
     }
 
-    fn build_body(&self, _shared: &AppShared<'_>) -> Vec<String> {
+    fn build_body(&self) -> Vec<String> {
         // TODO: migrate from CeremonyMode::build_body
         vec![String::new(), "  (InitRoot — not yet wired)".into()]
     }
