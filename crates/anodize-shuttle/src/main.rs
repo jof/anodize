@@ -18,7 +18,7 @@ struct Cli {
 enum Command {
     /// Initialize a blank USB stick as an anodize shuttle.
     ///
-    /// Formats the device as FAT32 with the ANODIZE volume label,
+    /// Formats the device as FAT32 with the SHUTTLE volume label,
     /// generates profile.toml for the selected HSM mode, and creates
     /// the required directory structure.
     Init(init::InitArgs),

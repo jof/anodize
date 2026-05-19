@@ -87,8 +87,6 @@ When pairing two HSMs together, we shouldn't gather share inputs from the operat
 ## Session Continuity
 There is a session continuity error where session 2 is missing three files from session 1, like root.cll, root.crt and state.json. We need to make sure it is invariant that each session is a superset of all the files of the session that precedes it.
 
-## Disc and Shuttle Volume Labels are ambiguous
-The shuttle and the CD drive have the same volume labels, `ANODIZE`, which leads to ambiguity in the auto mounting. Rename the shuttle volume label to `SHUTTLE` or similar.
 
 ## Subsequent amounts of the shuttle.
 Subsequent mounts of the shuttle do not appear to be working consistently with the auto mount.

@@ -15,7 +15,7 @@ pub const STATE_VERSION: u32 = 1;
 pub const STATE_FILENAME: &str = "STATE.JSON";
 
 /// Well-known volume label for the shuttle USB stick.
-pub const SHUTTLE_VOLUME_LABEL: &str = "ANODIZE-SHUTTLE";
+pub const SHUTTLE_VOLUME_LABEL: &str = "SHUTTLE";
 
 // ── Ceremony state ──────────────────────────────────────────────────────────
 

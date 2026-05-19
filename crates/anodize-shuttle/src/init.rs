@@ -53,7 +53,7 @@ pub struct InitArgs {
     yes: bool,
 
     /// Volume label for the FAT32 filesystem.
-    #[arg(long, default_value = "ANODIZE")]
+    #[arg(long, default_value = "SHUTTLE")]
     volume_label: String,
 
     /// For softhsm2 mode: also initialize a SoftHSM2 token on the shuttle.

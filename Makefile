@@ -167,7 +167,7 @@ dev-burn-amd64: anodize-dev-burn-amd64.iso
 # Only built once — delete to recreate.
 fake-shuttle.img:
 	truncate -s 64M $@
-	mkfs.vfat -n ANODIZE $@
+	mkfs.vfat -n SHUTTLE $@
 	printf '%s\n' \
 	    '[ca]' \
 	    'common_name  = "Example Root CA"' \

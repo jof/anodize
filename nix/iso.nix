@@ -198,14 +198,14 @@ in
     # Optical drives — grant the wheel group rw access for SG_IO disc writes.
     SUBSYSTEM=="block", KERNEL=="sr[0-9]*", MODE="0660", GROUP="wheel"
     # Shuttle USB — create a stable symlink when a vfat partition with the
-    # ANODIZE volume label appears.  TAG+="systemd" lets systemd track the
+    # SHUTTLE volume label appears.  TAG+="systemd" lets systemd track the
     # device unit (dev-anodize\x2dshuttle.device) so BindsTo= works.
-    SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="ANODIZE", SYMLINK+="anodize-shuttle", TAG+="systemd", MODE="0660", GROUP="wheel"
+    SUBSYSTEM=="block", ENV{ID_FS_LABEL}=="SHUTTLE", SYMLINK+="anodize-shuttle", TAG+="systemd", MODE="0660", GROUP="wheel"
   '';
 
   # ── Shuttle USB: event-driven mount via systemd ────────────────────────────
   #
-  # When udev creates /dev/anodize-shuttle (ANODIZE-labelled vfat partition),
+  # When udev creates /dev/anodize-shuttle (SHUTTLE-labelled vfat partition),
   # systemd starts this service and mounts it at /run/anodize/shuttle.
   # BindsTo= means: when the device disappears (USB yanked), systemd runs
   # ExecStop and cleanly unmounts — no zombie mounts, no polling needed.
