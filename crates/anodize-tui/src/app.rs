@@ -5,7 +5,6 @@ use std::time::{Duration, SystemTime};
 
 use anodize_config::state::SessionState;
 use anodize_config::{Profile, RevocationEntry};
-use anodize_hsm::{HsmActor, KeyHandle};
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -22,37 +21,13 @@ use crate::components::mode_bar::ModeBar;
 use crate::components::phase_bar::PhaseBar;
 use crate::components::status_bar::{HwState, StatusBar};
 use crate::components::Component;
+use crate::hardware::HardwareManager;
 use crate::media::{BurnProgress, SessionEntry};
 use crate::modes;
 use crate::modes::ceremony::CeremonyMode;
 use crate::modes::ceremony::{CeremonyPhase, PlanningState};
 use crate::modes::setup::{SetupMode, SetupPhase};
 use crate::modes::utilities::UtilitiesMode;
-
-/// Hardware / peripheral polling state.
-pub struct HwContext {
-    pub hsm_state: HwState,
-    pub disc_state: HwState,
-    pub shuttle_state: HwState,
-    pub actor: Option<HsmActor>,
-    pub root_key: Option<KeyHandle>,
-    /// Backend-specific device ID of the currently authenticated HSM
-    /// (USB serial for YubiHSM, token label for SoftHSM).
-    pub device_id: Option<String>,
-}
-
-impl HwContext {
-    fn new() -> Self {
-        Self {
-            hsm_state: HwState::Absent,
-            disc_state: HwState::Absent,
-            shuttle_state: HwState::Absent,
-            actor: None,
-            root_key: None,
-            device_id: None,
-        }
-    }
-}
 
 /// Disc / session management state.
 pub struct DiscContext {
@@ -210,7 +185,7 @@ pub struct App {
     pub log_scroll: u16,
 
     // Sub-contexts
-    pub hw: HwContext,
+    pub hw: HardwareManager,
     pub disc: DiscContext,
     pub data: CeremonyData,
     pub sss: SssContext,
@@ -262,7 +237,7 @@ impl App {
             log_view: false,
             log_scroll: 0,
 
-            hw: HwContext::new(),
+            hw: HardwareManager::new(),
             disc: DiscContext::new(),
             data: CeremonyData::new(),
             sss: SssContext::new(),
@@ -845,15 +820,7 @@ impl App {
     /// Background polling for disc/shuttle state + burn completion.
     fn background_tick(&mut self) {
         // Always update shuttle presence for the status bar.
-        // The shuttle is systemd-managed; we just stat the sentinel file.
-        let shuttle_present = self.shuttle_mount.join("profile.toml").is_file();
-        if shuttle_present {
-            if self.hw.shuttle_state == HwState::Absent {
-                self.hw.shuttle_state = HwState::Ready("mounted".into());
-            }
-        } else {
-            self.hw.shuttle_state = HwState::Absent;
-        }
+        self.hw.tick_shuttle(&self.shuttle_mount);
 
         // Full shuttle scan (profile load) during WaitShuttle
         if self.mode == Mode::Setup && self.setup.phase == SetupPhase::WaitShuttle {
