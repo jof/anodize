@@ -21,7 +21,7 @@ use crossterm::event::KeyEvent;
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
-use crate::app::DiscContext;
+use crate::disc::DiscContext;
 use crate::hardware::HardwareManager;
 use anodize_config::Profile;
 
@@ -67,25 +67,6 @@ impl ActiveOperation {
         match self {
             Self::InitRoot(ctx) => ctx.fingerprint.as_deref(),
             Self::SignCsr(ctx) => ctx.fingerprint.as_deref(),
-            _ => None,
-        }
-    }
-
-    /// Signed certificate DER bytes (if produced by this operation).
-    pub fn cert_der(&self) -> Option<&[u8]> {
-        match self {
-            Self::InitRoot(ctx) => ctx.cert_der.as_deref(),
-            Self::SignCsr(ctx) => ctx.cert_der.as_deref(),
-            _ => None,
-        }
-    }
-
-    /// Signed CRL DER bytes (if produced by this operation).
-    pub fn crl_der(&self) -> Option<&[u8]> {
-        match self {
-            Self::InitRoot(ctx) => ctx.crl_der.as_deref(),
-            Self::RevokeCert(ctx) => ctx.crl_der.as_deref(),
-            Self::IssueCrl(ctx) => ctx.crl_der.as_deref(),
             _ => None,
         }
     }
@@ -143,7 +124,7 @@ pub trait OpContext {
     fn build_body(&self) -> Vec<String>;
 
     /// Handle a key event. Returns an `OpAction` describing what the app should do.
-    fn handle_key(&mut self, key: KeyEvent, shared: &mut AppShared<'_>) -> OpAction;
+    fn handle_key(&mut self, key: KeyEvent, shared: &mut OpEnv<'_>) -> OpAction;
 
     /// Whether this phase holds ephemeral/unrecoverable state (blocks quit).
     fn holds_ephemeral_state(&self) -> bool;
@@ -154,17 +135,27 @@ pub trait OpContext {
     /// Whether the user is entering text (disables 'q' quit / 'L' log toggle).
     fn in_text_entry(&self) -> bool;
 
+    /// Whether this operation wants background disc scanning (e.g. waiting for a new disc).
+    fn wants_disc_scan(&self) -> bool {
+        false
+    }
+
+    /// Context-sensitive warning body for the abort confirmation dialog.
+    fn abort_confirm_body(&self) -> Vec<String> {
+        vec!["All ceremony progress will be lost.".into()]
+    }
+
     /// Render any overlay components (ShareReveal, ShareInput, CustodianSetup)
     /// on top of the content area.
     fn render_overlay(&self, _frame: &mut Frame, _area: Rect) {}
 
     /// Called by `tick_intent_burn` when the intent session is written successfully.
     /// The context should advance its phase (e.g. to Quorum).
-    fn advance_after_intent_burn(&mut self, _shared: &mut AppShared<'_>) {}
+    fn advance_after_intent_burn(&mut self, _shared: &mut OpEnv<'_>) {}
 
     /// Execute the HSM crypto operation after clock reconfirm.
     /// Default: starts the record burn directly (no crypto needed).
-    fn execute(&mut self, _shared: &mut AppShared<'_>) -> OpAction {
+    fn execute(&mut self, _shared: &mut OpEnv<'_>) -> OpAction {
         OpAction::StartRecordBurn
     }
 
@@ -172,7 +163,7 @@ pub trait OpContext {
     fn build_intent_audit_event(
         &self,
         _genesis_hex: &str,
-        _shared: &AppShared<'_>,
+        _shared: &OpEnv<'_>,
     ) -> Option<(String, serde_json::Value)> {
         None
     }
@@ -183,7 +174,7 @@ pub trait OpContext {
         _dir_name: String,
         _ts: SystemTime,
         _staging: &Path,
-        _shared: &mut AppShared<'_>,
+        _shared: &mut OpEnv<'_>,
     ) -> Option<crate::media::SessionEntry> {
         None
     }
@@ -200,13 +191,13 @@ pub trait OpContext {
     }
 }
 
-// ── AppShared ───────────────────────────────────────────────────────────────
+// ── OpEnv ───────────────────────────────────────────────────────────────
 
 /// Borrow-split view of `App` fields that operation contexts may need.
 ///
 /// Passed by reference to `OpContext` methods so that the operation context
 /// (borrowed mutably from `App.active_op`) can still access sibling fields.
-pub struct AppShared<'a> {
+pub struct OpEnv<'a> {
     pub hw: &'a mut HardwareManager,
     pub disc: &'a mut DiscContext,
     pub profile: Option<&'a Profile>,
@@ -248,7 +239,7 @@ impl OpContext for ActiveOperation {
     fn build_body(&self) -> Vec<String> {
         delegate_op!(self, build_body)
     }
-    fn handle_key(&mut self, key: KeyEvent, shared: &mut AppShared<'_>) -> OpAction {
+    fn handle_key(&mut self, key: KeyEvent, shared: &mut OpEnv<'_>) -> OpAction {
         delegate_op!(self, handle_key, key, shared)
     }
     fn holds_ephemeral_state(&self) -> bool {
@@ -260,19 +251,25 @@ impl OpContext for ActiveOperation {
     fn in_text_entry(&self) -> bool {
         delegate_op!(self, in_text_entry)
     }
+    fn wants_disc_scan(&self) -> bool {
+        delegate_op!(self, wants_disc_scan)
+    }
+    fn abort_confirm_body(&self) -> Vec<String> {
+        delegate_op!(self, abort_confirm_body)
+    }
     fn render_overlay(&self, frame: &mut Frame, area: Rect) {
         delegate_op!(self, render_overlay, frame, area)
     }
-    fn advance_after_intent_burn(&mut self, shared: &mut AppShared<'_>) {
+    fn advance_after_intent_burn(&mut self, shared: &mut OpEnv<'_>) {
         delegate_op!(self, advance_after_intent_burn, shared)
     }
-    fn execute(&mut self, shared: &mut AppShared<'_>) -> OpAction {
+    fn execute(&mut self, shared: &mut OpEnv<'_>) -> OpAction {
         delegate_op!(self, execute, shared)
     }
     fn build_intent_audit_event(
         &self,
         genesis_hex: &str,
-        shared: &AppShared<'_>,
+        shared: &OpEnv<'_>,
     ) -> Option<(String, serde_json::Value)> {
         delegate_op!(self, build_intent_audit_event, genesis_hex, shared)
     }
@@ -281,7 +278,7 @@ impl OpContext for ActiveOperation {
         dir_name: String,
         ts: SystemTime,
         staging: &Path,
-        shared: &mut AppShared<'_>,
+        shared: &mut OpEnv<'_>,
     ) -> Option<crate::media::SessionEntry> {
         delegate_op!(self, build_record_session, dir_name, ts, staging, shared)
     }
@@ -293,7 +290,7 @@ impl OpContext for ActiveOperation {
     }
 }
 
-impl AppShared<'_> {
+impl OpEnv<'_> {
     pub fn set_status(&mut self, msg: impl Into<String>) {
         let s: String = msg.into();
         if self.log_lines.last().map(|l| l.as_str()) != Some(s.as_str()) {
@@ -448,15 +445,5 @@ impl AppShared<'_> {
                 name: anodize_config::state::STATE_FILENAME.into(),
                 data: state.to_json(),
             })
-    }
-
-    /// Returns `true` if the operator's clock confirmation is recent enough.
-    pub fn clock_is_fresh(&self) -> bool {
-        self.confirmed_time
-            .as_ref()
-            .map(|t| {
-                t.elapsed().unwrap_or(std::time::Duration::ZERO) < crate::app::CLOCK_DRIFT_THRESHOLD
-            })
-            .unwrap_or(false)
     }
 }

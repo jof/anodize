@@ -16,7 +16,7 @@ use ratatui::{
 use sha2::{Digest, Sha256};
 use x509_cert::certificate::Certificate;
 
-use crate::app::DiscContext;
+use crate::disc::DiscContext;
 use crate::media::SessionEntry;
 
 // ── View state machine ──────────────────────────────────────────────────────
@@ -713,7 +713,7 @@ fn centered_rect(width: u16, height: u16, outer: Rect) -> Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::DiscContext;
+    use crate::disc::DiscContext;
     use crate::media::iso9660::IsoFile;
     use anodize_config::state::{Custodian, SessionState, SssMetadata};
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};

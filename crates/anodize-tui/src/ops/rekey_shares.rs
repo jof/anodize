@@ -7,7 +7,7 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{layout::Rect, Frame};
 
-use super::{AppShared, ConfirmTarget, OpAction, OpContext};
+use super::{ConfirmTarget, OpAction, OpContext, OpEnv};
 use crate::media::{IsoFile, SessionEntry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,7 +47,7 @@ impl RekeyCtx {
 
     // ── Quorum completion ─────────────────────────────────────────────
 
-    fn try_quorum_complete(&mut self, shared: &mut AppShared<'_>) -> OpAction {
+    fn try_quorum_complete(&mut self, shared: &mut OpEnv<'_>) -> OpAction {
         let shares: Vec<anodize_sss::Share> = self
             .share_input
             .as_ref()
@@ -78,7 +78,7 @@ impl RekeyCtx {
 
     // ── Custodian confirm → new PIN generation → SSS split ────────────
 
-    fn on_custodian_confirm(&mut self, shared: &mut AppShared<'_>, threshold: u8) -> OpAction {
+    fn on_custodian_confirm(&mut self, shared: &mut OpEnv<'_>, threshold: u8) -> OpAction {
         let names = self.custodian_names.clone();
 
         if names.len() < 2 {
@@ -170,7 +170,7 @@ impl RekeyCtx {
 
     // ── Share verify complete → PIN change + backup propagation ───────
 
-    fn on_share_verify_complete(&mut self, shared: &mut AppShared<'_>) -> OpAction {
+    fn on_share_verify_complete(&mut self, shared: &mut OpEnv<'_>) -> OpAction {
         // Round-trip check: reconstruct new PIN from verified shares
         let shares: Vec<anodize_sss::Share> = self
             .share_input
@@ -272,7 +272,7 @@ impl RekeyCtx {
     // ── PIN propagation to backup HSMs ───────────────────────────────
 
     fn change_pin_backups(
-        shared: &mut AppShared<'_>,
+        shared: &mut OpEnv<'_>,
         old_pin_hex: &str,
         new_pin_hex: &str,
     ) -> Result<Vec<String>, String> {
@@ -386,7 +386,7 @@ impl RekeyCtx {
 
     // ── Verify old PIN is rejected ───────────────────────────────────
 
-    fn verify_old_pin_rejected(shared: &AppShared<'_>, old_pin_hex: &str) -> Result<(), String> {
+    fn verify_old_pin_rejected(shared: &OpEnv<'_>, old_pin_hex: &str) -> Result<(), String> {
         use secrecy::SecretString;
 
         let cfg = shared.profile.map(|p| &p.hsm).ok_or("No profile loaded")?;
@@ -501,7 +501,7 @@ impl OpContext for RekeyCtx {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, shared: &mut AppShared<'_>) -> OpAction {
+    fn handle_key(&mut self, key: KeyEvent, shared: &mut OpEnv<'_>) -> OpAction {
         match self.phase {
             RekeyPhase::Quorum => {
                 if key.code == KeyCode::Esc {
@@ -592,7 +592,7 @@ impl OpContext for RekeyCtx {
         dir_name: String,
         ts: std::time::SystemTime,
         staging: &std::path::Path,
-        shared: &mut AppShared<'_>,
+        shared: &mut OpEnv<'_>,
     ) -> Option<SessionEntry> {
         use anodize_audit::AuditLog;
 

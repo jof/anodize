@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use crate::helpers::verify_audit_chain;
 use crate::media::SessionEntry;
 
-use super::{AppShared, OpAction, OpContext};
+use super::{OpAction, OpContext, OpEnv};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigratePhase {
@@ -30,7 +30,7 @@ pub struct MigrateCtx {
 
 impl MigrateCtx {
     /// Build the context from the current disc state.
-    pub fn run(shared: &AppShared<'_>) -> Self {
+    pub fn run(shared: &OpEnv<'_>) -> Self {
         let prior = &shared.disc.prior_sessions;
 
         let total_bytes: u64 = prior
@@ -116,7 +116,7 @@ impl OpContext for MigrateCtx {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, shared: &mut AppShared<'_>) -> OpAction {
+    fn handle_key(&mut self, key: KeyEvent, shared: &mut OpEnv<'_>) -> OpAction {
         match self.phase {
             MigratePhase::Confirm => match key.code {
                 KeyCode::Char('1') => {
@@ -158,7 +158,7 @@ impl OpContext for MigrateCtx {
         dir_name: String,
         ts: std::time::SystemTime,
         _staging: &std::path::Path,
-        shared: &mut AppShared<'_>,
+        shared: &mut OpEnv<'_>,
     ) -> Option<SessionEntry> {
         let source_files = match self.sessions.last() {
             Some(s) => s.files.clone(),
@@ -173,6 +173,10 @@ impl OpContext for MigrateCtx {
             timestamp: ts,
             files: source_files,
         })
+    }
+
+    fn wants_disc_scan(&self) -> bool {
+        matches!(self.phase, MigratePhase::WaitTarget)
     }
 
     fn holds_ephemeral_state(&self) -> bool {

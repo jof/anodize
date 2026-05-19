@@ -4,7 +4,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
-use super::{AppShared, ConfirmTarget, OpAction, OpContext};
+use super::{ConfirmTarget, OpAction, OpContext, OpEnv};
 use crate::media::{IsoFile, SessionEntry};
 use anodize_hsm::Hsm as _;
 
@@ -42,7 +42,7 @@ impl IssueCrlCtx {
         }
     }
 
-    fn try_quorum_complete(&mut self, shared: &mut AppShared<'_>) -> OpAction {
+    fn try_quorum_complete(&mut self, shared: &mut OpEnv<'_>) -> OpAction {
         let shares: Vec<anodize_sss::Share> = self
             .share_input
             .as_ref()
@@ -138,7 +138,7 @@ impl OpContext for IssueCrlCtx {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, shared: &mut AppShared<'_>) -> OpAction {
+    fn handle_key(&mut self, key: KeyEvent, shared: &mut OpEnv<'_>) -> OpAction {
         match self.phase {
             IssueCrlPhase::CrlPreview => match key.code {
                 KeyCode::Char('1') => OpAction::ShowConfirm {
@@ -190,7 +190,7 @@ impl OpContext for IssueCrlCtx {
         }
     }
 
-    fn execute(&mut self, shared: &mut AppShared<'_>) -> OpAction {
+    fn execute(&mut self, shared: &mut OpEnv<'_>) -> OpAction {
         use crate::helpers::{
             hex_serial_to_bytes, mechanism_error_msg, parse_rfc3339_to_system_time,
         };
@@ -266,7 +266,7 @@ impl OpContext for IssueCrlCtx {
     fn build_intent_audit_event(
         &self,
         _genesis_hex: &str,
-        _shared: &AppShared<'_>,
+        _shared: &OpEnv<'_>,
     ) -> Option<(String, serde_json::Value)> {
         Some((
             "crl.intent".into(),
@@ -283,7 +283,7 @@ impl OpContext for IssueCrlCtx {
         dir_name: String,
         ts: std::time::SystemTime,
         staging: &std::path::Path,
-        shared: &mut AppShared<'_>,
+        shared: &mut OpEnv<'_>,
     ) -> Option<SessionEntry> {
         use anodize_audit::AuditLog;
 
@@ -357,7 +357,7 @@ impl OpContext for IssueCrlCtx {
         Ok(true)
     }
 
-    fn advance_after_intent_burn(&mut self, shared: &mut AppShared<'_>) {
+    fn advance_after_intent_burn(&mut self, shared: &mut OpEnv<'_>) {
         let sss_meta = match &shared.disc.session_state {
             Some(state) => state.sss.clone(),
             None => {

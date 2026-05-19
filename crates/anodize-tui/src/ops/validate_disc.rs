@@ -13,7 +13,7 @@ use anodize_hsm::Hsm;
 use crossterm::event::{KeyCode, KeyEvent};
 use sha2::{Digest, Sha256};
 
-use super::{AppShared, OpAction, OpContext};
+use super::{OpAction, OpContext, OpEnv};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidatePhase {
@@ -30,7 +30,7 @@ pub struct ValidateCtx {
 
 impl ValidateCtx {
     /// Run disc validation and return a populated context.
-    pub fn run(shared: &AppShared<'_>) -> Self {
+    pub fn run(shared: &OpEnv<'_>) -> Self {
         let mut findings: Vec<Finding> = Vec::new();
 
         // Build snapshots from prior sessions.
@@ -124,7 +124,7 @@ impl ValidateCtx {
         }
     }
 
-    fn do_hsm_check(&mut self, shared: &mut AppShared<'_>) {
+    fn do_hsm_check(&mut self, shared: &mut OpEnv<'_>) {
         let actor = match shared.hw.actor.as_ref() {
             Some(a) => a,
             None => {
@@ -191,7 +191,7 @@ impl ValidateCtx {
         }
     }
 
-    fn do_export_report(&self, shared: &mut AppShared<'_>) -> bool {
+    fn do_export_report(&self, shared: &mut OpEnv<'_>) -> bool {
         let validate_log = shared.shuttle_mount.join("VALIDATE.LOG");
         let report = format_report(&self.findings);
 
@@ -243,7 +243,7 @@ impl OpContext for ValidateCtx {
         lines
     }
 
-    fn handle_key(&mut self, key: KeyEvent, shared: &mut AppShared<'_>) -> OpAction {
+    fn handle_key(&mut self, key: KeyEvent, shared: &mut OpEnv<'_>) -> OpAction {
         match key.code {
             KeyCode::Char('1') if self.phase == ValidatePhase::Report => {
                 self.do_hsm_check(shared);

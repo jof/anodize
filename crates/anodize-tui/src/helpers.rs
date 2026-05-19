@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use x509_cert::certificate::Certificate;
 use x509_cert::request::CertReq;
 
-use crate::app::CertSummary;
+use crate::disc::CertSummary;
 use crate::media::SessionEntry;
 
 // ── Burn progress spinner ────────────────────────────────────────────────────

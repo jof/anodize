@@ -1,11 +1,7 @@
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
-use std::time::Instant;
 use std::time::{Duration, SystemTime};
 
-use anodize_config::state::SessionState;
 use anodize_config::Profile;
-use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout},
@@ -21,64 +17,14 @@ use crate::components::mode_bar::ModeBar;
 use crate::components::phase_bar::PhaseBar;
 use crate::components::status_bar::StatusBar;
 use crate::components::Component;
+use crate::disc::DiscContext;
 use crate::hardware::HardwareManager;
-use crate::media::{BurnProgress, SessionEntry};
 use crate::modes;
 use crate::modes::ceremony::CeremonyMode;
 use crate::modes::ceremony::CeremonyPhase;
 use crate::modes::setup::{SetupMode, SetupPhase};
 use crate::modes::utilities::UtilitiesMode;
 use crate::ops::{ActiveOperation, OpContext};
-
-/// Disc / session management state.
-pub struct DiscContext {
-    pub optical_dev: Option<PathBuf>,
-    pub prior_sessions: Vec<SessionEntry>,
-    pub burn_rx: Option<Receiver<BurnProgress>>,
-    pub burn_log: Vec<String>,
-    pub burn_started: Option<Instant>,
-    pub sessions_remaining: Option<u16>,
-    pub intent_session_dir_name: Option<String>,
-    pub pending_intent_session: Option<SessionEntry>,
-    pub session_state: Option<SessionState>,
-    /// Background disc scan result channel.  `Some` while a scan thread is
-    /// running; the tick handler polls `try_recv` so the TUI stays responsive.
-    pub disc_scan_rx: Option<Receiver<DiscScanBatch>>,
-}
-
-/// Result bundle from a background disc-scan thread.
-pub struct DiscScanBatch {
-    pub drives: Vec<PathBuf>,
-    pub scans: Vec<(PathBuf, Result<crate::media::DiscScan, String>)>,
-}
-
-impl DiscContext {
-    fn new() -> Self {
-        Self {
-            optical_dev: None,
-            prior_sessions: Vec::new(),
-            burn_rx: None,
-            burn_log: Vec::new(),
-            burn_started: None,
-            sessions_remaining: None,
-            intent_session_dir_name: None,
-            pending_intent_session: None,
-            session_state: None,
-            disc_scan_rx: None,
-        }
-    }
-}
-
-/// Summary of a certificate found on disc, for the revocation picker.
-#[derive(Debug, Clone)]
-pub struct CertSummary {
-    /// Uppercase hex string of the full certificate serial number.
-    pub serial: String,
-    pub subject: String,
-    pub not_after: String,
-    pub is_root: bool,
-    pub already_revoked: bool,
-}
 
 /// Maximum elapsed time since the last clock confirmation before a
 /// re-confirm is required.  On a live-boot, air-gapped system the clock
@@ -182,11 +128,11 @@ impl App {
         self.content_scroll = 0;
     }
 
-    /// Construct an `AppShared` borrow-split view for `OpContext` methods.
+    /// Construct an `OpEnv` borrow-split view for `OpContext` methods.
     ///
     /// Caller must ensure `self.active_op` is not simultaneously borrowed mutably.
-    pub fn make_shared(&mut self) -> crate::ops::AppShared<'_> {
-        crate::ops::AppShared {
+    pub fn make_shared(&mut self) -> crate::ops::OpEnv<'_> {
+        crate::ops::OpEnv {
             hw: &mut self.hw,
             disc: &mut self.disc,
             profile: self.profile.as_ref(),
@@ -540,7 +486,7 @@ impl App {
                 // dialog when the current phase warrants it.
                 if self.ceremony.needs_abort_confirmation() {
                     match action {
-                        Action::CeremonyCancel | Action::InitRootAbort => {
+                        Action::CeremonyCancel => {
                             self.show_abort_confirm(action);
                             return Action::Noop;
                         }
@@ -581,13 +527,12 @@ impl App {
             self.tick_wait_disc(false);
         }
 
-        // Disc scan during WaitMigrateTarget (ActiveOp)
-        let is_migrate_wait = matches!(
-            &self.active_op,
-            Some(crate::ops::ActiveOperation::MigrateDisc(ctx))
-                if ctx.phase == crate::ops::migrate_disc::MigratePhase::WaitTarget
-        );
-        if is_migrate_wait {
+        // Disc scan when active op requests it (e.g. MigrateDisc WaitTarget)
+        if self
+            .active_op
+            .as_ref()
+            .map_or(false, |op| op.wants_disc_scan())
+        {
             self.tick_wait_disc(true);
         }
 
@@ -667,19 +612,6 @@ impl App {
             Action::SelectOperation(op) => {
                 self.do_select_operation(op);
             }
-            Action::ConfirmCertBurn => {
-                if self.clock_is_fresh() {
-                    self.do_start_burn();
-                } else {
-                    // Clock confirmation has gone stale — ask the operator to
-                    // re-verify before writing timestamped data to disc.
-                    self.pending_burn_reconfirm = true;
-                    self.ceremony.state = CeremonyPhase::ClockReconfirm;
-                    self.set_status(
-                        "Clock confirmation expired — please re-confirm before disc write.",
-                    );
-                }
-            }
             // Clock re-confirm: operator attests clock is correct at signing time
             Action::ReconfirmClock => {
                 self.confirmed_time = Some(SystemTime::now());
@@ -710,26 +642,6 @@ impl App {
             }
             Action::DoWriteShuttle => {
                 self.do_write_shuttle();
-            }
-
-            // InitRoot ceremony abort (from PostCommitError Esc)
-            Action::InitRootAbort => {
-                self.active_op = None;
-                self.ceremony.state = CeremonyPhase::OperationSelect;
-                self.set_status("InitRoot aborted.");
-            }
-            Action::RetryPostCommit => {
-                // Retry HSM bootstrap + keygen via InitRootCtx.
-                if let Some(mut op) = self.active_op.take() {
-                    use crate::ops::OpContext;
-                    let mut shared = self.make_shared();
-                    op.advance_after_intent_burn(&mut shared);
-                    self.active_op = Some(op);
-                    self.ceremony.state = CeremonyPhase::ActiveOp;
-                } else {
-                    self.set_status("No active operation to retry.");
-                    self.ceremony.state = CeremonyPhase::PostCommitError;
-                }
             }
 
             // Utilities sub-screens
@@ -933,16 +845,19 @@ impl App {
     fn abort_confirm_body(&self) -> Vec<String> {
         use CeremonyPhase::*;
         match &self.ceremony.state {
-            Execute | ClockReconfirm => {
+            ClockReconfirm => {
                 vec![
                     "HSM session and partially-reconstructed PIN".into(),
                     "will be discarded.".into(),
                 ]
             }
-            PostCommitError => vec![
-                "Intent was already written to disc.".into(),
-                "Aborting leaves an orphaned intent session.".into(),
-            ],
+            ActiveOp => {
+                use crate::ops::OpContext;
+                self.active_op
+                    .as_ref()
+                    .map(|op| op.abort_confirm_body())
+                    .unwrap_or_else(|| vec!["All ceremony progress will be lost.".into()])
+            }
             _ => vec!["All ceremony progress will be lost.".into()],
         }
     }

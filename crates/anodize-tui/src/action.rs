@@ -38,11 +38,6 @@ pub enum Action {
     DoWriteShuttle,
     // Clock re-confirm before signing
     ReconfirmClock,
-    // Cert/CRL review
-    ConfirmCertBurn,
-    // InitRoot ceremony
-    InitRootAbort,
-    RetryPostCommit,
     // Utilities sub-screens (1=SystemInfo, 2=AuditLog, 3=HsmInventory, 4=DiscInspector)
     UtilScreen(u8),
     // Generic cancel: return to OperationSelect from any ceremony phase

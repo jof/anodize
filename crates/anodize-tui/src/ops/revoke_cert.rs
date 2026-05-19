@@ -7,8 +7,8 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
-use super::{AppShared, ConfirmTarget, OpAction, OpContext};
-use crate::app::CertSummary;
+use super::{ConfirmTarget, OpAction, OpContext, OpEnv};
+use crate::disc::CertSummary;
 use crate::media::{IsoFile, SessionEntry};
 use anodize_hsm::Hsm as _;
 
@@ -68,7 +68,7 @@ impl RevokeCertCtx {
     }
 
     /// Validate and add the revocation entry, then advance to RevokePreview.
-    fn add_revocation_entry(&mut self, shared: &mut AppShared<'_>) -> OpAction {
+    fn add_revocation_entry(&mut self, shared: &mut OpEnv<'_>) -> OpAction {
         let serial = self.serial_buf.to_uppercase();
         if serial.is_empty() || !serial.chars().all(|c| c.is_ascii_hexdigit()) {
             shared.set_status(format!(
@@ -116,7 +116,7 @@ impl RevokeCertCtx {
         OpAction::Noop
     }
 
-    fn try_quorum_complete(&mut self, shared: &mut AppShared<'_>) -> OpAction {
+    fn try_quorum_complete(&mut self, shared: &mut OpEnv<'_>) -> OpAction {
         let shares: Vec<anodize_sss::Share> = self
             .share_input
             .as_ref()
@@ -279,7 +279,7 @@ impl OpContext for RevokeCertCtx {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, shared: &mut AppShared<'_>) -> OpAction {
+    fn handle_key(&mut self, key: KeyEvent, shared: &mut OpEnv<'_>) -> OpAction {
         match self.phase {
             RevokeCertPhase::RevokeSelect => match key.code {
                 KeyCode::Up | KeyCode::Char('k') => {
@@ -419,7 +419,7 @@ impl OpContext for RevokeCertCtx {
         }
     }
 
-    fn execute(&mut self, shared: &mut AppShared<'_>) -> OpAction {
+    fn execute(&mut self, shared: &mut OpEnv<'_>) -> OpAction {
         use crate::helpers::{
             hex_serial_to_bytes, mechanism_error_msg, parse_rfc3339_to_system_time,
         };
@@ -495,7 +495,7 @@ impl OpContext for RevokeCertCtx {
     fn build_intent_audit_event(
         &self,
         _genesis_hex: &str,
-        _shared: &AppShared<'_>,
+        _shared: &OpEnv<'_>,
     ) -> Option<(String, serde_json::Value)> {
         let serial_hex = self.serial_buf.to_uppercase();
         let reason = if self.reason_buf.is_empty() {
@@ -520,7 +520,7 @@ impl OpContext for RevokeCertCtx {
         dir_name: String,
         ts: std::time::SystemTime,
         staging: &std::path::Path,
-        shared: &mut AppShared<'_>,
+        shared: &mut OpEnv<'_>,
     ) -> Option<SessionEntry> {
         use anodize_audit::AuditLog;
         use anodize_config::serialize_revocation_list;
@@ -620,7 +620,7 @@ impl OpContext for RevokeCertCtx {
         Ok(true)
     }
 
-    fn advance_after_intent_burn(&mut self, shared: &mut AppShared<'_>) {
+    fn advance_after_intent_burn(&mut self, shared: &mut OpEnv<'_>) {
         let sss_meta = match &shared.disc.session_state {
             Some(state) => state.sss.clone(),
             None => {

@@ -1,7 +1,7 @@
-//! Ceremony operation methods on App.
+//! App-level orchestration: setup ticks, disc burn lifecycle, shuttle write,
+//! operation dispatch, and rendering helpers.
 //!
-//! This is a separate `impl App` block to keep app.rs focused on dispatch/rendering
-//! and this file focused on the ceremony business logic.
+//! Per-operation ceremony logic lives in `ops/`.
 
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -106,12 +106,12 @@ impl App {
                 .iter()
                 .map(|dev| (dev.clone(), media::scan_disc(dev)))
                 .collect();
-            let _ = tx.send(crate::app::DiscScanBatch { drives, scans });
+            let _ = tx.send(crate::disc::DiscScanBatch { drives, scans });
         });
     }
 
     /// Process results from a completed background disc scan.
-    fn process_disc_scan(&mut self, batch: crate::app::DiscScanBatch, need_blank: bool) {
+    fn process_disc_scan(&mut self, batch: crate::disc::DiscScanBatch, need_blank: bool) {
         let mut rw_rejection: Option<String> = None;
         for (dev, result) in batch.scans {
             match result {
@@ -386,8 +386,9 @@ impl App {
             match action {
                 crate::ops::OpAction::StartRecordBurn => self.do_start_burn(),
                 crate::ops::OpAction::Noop => {
-                    // execute() handled phase transition internally (e.g. SignCsr → Execute)
-                    self.ceremony.state = CeremonyPhase::Execute;
+                    // execute() handled phase transition internally (e.g. SignCsr → Execute).
+                    // Stay in ActiveOp — the op's own phase renders the cert preview.
+                    self.ceremony.state = CeremonyPhase::ActiveOp;
                 }
                 crate::ops::OpAction::SetStatus(msg) => self.set_status(msg),
                 other => {
@@ -1077,17 +1078,34 @@ mod tests {
     }
 
     #[test]
-    fn retry_post_commit_stays_in_error_without_hsm() {
+    fn init_root_post_commit_retry_stays_in_error_without_hsm() {
+        // PostCommitError is now an op-internal phase on InitRootCtx.
+        // Pressing [1] retries inline; without an HSM it stays in PostCommitError.
+        let mut ctx = crate::ops::init_root::InitRootCtx::new();
+        ctx.phase = crate::ops::init_root::InitRootPhase::PostCommitError;
+
         let mut app = test_app();
-        app.ceremony.state = CeremonyPhase::PostCommitError;
+        app.ceremony.state = CeremonyPhase::ActiveOp;
+        app.active_op = Some(crate::ops::ActiveOperation::InitRoot(ctx));
 
-        app.update(Action::RetryPostCommit);
-
-        assert_eq!(
-            app.ceremony.state,
-            CeremonyPhase::PostCommitError,
-            "Retry without HSM should stay in PostCommitError"
-        );
+        // Simulate [1] via the op's handle_key.
+        let key = crossterm::event::KeyEvent::from(crossterm::event::KeyCode::Char('1'));
+        if let Some(mut op) = app.active_op.take() {
+            let mut shared = app.make_shared();
+            let result = op.handle_key(key, &mut shared);
+            app.active_op = Some(op);
+            assert!(matches!(result, crate::ops::OpAction::Noop));
+        }
+        // Should still be in PostCommitError (op-internal).
+        if let Some(crate::ops::ActiveOperation::InitRoot(ref ctx)) = app.active_op {
+            assert_eq!(
+                ctx.phase,
+                crate::ops::init_root::InitRootPhase::PostCommitError,
+                "Retry without HSM should stay in PostCommitError"
+            );
+        } else {
+            panic!("expected InitRoot op");
+        }
     }
 
     // ── Revoke phase regression tests ────────────────────────────────────
@@ -1188,15 +1206,20 @@ mod tests {
 
     #[test]
     fn abort_from_post_commit_error_resets_to_operation_select() {
-        let mut app = test_app();
-        app.ceremony.state = CeremonyPhase::PostCommitError;
+        // PostCommitError is now op-internal. CeremonyCancel still clears the op.
+        let mut ctx = crate::ops::init_root::InitRootCtx::new();
+        ctx.phase = crate::ops::init_root::InitRootPhase::PostCommitError;
 
-        app.update(Action::InitRootAbort);
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::ActiveOp;
+        app.active_op = Some(crate::ops::ActiveOperation::InitRoot(ctx));
+
+        app.update(Action::CeremonyCancel);
 
         assert_eq!(
             app.ceremony.state,
             CeremonyPhase::OperationSelect,
-            "InitRootAbort should reset to OperationSelect"
+            "CeremonyCancel from PostCommitError should reset to OperationSelect"
         );
         assert!(app.current_op().is_none());
     }
@@ -1620,11 +1643,11 @@ mod tests {
     }
 
     #[test]
-    fn confirm_cert_burn_with_fresh_clock_skips_dialog() {
+    fn do_start_burn_with_fresh_clock_skips_dialog() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.confirmed_time = Some(std::time::SystemTime::now());
-        app.ceremony.state = CeremonyPhase::Execute;
-        app.update(Action::ConfirmCertBurn);
+        app.ceremony.state = CeremonyPhase::ActiveOp;
+        app.update(Action::DoStartBurn);
 
         // No confirmation dialog — proceeds directly to do_start_burn().
         // (In the test env do_start_burn returns early because there is no
@@ -1636,11 +1659,11 @@ mod tests {
     }
 
     #[test]
-    fn confirm_cert_burn_with_stale_clock_redirects_to_reconfirm() {
+    fn do_start_burn_with_stale_clock_redirects_to_reconfirm() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
         app.confirmed_time = Some(std::time::SystemTime::now() - crate::app::CLOCK_DRIFT_THRESHOLD);
-        app.ceremony.state = CeremonyPhase::Execute;
-        app.update(Action::ConfirmCertBurn);
+        app.ceremony.state = CeremonyPhase::ActiveOp;
+        app.update(Action::DoStartBurn);
 
         assert!(
             app.confirm_dialog.is_none(),
@@ -1927,7 +1950,7 @@ mod tests {
     fn tick_wait_disc_returns_early_while_scan_in_flight() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
         // Pre-populate with a channel that will never send.
-        let (_tx, rx) = std::sync::mpsc::channel::<crate::app::DiscScanBatch>();
+        let (_tx, rx) = std::sync::mpsc::channel::<crate::disc::DiscScanBatch>();
         app.disc.disc_scan_rx = Some(rx);
         app.set_status("before");
 
@@ -1950,7 +1973,7 @@ mod tests {
 
         // Feed a pre-built scan result through the channel.
         let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(crate::app::DiscScanBatch {
+        tx.send(crate::disc::DiscScanBatch {
             drives: vec![PathBuf::from("/dev/sr0")],
             scans: vec![(
                 PathBuf::from("/dev/sr0"),
@@ -1988,7 +2011,7 @@ mod tests {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
 
         // Create a channel and immediately drop the sender.
-        let (tx, rx) = std::sync::mpsc::channel::<crate::app::DiscScanBatch>();
+        let (tx, rx) = std::sync::mpsc::channel::<crate::disc::DiscScanBatch>();
         drop(tx);
         app.disc.disc_scan_rx = Some(rx);
 
@@ -2010,7 +2033,7 @@ mod tests {
     fn process_disc_scan_no_drives_reports_absent() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
         app.process_disc_scan(
-            crate::app::DiscScanBatch {
+            crate::disc::DiscScanBatch {
                 drives: vec![],
                 scans: vec![],
             },
@@ -2029,7 +2052,7 @@ mod tests {
     fn process_disc_scan_rewritable_reports_rejection() {
         let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
         app.process_disc_scan(
-            crate::app::DiscScanBatch {
+            crate::disc::DiscScanBatch {
                 drives: vec![PathBuf::from("/dev/sr0")],
                 scans: vec![(
                     PathBuf::from("/dev/sr0"),

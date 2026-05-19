@@ -6,7 +6,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
-use super::{AppShared, ConfirmTarget, OpAction, OpContext};
+use super::{ConfirmTarget, OpAction, OpContext, OpEnv};
 use crate::media::{IsoFile, SessionEntry};
 use anodize_hsm::Hsm as _;
 
@@ -64,7 +64,7 @@ impl SignCsrCtx {
     }
 
     /// Select a cert profile, build the preview, and advance to CertPreview.
-    fn select_profile(&mut self, idx: usize, shared: &mut AppShared<'_>) -> OpAction {
+    fn select_profile(&mut self, idx: usize, shared: &mut OpEnv<'_>) -> OpAction {
         if idx >= self.profile_lines.len() {
             shared.set_status(format!(
                 "Invalid profile number {}. Choose 1\u{2013}{}.",
@@ -95,7 +95,7 @@ impl SignCsrCtx {
         OpAction::Noop
     }
 
-    fn try_quorum_complete(&mut self, shared: &mut AppShared<'_>) -> OpAction {
+    fn try_quorum_complete(&mut self, shared: &mut OpEnv<'_>) -> OpAction {
         let shares: Vec<anodize_sss::Share> = self
             .share_input
             .as_ref()
@@ -214,7 +214,7 @@ impl OpContext for SignCsrCtx {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, shared: &mut AppShared<'_>) -> OpAction {
+    fn handle_key(&mut self, key: KeyEvent, shared: &mut OpEnv<'_>) -> OpAction {
         match self.phase {
             SignCsrPhase::LoadCsr => match key.code {
                 KeyCode::Esc => OpAction::Abort,
@@ -284,6 +284,16 @@ impl OpContext for SignCsrCtx {
         !matches!(self.phase, SignCsrPhase::LoadCsr)
     }
 
+    fn abort_confirm_body(&self) -> Vec<String> {
+        match self.phase {
+            SignCsrPhase::Execute => vec![
+                "HSM session and partially-reconstructed PIN".into(),
+                "will be discarded.".into(),
+            ],
+            _ => vec!["All ceremony progress will be lost.".into()],
+        }
+    }
+
     fn in_text_entry(&self) -> bool {
         matches!(self.phase, SignCsrPhase::Quorum | SignCsrPhase::Execute)
     }
@@ -294,7 +304,7 @@ impl OpContext for SignCsrCtx {
         }
     }
 
-    fn execute(&mut self, shared: &mut AppShared<'_>) -> OpAction {
+    fn execute(&mut self, shared: &mut OpEnv<'_>) -> OpAction {
         use crate::helpers::{
             collect_serial_numbers_from_sessions, mechanism_error_msg, sha256_fingerprint,
         };
@@ -386,7 +396,7 @@ impl OpContext for SignCsrCtx {
     fn build_intent_audit_event(
         &self,
         _genesis_hex: &str,
-        shared: &AppShared<'_>,
+        shared: &OpEnv<'_>,
     ) -> Option<(String, serde_json::Value)> {
         let csr_hex = self
             .csr_der
@@ -415,7 +425,7 @@ impl OpContext for SignCsrCtx {
         dir_name: String,
         ts: std::time::SystemTime,
         staging: &std::path::Path,
-        shared: &mut AppShared<'_>,
+        shared: &mut OpEnv<'_>,
     ) -> Option<SessionEntry> {
         use anodize_audit::AuditLog;
 
@@ -491,7 +501,7 @@ impl OpContext for SignCsrCtx {
         Ok(true)
     }
 
-    fn advance_after_intent_burn(&mut self, shared: &mut AppShared<'_>) {
+    fn advance_after_intent_burn(&mut self, shared: &mut OpEnv<'_>) {
         let sss_meta = match &shared.disc.session_state {
             Some(state) => state.sss.clone(),
             None => {

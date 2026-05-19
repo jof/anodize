@@ -22,11 +22,6 @@ pub enum CeremonyPhase {
     ClockReconfirm,
     /// Delegation: the active operation context owns state + rendering.
     ActiveOp,
-    /// Phase 5: HSM crypto operation complete, verify result.
-    Execute,
-    /// Post-commit error: HSM/keygen/cert-build failed after intent write.
-    /// Operator can [1] retry or [Esc] abort.
-    PostCommitError,
     /// Phase 6a: writing record session to disc.
     BurningDisc,
     /// Phase 6b: disc written, shuttle copy pending.
@@ -93,31 +88,13 @@ impl CeremonyMode {
             // 0 — Select
             CeremonyPhase::OperationSelect => 0,
             // 2 — Commit (write intent WAL to disc)
-            CeremonyPhase::Commit | CeremonyPhase::PostCommitError => 2,
+            CeremonyPhase::Commit => 2,
             // 3 — Clock re-confirm before signing
             CeremonyPhase::ClockReconfirm => 3,
-            // 4 — Execute (HSM crypto operation, cert preview/verify)
-            CeremonyPhase::Execute => 4,
             // 5 — Export (write record to disc + shuttle copy)
             CeremonyPhase::BurningDisc | CeremonyPhase::DiscDone | CeremonyPhase::Done => 5,
             // Delegated — ask the active operation context
             CeremonyPhase::ActiveOp => 1,
-        }
-    }
-
-    /// Phase-bar title for the Execute phase, context-sensitive to operation.
-    pub fn execute_phase_title(op: Option<Operation>) -> &'static str {
-        match op {
-            Some(Operation::InitRoot) => "Certificate Preview \u{2014} RECORD FINGERPRINT",
-            _ => "Certificate Preview \u{2014} VERIFY FINGERPRINT",
-        }
-    }
-
-    /// Instruction text shown below the fingerprint on the Execute screen.
-    pub fn fingerprint_instruction(op: Option<Operation>) -> &'static str {
-        match op {
-            Some(Operation::InitRoot) => "  Record this fingerprint on your paper checklist.",
-            _ => "  Compare this fingerprint against your paper checklist.",
         }
     }
 
@@ -126,8 +103,6 @@ impl CeremonyMode {
         let title = match self.state {
             CeremonyPhase::OperationSelect => "Select Operation",
             CeremonyPhase::Commit => "Committing Intent to Disc\u{2026}",
-            CeremonyPhase::PostCommitError => "Post-Commit Error",
-            CeremonyPhase::Execute => Self::execute_phase_title(app.current_op()),
             CeremonyPhase::BurningDisc => "Writing Session\u{2026}",
             CeremonyPhase::DiscDone => match app.current_op() {
                 Some(Operation::InitRoot) => "Root Init Written",
@@ -246,73 +221,6 @@ impl CeremonyMode {
                     lines.push(format!("    {entry}"));
                 }
                 lines.push(format!("  {spin} [{elapsed:>3}s]"));
-                lines
-            }
-
-            CeremonyPhase::PostCommitError => {
-                vec![
-                    String::new(),
-                    "  The intent session was written to disc, but the post-commit".into(),
-                    "  operation (HSM bootstrap / key generation / cert build) failed.".into(),
-                    String::new(),
-                    format!("  Error: {}", app.status),
-                    String::new(),
-                    "  The disc is safe — only the intent WAL was written.".into(),
-                    "  You may retry without re-burning the intent session.".into(),
-                    String::new(),
-                    "  [1]   Retry HSM + key operation".into(),
-                    "  [Esc] Abort to operation select".into(),
-                ]
-            }
-
-            CeremonyPhase::Execute => {
-                let fp = app
-                    .active_op
-                    .as_ref()
-                    .and_then(|op| op.fingerprint())
-                    .unwrap_or("(none)");
-                // Parse actual cert for subject/validity when available; fall
-                // back to root CA profile only when cert_der is absent.
-                let (subject, validity_label) = app
-                    .active_op
-                    .as_ref()
-                    .and_then(|op| op.cert_der())
-                    .and_then(crate::helpers::cert_subject_and_validity_days)
-                    .map(|(subj, days)| (subj, format!("{days} days")))
-                    .unwrap_or_else(|| {
-                        let ca = app.profile.as_ref().map(|p| &p.ca);
-                        let (cn, org, country) = ca
-                            .map(|c| {
-                                (
-                                    c.common_name.as_str(),
-                                    c.organization.as_str(),
-                                    c.country.as_str(),
-                                )
-                            })
-                            .unwrap_or(("?", "?", "?"));
-                        (
-                            format!("CN={cn}, O={org}, C={country}"),
-                            "7305 days (20 years)".into(),
-                        )
-                    });
-                let has_crl = app.active_op.as_ref().and_then(|op| op.crl_der()).is_some();
-                let mut lines = vec![
-                    String::new(),
-                    format!("  Subject  : {subject}"),
-                    format!("  Validity : {validity_label}"),
-                    String::new(),
-                    "  SHA-256 Fingerprint:".into(),
-                    format!("  {fp}"),
-                ];
-                if has_crl {
-                    lines.push(String::new());
-                    lines.push("  Initial CRL #1 (empty) will be included in this session.".into());
-                }
-                lines.push(String::new());
-                lines.push(Self::fingerprint_instruction(app.current_op()).into());
-                lines.push(String::new());
-                lines.push("  [1]  Proceed to disc write".into());
-                lines.push("  [Esc]  Abort".into());
                 lines
             }
 
@@ -449,18 +357,6 @@ impl Component for CeremonyMode {
 
             CeremonyPhase::Commit => Action::Noop, // auto-advance on burn
 
-            CeremonyPhase::PostCommitError => match key.code {
-                KeyCode::Char('1') => Action::RetryPostCommit,
-                KeyCode::Esc => Action::InitRootAbort,
-                _ => Action::Noop,
-            },
-
-            CeremonyPhase::Execute => match key.code {
-                KeyCode::Char('1') => Action::ConfirmCertBurn,
-                KeyCode::Esc => Action::CeremonyCancel,
-                _ => Action::Noop,
-            },
-
             CeremonyPhase::BurningDisc => Action::Noop, // auto-advance on burn
 
             CeremonyPhase::DiscDone => match key.code {
@@ -485,56 +381,5 @@ impl Component for CeremonyMode {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn execute_title_init_root_says_record() {
-        let title = CeremonyMode::execute_phase_title(Some(Operation::InitRoot));
-        assert!(
-            title.contains("RECORD"),
-            "InitRoot should say RECORD, got: {title}"
-        );
-        assert!(
-            !title.contains("VERIFY"),
-            "InitRoot should not say VERIFY, got: {title}"
-        );
-    }
-
-    #[test]
-    fn execute_title_other_ops_says_verify() {
-        for op in [
-            Some(Operation::SignCsr),
-            Some(Operation::RevokeCert),
-            Some(Operation::IssueCrl),
-            None,
-        ] {
-            let title = CeremonyMode::execute_phase_title(op);
-            assert!(
-                title.contains("VERIFY"),
-                "Op {op:?} should say VERIFY, got: {title}"
-            );
-        }
-    }
-
-    #[test]
-    fn fingerprint_instruction_init_root_says_record() {
-        let text = CeremonyMode::fingerprint_instruction(Some(Operation::InitRoot));
-        assert!(
-            text.contains("Record"),
-            "InitRoot instruction should say Record, got: {text}"
-        );
-    }
-
-    #[test]
-    fn fingerprint_instruction_other_ops_says_compare() {
-        for op in [Some(Operation::SignCsr), Some(Operation::RevokeCert), None] {
-            let text = CeremonyMode::fingerprint_instruction(op);
-            assert!(
-                text.contains("Compare"),
-                "Op {op:?} should say Compare, got: {text}"
-            );
-        }
-    }
-}
+// Tests for execute_phase_title/fingerprint_instruction removed:
+// rendering is now op-internal (InitRootCtx, SignCsrCtx).

@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::Frame;
 
-use super::{AppShared, ConfirmTarget, OpAction, OpContext};
+use super::{ConfirmTarget, OpAction, OpContext, OpEnv};
 use crate::media::{IsoFile, SessionEntry};
 
 /// Phase FSM for the InitRoot ceremony.
@@ -19,6 +19,9 @@ pub enum InitRootPhase {
     ShareVerify,
     /// Cert preview — user records fingerprint then triggers record burn.
     Execute,
+    /// HSM bootstrap / keygen / cert build failed after intent write.
+    /// Operator can [1] retry or [Esc] abort.
+    PostCommitError,
 }
 
 /// Operation context for InitRoot.
@@ -33,6 +36,8 @@ pub struct InitRootCtx {
     pub cert_der: Option<Vec<u8>>,
     pub crl_der: Option<Vec<u8>>,
     pub fingerprint: Option<String>,
+    /// Last error message for PostCommitError display.
+    pub error_msg: Option<String>,
 }
 
 impl InitRootCtx {
@@ -49,12 +54,13 @@ impl InitRootCtx {
             cert_der: None,
             crl_der: None,
             fingerprint: None,
+            error_msg: None,
         }
     }
 
     // ── CustodianSetup confirmed: generate PIN, split, build SessionState ──
 
-    fn on_custodian_confirm(&mut self, shared: &mut AppShared<'_>, threshold: u8) -> OpAction {
+    fn on_custodian_confirm(&mut self, shared: &mut OpEnv<'_>, threshold: u8) -> OpAction {
         let names = self.custodian_names.clone();
 
         if names.len() < 2 {
@@ -146,7 +152,7 @@ impl InitRootCtx {
 
     // ── Post-intent HSM bootstrap + keygen + cert build ────────────────
 
-    pub(crate) fn do_bootstrap_hsm(shared: &mut AppShared<'_>) -> Result<(), String> {
+    pub(crate) fn do_bootstrap_hsm(shared: &mut OpEnv<'_>) -> Result<(), String> {
         use anodize_hsm::{create_backend, HsmActor};
         use secrecy::SecretString;
 
@@ -204,10 +210,18 @@ impl InitRootCtx {
         // temporary Pkcs11 context whose C_Finalize on drop is process-global
         // and would kill the session we just bootstrapped above.
         let (device_id, model) = {
-            let id = if target.serial_number.is_empty() {
-                cfg.token_label.clone()
-            } else {
-                target.serial_number.clone()
+            // YubiHSM: USB serial number is the stable fleet identifier.
+            // SoftHSM: always use token label — PKCS#11 serial numbers are
+            // opaque values that don't match open_session_by_id expectations.
+            let id = match cfg.backend {
+                anodize_config::HsmBackendKind::Softhsm => cfg.token_label.clone(),
+                anodize_config::HsmBackendKind::Yubihsm => {
+                    if target.serial_number.is_empty() {
+                        cfg.token_label.clone()
+                    } else {
+                        target.serial_number.clone()
+                    }
+                }
             };
             let model_name = if target.model.is_empty() {
                 format!("{:?}", cfg.backend)
@@ -252,7 +266,7 @@ impl InitRootCtx {
         Ok(())
     }
 
-    fn do_generate_and_build(&mut self, shared: &mut AppShared<'_>) -> Result<(), String> {
+    fn do_generate_and_build(&mut self, shared: &mut OpEnv<'_>) -> Result<(), String> {
         use anodize_ca::{build_root_cert, issue_crl, P384HsmSigner};
         use anodize_hsm::{Hsm, KeySpec};
         use der::Encode;
@@ -328,6 +342,7 @@ impl OpContext for InitRootCtx {
             | InitRootPhase::ShareReveal
             | InitRootPhase::ShareVerify => 1,
             InitRootPhase::Execute => 4,
+            InitRootPhase::PostCommitError => 2,
         }
     }
 
@@ -337,6 +352,7 @@ impl OpContext for InitRootCtx {
             InitRootPhase::ShareReveal => "Root Init \u{2014} Distribute Shares",
             InitRootPhase::ShareVerify => "Root Init \u{2014} Verify Shares",
             InitRootPhase::Execute => "Certificate Preview \u{2014} RECORD FINGERPRINT",
+            InitRootPhase::PostCommitError => "Post-Commit Error",
         }
     }
 
@@ -349,6 +365,25 @@ impl OpContext for InitRootCtx {
             InitRootPhase::ShareVerify => {
                 // Overlay component renders itself
                 vec![]
+            }
+            InitRootPhase::PostCommitError => {
+                // Rendered inline — no overlay component.
+                vec![
+                    String::new(),
+                    "  The intent session was written to disc, but the post-commit".into(),
+                    "  operation (HSM bootstrap / key generation / cert build) failed.".into(),
+                    String::new(),
+                    format!(
+                        "  Error: {}",
+                        self.error_msg.as_deref().unwrap_or("(unknown)")
+                    ),
+                    String::new(),
+                    "  The disc is safe \u{2014} only the intent WAL was written.".into(),
+                    "  You may retry without re-burning the intent session.".into(),
+                    String::new(),
+                    "  [1]   Retry HSM + key operation".into(),
+                    "  [Esc] Abort to operation select".into(),
+                ]
             }
             InitRootPhase::Execute => {
                 let fp = self.fingerprint.as_deref().unwrap_or("(none)");
@@ -383,7 +418,7 @@ impl OpContext for InitRootCtx {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, shared: &mut AppShared<'_>) -> OpAction {
+    fn handle_key(&mut self, key: KeyEvent, shared: &mut OpEnv<'_>) -> OpAction {
         match self.phase {
             InitRootPhase::CustodianSetup => {
                 if key.code == KeyCode::Esc {
@@ -439,6 +474,28 @@ impl OpContext for InitRootCtx {
                 }
                 OpAction::Noop
             }
+            InitRootPhase::PostCommitError => match key.code {
+                KeyCode::Char('1') => {
+                    // Retry HSM bootstrap + keygen inline.
+                    if let Err(e) = Self::do_bootstrap_hsm(shared) {
+                        let msg = format!("Retry failed: {e}");
+                        shared.set_status(&msg);
+                        self.error_msg = Some(msg);
+                        OpAction::Noop
+                    } else if let Err(e) = self.do_generate_and_build(shared) {
+                        let msg = format!("Retry failed: {e}");
+                        shared.set_status(&msg);
+                        self.error_msg = Some(msg);
+                        OpAction::Noop
+                    } else {
+                        // do_generate_and_build sets phase to Execute on success.
+                        self.error_msg = None;
+                        OpAction::Noop
+                    }
+                }
+                KeyCode::Esc => OpAction::Abort,
+                _ => OpAction::Noop,
+            },
             InitRootPhase::Execute => match key.code {
                 KeyCode::Char('1') => OpAction::ShowConfirm {
                     title: "Write Record to Disc".into(),
@@ -465,6 +522,20 @@ impl OpContext for InitRootCtx {
         true
     }
 
+    fn abort_confirm_body(&self) -> Vec<String> {
+        match self.phase {
+            InitRootPhase::Execute => vec![
+                "HSM session and partially-reconstructed PIN".into(),
+                "will be discarded.".into(),
+            ],
+            InitRootPhase::PostCommitError => vec![
+                "Intent was already written to disc.".into(),
+                "Aborting leaves an orphaned intent session.".into(),
+            ],
+            _ => vec!["All ceremony progress will be lost.".into()],
+        }
+    }
+
     fn in_text_entry(&self) -> bool {
         matches!(
             self.phase,
@@ -485,7 +556,7 @@ impl OpContext for InitRootCtx {
     fn build_intent_audit_event(
         &self,
         genesis_hex: &str,
-        shared: &AppShared<'_>,
+        shared: &OpEnv<'_>,
     ) -> Option<(String, serde_json::Value)> {
         let (cn, org, country) = shared
             .profile
@@ -521,7 +592,7 @@ impl OpContext for InitRootCtx {
         dir_name: String,
         ts: std::time::SystemTime,
         staging: &std::path::Path,
-        shared: &mut AppShared<'_>,
+        shared: &mut OpEnv<'_>,
     ) -> Option<SessionEntry> {
         use anodize_audit::AuditLog;
 
@@ -615,16 +686,20 @@ impl OpContext for InitRootCtx {
         Ok(true)
     }
 
-    fn advance_after_intent_burn(&mut self, shared: &mut AppShared<'_>) {
+    fn advance_after_intent_burn(&mut self, shared: &mut OpEnv<'_>) {
         // Bootstrap HSM, generate key, build cert + CRL.
         if let Err(e) = Self::do_bootstrap_hsm(shared) {
             tracing::error!("InitRoot: HSM bootstrap failed: {e}");
-            shared.set_status(e);
+            shared.set_status(&e);
+            self.error_msg = Some(e);
+            self.phase = InitRootPhase::PostCommitError;
             return;
         }
         if let Err(e) = self.do_generate_and_build(shared) {
             tracing::error!("InitRoot: keygen/cert build failed: {e}");
-            shared.set_status(e);
+            shared.set_status(&e);
+            self.error_msg = Some(e);
+            self.phase = InitRootPhase::PostCommitError;
         }
     }
 }

@@ -10,7 +10,7 @@ use ratatui::Frame;
 
 use anodize_hsm::{BackupResult, BackupTarget};
 
-use super::{AppShared, ConfirmTarget, OpAction, OpContext};
+use super::{ConfirmTarget, OpAction, OpContext, OpEnv};
 use crate::media::{IsoFile, SessionEntry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +69,7 @@ impl BackupCtx {
 
     // ── quorum completion ────────────────────────────────────────────────
 
-    fn try_quorum_complete(&mut self, shared: &mut AppShared<'_>) -> OpAction {
+    fn try_quorum_complete(&mut self, shared: &mut OpEnv<'_>) -> OpAction {
         let shares: Vec<anodize_sss::Share> = self
             .share_input
             .as_ref()
@@ -90,7 +90,7 @@ impl BackupCtx {
         }
     }
 
-    fn discover_devices(&mut self, shared: &mut AppShared<'_>) {
+    fn discover_devices(&mut self, shared: &mut OpEnv<'_>) {
         let Some(profile) = shared.profile else {
             self.phase = BackupPhase::Error("No profile loaded.".into());
             self.render_lines();
@@ -183,7 +183,7 @@ impl BackupCtx {
     }
 
     /// Execute the chosen action (pair or backup).
-    fn do_execute(&mut self, shared: &mut AppShared<'_>) {
+    fn do_execute(&mut self, shared: &mut OpEnv<'_>) {
         let Some(profile) = shared.profile else {
             self.phase = BackupPhase::Error("No profile loaded.".into());
             self.render_lines();
@@ -421,7 +421,7 @@ impl OpContext for BackupCtx {
         }
     }
 
-    fn handle_key(&mut self, key: KeyEvent, shared: &mut AppShared<'_>) -> OpAction {
+    fn handle_key(&mut self, key: KeyEvent, shared: &mut OpEnv<'_>) -> OpAction {
         match self.phase {
             BackupPhase::Quorum => {
                 if key.code == KeyCode::Esc {
@@ -517,7 +517,7 @@ impl OpContext for BackupCtx {
     fn build_intent_audit_event(
         &self,
         genesis_hex: &str,
-        _shared: &AppShared<'_>,
+        _shared: &OpEnv<'_>,
     ) -> Option<(String, serde_json::Value)> {
         let action = if self.action_is_pair {
             "pair-devices"
@@ -540,7 +540,7 @@ impl OpContext for BackupCtx {
         dir_name: String,
         ts: std::time::SystemTime,
         staging: &std::path::Path,
-        shared: &mut AppShared<'_>,
+        shared: &mut OpEnv<'_>,
     ) -> Option<SessionEntry> {
         use anodize_audit::AuditLog;
 
@@ -593,7 +593,7 @@ impl OpContext for BackupCtx {
         })
     }
 
-    fn advance_after_intent_burn(&mut self, shared: &mut AppShared<'_>) {
+    fn advance_after_intent_burn(&mut self, shared: &mut OpEnv<'_>) {
         // Intent burned → execute the backup/pair operation, then record burn happens.
         self.do_execute(shared);
         if self.succeeded() {
