@@ -81,3 +81,26 @@ appears to complete the rekey on the HSM and/or state.json.  The ceremony should
 - detect the incomplete confirmation and roll back / warn the operator that
   the new shares are now live despite the abort.
 
+## HSM Pairing -- no shares
+When pairing two HSMs together, we shouldn't gather share inputs from the operators and the HSM PIN is not needed for this operation.
+
+## Session Continuity
+There is a session continuity error where session 2 is missing three files from session 1, like root.cll, root.crt and state.json. We need to make sure it is invariant that each session is a superset of all the files of the session that precedes it.
+
+## Disc and Shuttle Volume Labels are ambiguous
+The shuttle and the CD drive have the same volume labels, `ANODIZE`, which leads to ambiguity in the auto mounting. Rename the shuttle volume label to `SHUTTLE` or similar.
+
+## Subsequent amounts of the shuttle.
+Subsequent mounts of the shuttle do not appear to be working consistently with the auto mount.
+
+## SignCsr: display CSR public-key fingerprint before signing
+
+The Certificate Preview screen currently shows the SHA-256 fingerprint of the
+*resulting* certificate DER.  For the SignCsr flow, the operator should also see
+a fingerprint derived from the CSR's public key so they can independently verify
+(e.g. via `openssl req -in req.pem -noout -pubkey | openssl sha256`) that the
+key about to be signed matches what they expect.
+
+## anodize-shuttle adds no default [[cert_profiles]] to profile.toml
+
+We should add some kind of reasonable L1 profile in here so that a default anodize deployment works out of the box.
