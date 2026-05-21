@@ -464,17 +464,24 @@ impl App {
         };
 
         // Determine device_id and model for fleet enrollment.
-        // YubiHSM: USB serial number; SoftHSM: token label.
         //
         // NOTE: We intentionally avoid calling create_inventory() here.
         // For PKCS#11 backends (SoftHSM), enumerate_devices() creates a
         // temporary Pkcs11 context whose C_Finalize on drop is process-global
         // and would kill the session we just bootstrapped above.
         let (device_id, model) = {
-            let id = if target.serial_number.is_empty() {
-                cfg.token_label.clone()
-            } else {
-                target.serial_number.clone()
+            // YubiHSM: USB serial number is the stable fleet identifier.
+            // SoftHSM: always use token label — PKCS#11 serial numbers are
+            // opaque values that don't match open_session_by_id expectations.
+            let id = match cfg.backend {
+                anodize_config::HsmBackendKind::Softhsm => cfg.token_label.clone(),
+                anodize_config::HsmBackendKind::Yubihsm => {
+                    if target.serial_number.is_empty() {
+                        cfg.token_label.clone()
+                    } else {
+                        target.serial_number.clone()
+                    }
+                }
             };
             let model_name = if target.model.is_empty() {
                 format!("{:?}", cfg.backend)

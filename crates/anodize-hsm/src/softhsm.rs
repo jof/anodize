@@ -640,8 +640,18 @@ impl HsmInventory for SoftHsmBackend {
                 Err(_) => None,
             };
 
+            // Use token label as the device identifier — this matches
+            // the fleet device_id set during bootstrap (SoftHSM serial
+            // numbers are opaque PKCS#11 values, not suitable for fleet
+            // identity).
+            let device_serial = if ti.token_label.is_empty() {
+                ti.serial_number.clone()
+            } else {
+                ti.token_label.clone()
+            };
+
             devices.push(HsmDeviceInfo {
-                serial: ti.serial_number.clone(),
+                serial: device_serial,
                 model: if ti.model.is_empty() {
                     "SoftHSM".into()
                 } else {
