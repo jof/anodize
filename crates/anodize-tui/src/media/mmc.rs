@@ -164,43 +164,57 @@ pub fn wait_drive_ready(dev: &SgDev, timeout: std::time::Duration) -> Result<()>
 ///
 /// Strategy (mirrors libburn — never assumes 0xFF support):
 ///  1. Blank disc → NWA is 0.
-///  2. Non-blank → query READ TRACK INFORMATION for the last track number
-///     reported in READ DISC INFORMATION.  This is the most portable method
-///     and works on all tested drives (BUFFALO USB BD-R, Pioneer, LG, cdemu).
-///  3. If that fails, try track 0xFF ("invisible track"), which some drives
-///     support per Feature 0021h Incremental Streaming Writable.  USB bridge
-///     chipsets often reject this — hence it is a fallback, not primary.
-///  4. Validate: NWA must be > 0 on a non-blank disc; bail otherwise.
+///  2. Non-blank → try candidate tracks in order, accepting the first with
+///     NWA > 0:
+///     a. `last_track_l` from READ DISC INFORMATION (libburn's primary).
+///     b. `last_track_l + 1`: after CLOSE SESSION some drives (including
+///        cdemu for BD-R) leave `last_track_l` pointing at the closed track
+///        instead of the new open track in the next session.
+///     c. Track 0xFF ("invisible track"): some CD-R era drives support this
+///        per Feature 0021h.  USB bridge chipsets often reject it.
+///  3. Bail if no candidate yields NWA > 0.
 pub fn resolve_nwa(dev: &SgDev, info: &DiscInfo) -> Result<u32> {
     if info.status == DiscStatus::Blank {
         return Ok(0);
     }
 
-    // Primary: last track number from disc info (libburn's approach).
-    let nwa = read_track_info(dev, info.last_track_l)
-        // Fallback: invisible track 0xFF (cdemu and some CD-R era drives).
-        .or_else(|e| {
-            tracing::debug!(
-                track = info.last_track_l,
-                "READ TRACK INFO by last_track_l failed ({e:#}), trying 0xFF"
-            );
-            read_track_info(dev, 0xFF)
-        })
-        .map(|t| t.nwa)
-        .context("could not determine NWA from any track query")?;
-
-    // Sanity: on a non-blank disc the NWA should never be 0.
-    if nwa == 0 {
-        anyhow::bail!(
-            "NWA resolved to 0 on a non-blank disc (status={:?}, sessions={}, last_track={}); \
-             refusing to overwrite session 1",
-            info.status,
-            info.sessions,
-            info.last_track_l,
-        );
+    // Try candidate tracks in order.  For each, accept the first one that
+    // returns a non-zero NWA (a zero NWA on a non-blank disc means we hit a
+    // closed track rather than the open track for the next session).
+    //
+    // Candidates:
+    //  1. last_track_l from READ DISC INFORMATION (libburn's primary approach).
+    //  2. last_track_l + 1: after CLOSE SESSION some drives (including cdemu
+    //     for BD-R) do not update last_track_l to include the new open track.
+    //  3. Invisible track 0xFF: some CD-R era drives support this.
+    let candidates: [u8; 3] = [info.last_track_l, info.last_track_l.wrapping_add(1), 0xFF];
+    for &track in &candidates {
+        match read_track_info(dev, track) {
+            Ok(t) if t.nwa > 0 => {
+                tracing::info!(track, nwa = t.nwa, "resolve_nwa: accepted");
+                return Ok(t.nwa);
+            }
+            Ok(t) => {
+                tracing::debug!(
+                    track,
+                    nwa = t.nwa,
+                    "resolve_nwa: NWA=0, skipping closed track"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(track, "resolve_nwa: READ TRACK INFO failed ({e:#})");
+            }
+        }
     }
 
-    Ok(nwa)
+    anyhow::bail!(
+        "NWA resolved to 0 on a non-blank disc (status={:?}, sessions={}, last_track={}); \
+         tried tracks {:?}",
+        info.status,
+        info.sessions,
+        info.last_track_l,
+        candidates,
+    )
 }
 
 // ── Write parameters ──────────────────────────────────────────────────────────
