@@ -212,10 +212,10 @@ impl DiscSyncState {
     /// Kick off the background write for the current track index.
     fn start_next_track(&self, dev: &std::path::Path) -> mpsc::Receiver<BurnProgress> {
         let session_end = self.target_session_count + self.burn_track_idx + 1;
-        let all = self.master_sessions[..session_end].to_vec();
-        let is_final = false; // never finalize during sync
+        let prior = &self.master_sessions[..session_end - 1];
+        let new = self.master_sessions[session_end - 1].clone();
         let (tx, rx) = mpsc::channel();
-        crate::media::write_session(dev, all, is_final, tx);
+        crate::media::write_session(dev, prior, new, false, tx);
         rx
     }
 

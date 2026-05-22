@@ -86,7 +86,6 @@ The dev ISO (`nix/dev-iso.nix`) adds tools for testing:
 - **SSH access**: `ceremony` user (drops into sentinel), `debug` user (shell).
 - **cdemu BD-R persistence**: `cdemu-load-bdr` service loads/creates virtual disc at boot.
 - **SoftHSM token persistence**: tokens stored on the shuttle image, surviving unmount/remount.
-- **`--skip-disc` flag**: bypass optical disc operations for faster iteration.
 - **`dev-softhsm-usb` feature**: enables dev paths for SoftHSM token location.
 
 ---
