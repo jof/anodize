@@ -59,13 +59,13 @@ fn main() -> anyhow::Result<()> {
         }],
     };
 
-    let mut all_sessions = scan.sessions;
-    all_sessions.push(new_session);
-
-    eprintln!("Writing session {dir_name} ({} total)…", all_sessions.len());
+    eprintln!(
+        "Writing session {dir_name} ({} total)…",
+        scan.sessions.len() + 1
+    );
 
     let (tx, rx) = mpsc::channel();
-    write_session(dev, all_sessions, false, tx);
+    write_session(dev, &scan.sessions, new_session, false, tx);
 
     // Print progress until Done
     for msg in rx {

@@ -54,7 +54,6 @@ pub struct App {
     pub setup_complete: bool,
 
     // CLI flags
-    pub skip_disc: bool,
     pub shuttle_mount: PathBuf,
 
     // Clock
@@ -83,7 +82,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(shuttle_mount: PathBuf, skip_disc: bool) -> Self {
+    pub fn new(shuttle_mount: PathBuf) -> Self {
         Self {
             running: true,
             mode: Mode::Setup,
@@ -100,7 +99,6 @@ impl App {
             utilities: UtilitiesMode::new(),
 
             setup_complete: false,
-            skip_disc,
             shuttle_mount,
 
             confirmed_time: None,
@@ -137,7 +135,7 @@ impl App {
             disc: &mut self.disc,
             profile: self.profile.as_ref(),
             shuttle_mount: &self.shuttle_mount,
-            skip_disc: self.skip_disc,
+
             confirmed_time: &mut self.confirmed_time,
             pin_buf: &mut self.pin_buf,
             status: &mut self.status,
@@ -596,13 +594,12 @@ impl App {
                 );
             }
             Action::ConfirmDisc => {
-                let ready = self.skip_disc
-                    || (self.disc.optical_dev.is_some()
-                        && self
-                            .disc
-                            .sessions_remaining
-                            .map(|r| r >= 2)
-                            .unwrap_or(false));
+                let ready = self.disc.optical_dev.is_some()
+                    && self
+                        .disc
+                        .sessions_remaining
+                        .map(|r| r >= 2)
+                        .unwrap_or(false);
                 if ready {
                     self.update(Action::SetupComplete);
                 }
@@ -731,14 +728,6 @@ impl App {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )));
         }
-        if self.skip_disc {
-            header_lines.push(Line::from(Span::styled(
-                "*** --skip-disc ACTIVE: optical disc write will be skipped ***",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )));
-        }
         let header_height = header_lines.len() as u16 + 2;
 
         // Layout: header | mode bar | phase bar | content | status bar | status line
@@ -755,8 +744,8 @@ impl App {
             .split(area);
 
         // Header
-        let border_style = if is_dev || self.skip_disc {
-            Style::default().fg(if is_dev { Color::Red } else { Color::Yellow })
+        let border_style = if is_dev {
+            Style::default().fg(Color::Red)
         } else {
             Style::default()
         };

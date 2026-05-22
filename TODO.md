@@ -84,9 +84,6 @@ appears to complete the rekey on the HSM and/or state.json.  The ceremony should
 ## HSM Pairing -- no shares
 When pairing two HSMs together, we shouldn't gather share inputs from the operators and the HSM PIN is not needed for this operation.
 
-## Session Continuity
-There is a session continuity error where session 2 is missing three files from session 1, like root.cll, root.crt and state.json. We need to make sure it is invariant that each session is a superset of all the files of the session that precedes it.
-
 
 ## Subsequent amounts of the shuttle.
 Subsequent mounts of the shuttle do not appear to be working consistently with the auto mount.

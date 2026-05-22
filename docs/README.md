@@ -60,5 +60,5 @@ Anodize is an offline root-CA ceremony tool written in Rust. It runs air-gapped 
 
 | Environment | HSM | Optical archive |
 |---|---|---|
-| Dev / CI | SoftHSM2 (PKCS#11) | `--skip-disc` or cdemu SCSI passthrough |
+| Dev / CI | SoftHSM2 (PKCS#11) | cdemu virtual BD-R via SCSI passthrough |
 | Production | YubiHSM 2 (native USB) | BD-R / DVD-R / M-Disc via SG_IO SAO |

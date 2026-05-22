@@ -284,21 +284,59 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
     })
 }
 
+// ── Session superset invariant ─────────────────────────────────────────────────
+
+/// Carry forward files from `prior` that are missing in `new`.
+/// AUDIT.LOG and STATE.JSON are expected to change between sessions and are
+/// never overwritten if already present.  Any other missing file is copied
+/// verbatim and logged at warn level.
+fn backfill_session(prior: &SessionEntry, new: &mut SessionEntry) {
+    const MUTABLE_FILES: &[&str] = &["AUDIT.LOG", "STATE.JSON"];
+    for prev_file in &prior.files {
+        let already = new
+            .files
+            .iter()
+            .any(|f| f.name.eq_ignore_ascii_case(&prev_file.name));
+        if !already {
+            let is_mutable = MUTABLE_FILES
+                .iter()
+                .any(|m| prev_file.name.eq_ignore_ascii_case(m));
+            if is_mutable {
+                tracing::debug!(
+                    file = %prev_file.name,
+                    "backfill_session: skipping mutable file not present in new session"
+                );
+            } else {
+                tracing::warn!(
+                    file = %prev_file.name,
+                    prior_session = %prior.dir_name,
+                    new_session = %new.dir_name,
+                    "backfill_session: carrying forward missing file from prior session"
+                );
+                new.files.push(prev_file.clone());
+            }
+        }
+    }
+}
+
 // ── Session write ─────────────────────────────────────────────────────────────
 
 /// Write a new TAO session to `dev`.
-/// `all_sessions` is prior sessions + the new one (last element = newest).
+/// `prior_sessions` are the sessions already on disc; `new_session` is the one
+/// being added.  Missing files from the immediately preceding session are
+/// automatically carried forward into `new_session` (the superset invariant).
 /// Set `is_final` to close the disc after this session.
-/// Designed to be called from a background thread; sends progress + result via `progress`.
 pub fn write_session(
     dev: &Path,
-    all_sessions: Vec<SessionEntry>,
+    prior_sessions: &[SessionEntry],
+    new_session: SessionEntry,
     is_final: bool,
     progress: Sender<BurnProgress>,
 ) {
     let dev = dev.to_path_buf();
+    let prior = prior_sessions.to_vec();
     std::thread::spawn(move || {
-        let result = write_session_inner(&dev, &all_sessions, is_final, &progress);
+        let result = write_session_inner(&dev, &prior, new_session, is_final, &progress);
         progress.send(BurnProgress::Done(result)).ok();
     });
 }
@@ -310,7 +348,8 @@ fn step(progress: &Sender<BurnProgress>, msg: impl Into<String>) {
 
 fn write_session_inner(
     dev: &Path,
-    sessions: &[SessionEntry],
+    prior_sessions: &[SessionEntry],
+    mut new_session: SessionEntry,
     is_final: bool,
     progress: &Sender<BurnProgress>,
 ) -> Result<()> {
@@ -403,9 +442,17 @@ fn write_session_inner(
     tracing::debug!("write_session_inner: RESERVE TRACK");
     let _ = reserve_track(&sg);
 
+    // Enforce the superset invariant: carry forward any files from the
+    // immediately preceding session that are missing from the new one.
+    if let Some(prev) = prior_sessions.last() {
+        backfill_session(prev, &mut new_session);
+    }
+
     // Build ISO image in memory (all sessions including new one)
     step(progress, "Building ISO 9660 image…");
-    let image = iso9660::build_iso(sessions);
+    let mut all_sessions = prior_sessions.to_vec();
+    all_sessions.push(new_session);
+    let image = iso9660::build_iso(&all_sessions);
     let total_sectors = image.len().div_ceil(iso9660::SECTOR);
     let image_kib = image.len() / 1024;
     tracing::info!(
@@ -575,5 +622,98 @@ mod tests {
     fn write_and_sync_fails_on_bad_path() {
         let result = write_and_sync(Path::new("/no/such/dir/file.bin"), b"data");
         assert!(result.is_err());
+    }
+
+    // ── backfill_session tests ────────────────────────────────────────
+
+    fn make_session(name: &str, files: Vec<(&str, &[u8])>) -> iso9660::SessionEntry {
+        iso9660::SessionEntry {
+            dir_name: name.into(),
+            timestamp: std::time::SystemTime::now(),
+            files: files
+                .into_iter()
+                .map(|(n, d)| iso9660::IsoFile {
+                    name: n.into(),
+                    data: d.to_vec(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn backfill_adds_missing_files() {
+        let prior = make_session("s1", vec![("ROOT.CRT", b"cert"), ("AUDIT.LOG", b"log1")]);
+        let mut new = make_session("s2", vec![("AUDIT.LOG", b"log2")]);
+
+        backfill_session(&prior, &mut new);
+
+        assert_eq!(new.files.len(), 2);
+        assert!(
+            new.files
+                .iter()
+                .any(|f| f.name == "ROOT.CRT" && f.data == b"cert"),
+            "ROOT.CRT should be carried forward from prior session"
+        );
+        // AUDIT.LOG should keep the new version
+        let audit = new.files.iter().find(|f| f.name == "AUDIT.LOG").unwrap();
+        assert_eq!(audit.data, b"log2");
+    }
+
+    #[test]
+    fn backfill_noop_when_superset() {
+        let prior = make_session("s1", vec![("ROOT.CRT", b"cert")]);
+        let mut new = make_session("s2", vec![("ROOT.CRT", b"cert"), ("INTER.CRT", b"inter")]);
+
+        backfill_session(&prior, &mut new);
+
+        assert_eq!(new.files.len(), 2, "no files should be added");
+    }
+
+    #[test]
+    fn backfill_skips_mutable_files_not_in_new() {
+        let prior = make_session(
+            "s1",
+            vec![
+                ("ROOT.CRT", b"cert"),
+                ("AUDIT.LOG", b"log1"),
+                ("STATE.JSON", b"state1"),
+            ],
+        );
+        let mut new = make_session("s2", vec![("ROOT.CRT", b"cert")]);
+
+        backfill_session(&prior, &mut new);
+
+        // ROOT.CRT already present, AUDIT.LOG and STATE.JSON are mutable — not backfilled
+        assert_eq!(new.files.len(), 1);
+        assert_eq!(new.files[0].name, "ROOT.CRT");
+    }
+
+    #[test]
+    fn backfill_multi_session_cascade() {
+        let s1 = make_session("s1", vec![("A.TXT", b"a")]);
+        let mut s2 = make_session("s2", vec![("B.TXT", b"b")]);
+        backfill_session(&s1, &mut s2);
+
+        let mut s3 = make_session("s3", vec![("C.TXT", b"c")]);
+        backfill_session(&s2, &mut s3);
+
+        assert_eq!(s3.files.len(), 3);
+        let names: Vec<&str> = s3.files.iter().map(|f| f.name.as_str()).collect();
+        assert!(names.contains(&"A.TXT"));
+        assert!(names.contains(&"B.TXT"));
+        assert!(names.contains(&"C.TXT"));
+    }
+
+    #[test]
+    fn backfill_single_session_noop() {
+        // When there's no prior session, backfill is never called.
+        // Verify that write_session_inner's guard works by just checking
+        // that backfill on an empty prior doesn't panic.
+        let prior = make_session("s0", vec![]);
+        let mut new = make_session("s1", vec![("ROOT.CRT", b"cert")]);
+
+        backfill_session(&prior, &mut new);
+
+        assert_eq!(new.files.len(), 1);
     }
 }

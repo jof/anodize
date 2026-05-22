@@ -2,7 +2,7 @@
 //!
 //! Key invariants (enforced structurally):
 //! - `UsbWrite` is only reachable from `DiscDone`.
-//! - `DiscDone` is only set after a successful optical disc session burn (or --skip-disc).
+//! - `DiscDone` is only set after a successful optical disc session burn.
 //! - USB write is therefore impossible without a committed disc write.
 
 mod action;
@@ -31,11 +31,6 @@ struct Cli {
     /// Mount point for shuttle USB stick (managed by systemd mount-anodize-shuttle.service).
     #[arg(long, default_value = "/run/anodize/shuttle")]
     shuttle_mount: PathBuf,
-
-    /// Skip optical disc burn; write disc artifacts to /tmp/anodize-staging instead.
-    /// For development and testing only — never use in a real ceremony.
-    #[arg(long)]
-    skip_disc: bool,
 }
 
 // ── Dev build serial warning ──────────────────────────────────────────────────
@@ -70,7 +65,7 @@ fn main() -> Result<()> {
     tui.enter()?;
 
     // Application state
-    let mut app = app::App::new(cli.shuttle_mount, cli.skip_disc);
+    let mut app = app::App::new(cli.shuttle_mount);
 
     // Event handler: 100ms tick rate drives background polling
     let events = event::EventHandler::new(Duration::from_millis(100));

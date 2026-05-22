@@ -116,7 +116,6 @@ impl UtilitiesMode {
 
         // Ceremony state
         lines.push(format!("  USB mount: {}", app.shuttle_mount.display()));
-        lines.push(format!("  Skip disc: {}", app.skip_disc));
         if let Some(ref p) = app.profile {
             lines.push(format!(
                 "  Profile: {} / {}",

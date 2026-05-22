@@ -104,7 +104,7 @@ impl ValidateCtx {
                     });
                 }
             }
-        } else if !shared.skip_disc {
+        } else {
             findings.push(Finding {
                 severity: Severity::Warn,
                 check: "audit_chain".into(),

@@ -24,7 +24,7 @@ Anodize is a small, auditable root-CA tool written in Rust. It runs air-gapped f
 
 | Environment | HSM | Optical archive |
 |---|---|---|
-| Dev / CI | SoftHSM2 | `--skip-disc` flag; writes staging ISO to `/run/anodize/staging` |
+| Dev / CI | SoftHSM2 | cdemu virtual BD-R via SCSI passthrough |
 | Production | YubiHSM 2 | BD-R or DVD-R in an optical drive (SG_IO SAO) |
 
 The `Hsm` and `HsmBackend` traits abstract both HSM backends. A `create_backend()` factory function instantiates the appropriate backend from the `backend` field in `profile.toml`. The binary has no compile-time knowledge of which backend it will use.

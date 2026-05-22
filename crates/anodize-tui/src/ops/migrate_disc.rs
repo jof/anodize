@@ -134,13 +134,12 @@ impl OpContext for MigrateCtx {
             MigratePhase::WaitTarget => match key.code {
                 KeyCode::Char('1') => {
                     // Check disc readiness
-                    let ready = shared.skip_disc
-                        || (shared.disc.optical_dev.is_some()
-                            && shared
-                                .disc
-                                .sessions_remaining
-                                .map(|r| r >= 50)
-                                .unwrap_or(false));
+                    let ready = shared.disc.optical_dev.is_some()
+                        && shared
+                            .disc
+                            .sessions_remaining
+                            .map(|r| r >= 50)
+                            .unwrap_or(false);
                     if ready {
                         OpAction::StartRecordBurn
                     } else {

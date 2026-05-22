@@ -64,19 +64,6 @@ impl App {
     // ── Disc scan tick ────────────────────────────────────────────────────────
 
     pub(crate) fn tick_wait_disc(&mut self, need_blank: bool) {
-        if self.skip_disc {
-            self.disc.optical_dev = Some(PathBuf::from("/run/anodize/staging"));
-            self.hw.disc_state = HwState::Present("--skip-disc".into());
-            self.disc.sessions_remaining = Some(100);
-            let label = if need_blank {
-                "--skip-disc mode: target disc ready. Press [1]."
-            } else {
-                "--skip-disc mode: disc ready. Press [1]."
-            };
-            self.set_status(label);
-            return;
-        }
-
         // Check for a pending background scan result.
         if let Some(ref rx) = self.disc.disc_scan_rx {
             match rx.try_recv() {
@@ -571,7 +558,7 @@ impl App {
             }
         };
 
-        if !self.skip_disc && self.disc.sessions_remaining.map(|r| r < 2).unwrap_or(false) {
+        if self.disc.sessions_remaining.map(|r| r < 2).unwrap_or(false) {
             self.set_status("Disc full — cannot write intent session. Insert new disc.");
             return;
         }
@@ -623,51 +610,30 @@ impl App {
                 data: partial_log_bytes,
             }],
         };
-        let mut all_sessions = self.disc.prior_sessions.clone();
-        all_sessions.push(intent_session.clone());
 
         let (tx, rx) = mpsc::channel();
         self.disc.burn_rx = Some(rx);
         self.disc.burn_log.clear();
         self.disc.burn_started = Some(std::time::Instant::now());
-        self.disc.pending_intent_session = Some(intent_session);
+        self.disc.pending_intent_session = Some(intent_session.clone());
 
         tracing::info!(
-            skip_disc = self.skip_disc,
             optical_dev = ?self.disc.optical_dev,
             "do_write_intent: about to dispatch write"
         );
 
-        {
-            if self.skip_disc {
-                let iso = media::iso9660::build_iso(&all_sessions);
-                let iso_path = staging.join("ceremony.iso");
-                match std::fs::write(&iso_path, &iso) {
-                    Ok(()) => {
-                        tracing::info!("do_write_intent: skip_disc ISO written, sending Ok");
-                        tx.send(media::BurnProgress::Done(Ok(()))).ok();
-                    }
-                    Err(e) => {
-                        tracing::error!("do_write_intent: skip_disc ISO write failed: {e}");
-                        tx.send(media::BurnProgress::Done(Err(anyhow::anyhow!(
-                            "write intent ISO: {e}"
-                        ))))
-                        .ok();
-                    }
-                }
-            } else if let Some(dev) = self.disc.optical_dev.clone() {
-                tracing::info!(
-                    "do_write_intent: spawning write_session to {}",
-                    dev.display()
-                );
-                media::write_session(&dev, all_sessions, false, tx);
-            } else {
-                tracing::error!("do_write_intent: no optical device!");
-                self.set_status("No optical device — cannot write intent");
-                self.disc.burn_rx = None;
-                self.disc.pending_intent_session = None;
-                return;
-            }
+        if let Some(dev) = self.disc.optical_dev.clone() {
+            tracing::info!(
+                "do_write_intent: spawning write_session to {}",
+                dev.display()
+            );
+            media::write_session(&dev, &self.disc.prior_sessions, intent_session, false, tx);
+        } else {
+            tracing::error!("do_write_intent: no optical device!");
+            self.set_status("No optical device — cannot write intent");
+            self.disc.burn_rx = None;
+            self.disc.pending_intent_session = None;
+            return;
         }
 
         tracing::info!(
@@ -723,15 +689,12 @@ impl App {
             }],
         };
 
-        let mut all_sessions = self.disc.prior_sessions.clone();
-        all_sessions.push(seed_session);
-
         let (tx, rx) = mpsc::channel();
         self.disc.burn_rx = Some(rx);
         self.disc.burn_log.clear();
         self.disc.burn_started = Some(std::time::Instant::now());
 
-        media::write_session(dev, all_sessions, false, tx);
+        media::write_session(dev, &self.disc.prior_sessions, seed_session, false, tx);
 
         self.ceremony.state = CeremonyPhase::BurningDisc;
         self.set_status("Writing seed session…");
@@ -747,43 +710,21 @@ impl App {
             None => return,
         };
 
-        let all_sessions = {
-            let mut sessions = self.disc.prior_sessions.clone();
-            sessions.push(new_session);
-            sessions
-        };
-
         let (tx, rx) = mpsc::channel();
         self.disc.burn_rx = Some(rx);
         self.disc.burn_log.clear();
         self.disc.burn_started = Some(std::time::Instant::now());
 
-        {
-            if self.skip_disc {
-                let iso = media::iso9660::build_iso(&all_sessions);
-                let iso_path = staging.join("ceremony.iso");
-                match std::fs::write(&iso_path, &iso) {
-                    Ok(()) => {
-                        tx.send(media::BurnProgress::Done(Ok(()))).ok();
-                    }
-                    Err(e) => {
-                        tx.send(media::BurnProgress::Done(Err(anyhow::anyhow!(
-                            "write staging ISO: {e}"
-                        ))))
-                        .ok();
-                    }
-                }
-            } else if let Some(dev) = &self.disc.optical_dev {
-                media::write_session(dev, all_sessions, false, tx);
-            } else {
-                self.set_status("No optical device — cannot burn");
-                self.disc.burn_rx = None;
-                return;
-            }
-
-            self.ceremony.state = CeremonyPhase::BurningDisc;
-            self.set_status("Burning disc session…");
+        if let Some(dev) = &self.disc.optical_dev {
+            media::write_session(dev, &self.disc.prior_sessions, new_session, false, tx);
+        } else {
+            self.set_status("No optical device — cannot burn");
+            self.disc.burn_rx = None;
+            return;
         }
+
+        self.ceremony.state = CeremonyPhase::BurningDisc;
+        self.set_status("Burning disc session…");
     }
 
     /// Build the SessionEntry for the current operation's disc burn.
@@ -901,7 +842,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn test_app() -> crate::app::App {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.pin_buf = hex::encode(vec![0u8; 32]);
         app
     }
@@ -1118,7 +1059,7 @@ mod tests {
     }
 
     fn revoke_app_in_input() -> (crate::app::App, RevokeCertCtx) {
-        let app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         let mut ctx = revoke_ctx();
         ctx.phase = RevokeCertPhase::RevokeInput;
         (app, ctx)
@@ -1228,11 +1169,11 @@ mod tests {
 
     /// Build a valid AUDIT.LOG bytes with one entry whose entry_hash we can predict.
     fn make_audit_log_bytes() -> (Vec<u8>, String) {
-        let path = std::env::temp_dir().join(format!(
-            "anodize-test-audit-{}-{:?}.log",
-            std::process::id(),
-            std::thread::current().id(),
-        ));
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CTR: AtomicU64 = AtomicU64::new(0);
+        let n = CTR.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("anodize-test-audit-{}-{n}.log", std::process::id()));
         let genesis = [0u8; 32];
         let mut log = anodize_audit::AuditLog::create(&path, &genesis).expect("create audit log");
         let record = log
@@ -1244,7 +1185,7 @@ mod tests {
     }
 
     fn migrate_app_with_sessions(session_count: usize) -> crate::app::App {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
 
         let (audit_bytes, _hash) = make_audit_log_bytes();
         for i in 0..session_count {
@@ -1412,7 +1353,7 @@ mod tests {
 
     #[test]
     fn migrate_build_burn_session_empty_returns_none() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         // migrate_sessions is empty — no source data.
 
         let staging =
@@ -1451,7 +1392,7 @@ mod tests {
 
     #[test]
     fn q_never_quits_in_normal_phases() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         // Setup mode
         let action = app.handle_key_event(key(KeyCode::Char('q')));
         assert!(
@@ -1479,7 +1420,7 @@ mod tests {
 
     #[test]
     fn q_quits_in_disc_done_and_done() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.mode = crate::action::Mode::Ceremony;
 
         app.ceremony.state = CeremonyPhase::DiscDone;
@@ -1499,7 +1440,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_shows_confirm_in_safe_phase() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.mode = crate::action::Mode::Ceremony;
         app.ceremony.state = CeremonyPhase::OperationSelect;
 
@@ -1517,7 +1458,7 @@ mod tests {
 
     #[test]
     fn ctrl_c_blocked_in_ephemeral_phase() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.mode = crate::action::Mode::Ceremony;
         // Use ClockReconfirm as an ephemeral phase (Quorum removed; ops handle it internally).
         app.ceremony.state = CeremonyPhase::ClockReconfirm;
@@ -1538,7 +1479,7 @@ mod tests {
     fn esc_opens_abort_confirm_from_sign_csr_cert_preview() {
         use crate::ops::sign_csr::{SignCsrCtx, SignCsrPhase};
 
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
         // Set up a SignCsrCtx in CertPreview phase via ActiveOp.
@@ -1563,7 +1504,7 @@ mod tests {
 
     #[test]
     fn esc_opens_abort_confirm_from_clock_reconfirm() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
         app.ceremony.state = CeremonyPhase::ClockReconfirm;
@@ -1604,7 +1545,7 @@ mod tests {
 
     #[test]
     fn ceremony_cancel_resets_state() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         let ctx = RevokeCertCtx::new(vec![], Some(1), vec![], None);
         app.active_op = Some(crate::ops::ActiveOperation::RevokeCert(ctx));
         app.ceremony.state = CeremonyPhase::ActiveOp;
@@ -1621,20 +1562,20 @@ mod tests {
 
     #[test]
     fn clock_is_fresh_when_just_confirmed() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.confirmed_time = Some(std::time::SystemTime::now());
         assert!(app.clock_is_fresh());
     }
 
     #[test]
     fn clock_is_stale_when_never_confirmed() {
-        let app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         assert!(!app.clock_is_fresh());
     }
 
     #[test]
     fn clock_is_stale_after_threshold() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.confirmed_time = Some(std::time::SystemTime::now() - crate::app::CLOCK_DRIFT_THRESHOLD);
         assert!(
             !app.clock_is_fresh(),
@@ -1644,7 +1585,7 @@ mod tests {
 
     #[test]
     fn do_start_burn_with_fresh_clock_skips_dialog() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.confirmed_time = Some(std::time::SystemTime::now());
         app.ceremony.state = CeremonyPhase::ActiveOp;
         app.update(Action::DoStartBurn);
@@ -1660,7 +1601,7 @@ mod tests {
 
     #[test]
     fn do_start_burn_with_stale_clock_redirects_to_reconfirm() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.confirmed_time = Some(std::time::SystemTime::now() - crate::app::CLOCK_DRIFT_THRESHOLD);
         app.ceremony.state = CeremonyPhase::ActiveOp;
         app.update(Action::DoStartBurn);
@@ -1679,7 +1620,7 @@ mod tests {
 
     #[test]
     fn reconfirm_clock_after_stale_burn_skips_dialog() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.pending_burn_reconfirm = true;
         app.ceremony.state = CeremonyPhase::ClockReconfirm;
         app.update(Action::ReconfirmClock);
@@ -1698,7 +1639,7 @@ mod tests {
 
     #[test]
     fn abort_confirm_two_key_sequence_cancels_ceremony() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
         app.pending_burn_reconfirm = true;
@@ -1728,7 +1669,7 @@ mod tests {
 
     #[test]
     fn abort_confirm_esc_dismisses_dialog() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
         // Use ActiveOp with an IssueCrlCtx which has needs_abort_confirmation.
@@ -1753,7 +1694,7 @@ mod tests {
 
     #[test]
     fn validate_report_esc_exits_without_dialog() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.mode = crate::action::Mode::Ceremony;
         app.setup_complete = true;
         // Set up a ValidateCtx via the new ActiveOp system.
@@ -1780,8 +1721,7 @@ mod tests {
             Operation::ValidateDisc,
             Operation::MigrateDisc,
         ] {
-            let mut app =
-                crate::app::App::new(PathBuf::from("/tmp/nonexistent-shuttle-path"), true);
+            let mut app = crate::app::App::new(PathBuf::from("/tmp/nonexistent-shuttle-path"));
             app.ceremony.state = CeremonyPhase::DiscDone;
 
             app.do_write_shuttle();
@@ -1799,7 +1739,7 @@ mod tests {
         // Create a temp dir that exists but is not a mount point.
         let dir = std::env::temp_dir().join("anodize-test-stale-shuttle");
         let _ = std::fs::create_dir_all(&dir);
-        let mut app = crate::app::App::new(dir.clone(), true);
+        let mut app = crate::app::App::new(dir.clone());
         // Provide an active_op with artifacts so write_shuttle_artifacts returns Ok(true).
         let mut ctx = crate::ops::init_root::InitRootCtx::new();
         ctx.cert_der = Some(vec![0xDE, 0xAD]);
@@ -1829,7 +1769,7 @@ mod tests {
 
     #[test]
     fn shuttle_write_fails_on_nonexistent_path() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/anodize-test-nonexistent-42"), true);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/anodize-test-nonexistent-42"));
         // Provide an active_op with artifacts so write_shuttle_artifacts returns Ok(true).
         let mut ctx = crate::ops::sign_csr::SignCsrCtx::new(vec![], None, vec![]);
         ctx.cert_der = Some(vec![0xCA, 0xFE]);
@@ -1851,20 +1791,6 @@ mod tests {
     }
 
     // ── Disc state tracking tests ──────────────────────────────────────
-
-    #[test]
-    fn tick_wait_disc_skip_disc_sets_disc_state_present() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), true);
-        assert_eq!(app.hw.disc_state, HwState::Absent);
-
-        app.tick_wait_disc(false);
-
-        assert!(
-            matches!(app.hw.disc_state, HwState::Present(_)),
-            "skip_disc should set disc_state to Present, got {:?}",
-            app.hw.disc_state,
-        );
-    }
 
     #[test]
     fn tick_intent_burn_error_clears_disc_state() {
@@ -1929,7 +1855,7 @@ mod tests {
 
     #[test]
     fn tick_wait_disc_spawns_scan_and_shows_scanning_status() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         assert!(app.disc.disc_scan_rx.is_none());
 
         // First tick spawns a background scan thread.
@@ -1948,7 +1874,7 @@ mod tests {
 
     #[test]
     fn tick_wait_disc_returns_early_while_scan_in_flight() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         // Pre-populate with a channel that will never send.
         let (_tx, rx) = std::sync::mpsc::channel::<crate::disc::DiscScanBatch>();
         app.disc.disc_scan_rx = Some(rx);
@@ -1969,7 +1895,7 @@ mod tests {
 
     #[test]
     fn tick_wait_disc_processes_scan_result_from_channel() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
 
         // Feed a pre-built scan result through the channel.
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2008,7 +1934,7 @@ mod tests {
 
     #[test]
     fn tick_wait_disc_handles_disconnected_channel() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
 
         // Create a channel and immediately drop the sender.
         let (tx, rx) = std::sync::mpsc::channel::<crate::disc::DiscScanBatch>();
@@ -2031,7 +1957,7 @@ mod tests {
 
     #[test]
     fn process_disc_scan_no_drives_reports_absent() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.process_disc_scan(
             crate::disc::DiscScanBatch {
                 drives: vec![],
@@ -2050,7 +1976,7 @@ mod tests {
 
     #[test]
     fn process_disc_scan_rewritable_reports_rejection() {
-        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"), false);
+        let mut app = crate::app::App::new(PathBuf::from("/tmp/test-shuttle"));
         app.process_disc_scan(
             crate::disc::DiscScanBatch {
                 drives: vec![PathBuf::from("/dev/sr0")],

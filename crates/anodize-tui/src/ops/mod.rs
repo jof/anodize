@@ -202,7 +202,6 @@ pub struct OpEnv<'a> {
     pub disc: &'a mut DiscContext,
     pub profile: Option<&'a Profile>,
     pub shuttle_mount: &'a Path,
-    pub skip_disc: bool,
     pub confirmed_time: &'a mut Option<SystemTime>,
     pub pin_buf: &'a mut String,
     pub status: &'a mut String,
