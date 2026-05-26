@@ -367,6 +367,7 @@ impl App {
         if let Some(mut op) = self.active_op.take() {
             let mut shared = self.make_shared();
             let action = op.execute(&mut shared);
+            #[allow(clippy::drop_non_drop)]
             drop(shared);
             self.active_op = Some(op);
 
@@ -737,6 +738,7 @@ impl App {
         let mut op = self.active_op.take()?;
         let mut shared = self.make_shared();
         let result = op.build_record_session(dir_name, ts, staging, &mut shared);
+        #[allow(clippy::drop_non_drop)]
         drop(shared);
         self.active_op = Some(op);
         result

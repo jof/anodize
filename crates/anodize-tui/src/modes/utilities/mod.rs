@@ -335,7 +335,7 @@ impl UtilitiesMode {
                     .style(crate::theme::BLOCK)
                     .border_style(crate::theme::BORDER)
                     .title_style(crate::theme::TITLE);
-                let content = vec![
+                let content = [
                     "",
                     "  [1]  System Info",
                     "  [2]  Audit Log Browser",

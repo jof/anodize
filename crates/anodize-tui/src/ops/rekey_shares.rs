@@ -1,8 +1,8 @@
 //! RekeyShares operation context.
 //!
-//! Phases: Quorum → CustodianSetup → ShareReveal → ShareVerify → (PIN change
-//! + burn).  All SSS state, custodian components, and PIN rotation logic are
-//! scoped to this context.
+//! Phases: Quorum → CustodianSetup → ShareReveal → ShareVerify → (PIN change +
+//! burn). All SSS state, custodian components, and PIN rotation logic are scoped
+//! to this context.
 
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{layout::Rect, Frame};
@@ -70,7 +70,7 @@ impl RekeyCtx {
                 OpAction::Noop
             }
             Err(e) => {
-                shared.set_status(format!("{e}"));
+                shared.set_status(e.to_string());
                 OpAction::Abort
             }
         }

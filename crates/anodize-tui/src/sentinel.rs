@@ -447,6 +447,7 @@ fn footer_start_row(rows: u16, footer_height: u16) -> u16 {
 
 /// Read the real UID of the current process from /proc/self/status.
 #[cfg(feature = "dev-softhsm-usb")]
+#[allow(dead_code)]
 fn read_real_uid() -> Option<u32> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     status

@@ -509,12 +509,7 @@ impl ShareInput {
                             Style::default().fg(Color::DarkGray),
                         )));
                     } else if self.completions.len() > 1 && self.completions.len() <= 6 {
-                        let hint = self
-                            .completions
-                            .iter()
-                            .copied()
-                            .collect::<Vec<_>>()
-                            .join(" ");
+                        let hint = self.completions.to_vec().join(" ");
                         lines.push(Line::from(Span::styled(format!("    {hint}"), dim)));
                     } else if self.completions.is_empty() {
                         lines.push(Line::from(Span::styled(

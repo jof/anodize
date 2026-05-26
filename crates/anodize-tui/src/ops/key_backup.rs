@@ -84,7 +84,7 @@ impl BackupCtx {
                 OpAction::Noop
             }
             Err(e) => {
-                shared.set_status(format!("{e}"));
+                shared.set_status(e.to_string());
                 OpAction::Abort
             }
         }
@@ -126,19 +126,15 @@ impl BackupCtx {
 
     fn select(&mut self, idx: usize) {
         match self.phase {
-            BackupPhase::SelectSource => {
-                if idx < self.targets.len() {
-                    self.source_idx = Some(idx);
-                    self.phase = BackupPhase::SelectDest;
-                    self.render_lines();
-                }
+            BackupPhase::SelectSource if idx < self.targets.len() => {
+                self.source_idx = Some(idx);
+                self.phase = BackupPhase::SelectDest;
+                self.render_lines();
             }
-            BackupPhase::SelectDest => {
-                if idx < self.targets.len() && Some(idx) != self.source_idx {
-                    self.dest_idx = Some(idx);
-                    self.phase = BackupPhase::Overview;
-                    self.render_lines();
-                }
+            BackupPhase::SelectDest if idx < self.targets.len() && Some(idx) != self.source_idx => {
+                self.dest_idx = Some(idx);
+                self.phase = BackupPhase::Overview;
+                self.render_lines();
             }
             BackupPhase::ChooseAction => {
                 match idx {

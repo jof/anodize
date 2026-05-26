@@ -168,10 +168,10 @@ pub fn wait_drive_ready(dev: &SgDev, timeout: std::time::Duration) -> Result<()>
 ///     NWA > 0:
 ///     a. `last_track_l` from READ DISC INFORMATION (libburn's primary).
 ///     b. `last_track_l + 1`: after CLOSE SESSION some drives (including
-///        cdemu for BD-R) leave `last_track_l` pointing at the closed track
-///        instead of the new open track in the next session.
+///     cdemu for BD-R) leave `last_track_l` pointing at the closed track
+///     instead of the new open track in the next session.
 ///     c. Track 0xFF ("invisible track"): some CD-R era drives support this
-///        per Feature 0021h.  USB bridge chipsets often reject it.
+///     per Feature 0021h.  USB bridge chipsets often reject it.
 ///  3. Bail if no candidate yields NWA > 0.
 pub fn resolve_nwa(dev: &SgDev, info: &DiscInfo) -> Result<u32> {
     if info.status == DiscStatus::Blank {
@@ -438,7 +438,7 @@ pub fn profile_is_rewritable(profile: u16) -> bool {
 /// True for CD-family profiles (CD-ROM, CD-R, CD-RW).  CD tracks may have a
 /// 150-sector (2-second) pregap before the data area; DVD and BD do not.
 pub fn profile_is_cd(profile: u16) -> bool {
-    matches!(profile, 0x0008 | 0x0009 | 0x000A)
+    matches!(profile, 0x0008..=0x000A)
 }
 
 /// Maximum number of SAO sessions for a given MMC profile code.

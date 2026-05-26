@@ -45,6 +45,7 @@ pub struct ThermalZone {
 
 /// A key mount point from `/proc/mounts`.
 #[derive(Debug, PartialEq)]
+#[allow(dead_code)]
 pub struct MountEntry {
     pub device: String,
     pub mountpoint: String,
@@ -109,6 +110,7 @@ pub fn parse_meminfo(text: &str) -> Option<MemInfo> {
     })
 }
 
+#[allow(dead_code)]
 pub fn parse_mounts(text: &str) -> Vec<MountEntry> {
     // Show only interesting mount points (not cgroup/proc/sys noise).
     const INTERESTING: &[&str] = &["/", "/boot", "/nix", "/tmp", "/run", "/run/anodize", "/mnt"];
@@ -187,6 +189,7 @@ pub fn read_kernel_version() -> Option<String> {
     ))
 }
 
+#[allow(dead_code)]
 pub fn read_mounts() -> Vec<MountEntry> {
     fs::read_to_string("/proc/mounts")
         .map(|t| parse_mounts(&t))
@@ -299,6 +302,7 @@ pub fn run_failed_units() -> String {
         .unwrap_or_default()
 }
 
+#[allow(dead_code)]
 pub fn run_loginctl() -> String {
     Command::new("loginctl")
         .args(["list-sessions", "--no-legend", "--no-pager"])
@@ -440,11 +444,12 @@ tmpfs /run tmpfs rw 0 0
 none /run/anodize tmpfs rw 0 0
 ";
         let mounts = parse_mounts(text);
-        assert_eq!(mounts.len(), 4);
+        assert_eq!(mounts.len(), 5);
         assert_eq!(mounts[0].mountpoint, "/tmp");
         assert_eq!(mounts[1].mountpoint, "/boot");
         assert_eq!(mounts[2].mountpoint, "/run");
-        assert_eq!(mounts[3].mountpoint, "/run/anodize");
+        assert_eq!(mounts[3].mountpoint, "/mnt/shuttle");
+        assert_eq!(mounts[4].mountpoint, "/run/anodize");
     }
 
     #[test]

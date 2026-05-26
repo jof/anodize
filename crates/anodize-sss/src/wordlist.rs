@@ -213,25 +213,25 @@ mod tests {
 
     #[test]
     fn wordlist_min_hamming_distance_is_2() {
-        for i in 0..WORDLIST.len() {
-            for j in (i + 1)..WORDLIST.len() {
-                let a = WORDLIST[i].as_bytes();
-                let b = WORDLIST[j].as_bytes();
+        for (i, word_a) in WORDLIST.iter().enumerate() {
+            for (j, word_b) in WORDLIST.iter().enumerate().skip(i + 1) {
+                let a = word_a.as_bytes();
+                let b = word_b.as_bytes();
                 assert_eq!(
                     a.len(),
                     b.len(),
                     "length mismatch: {} vs {}",
-                    WORDLIST[i],
-                    WORDLIST[j]
+                    word_a,
+                    word_b
                 );
                 let dist: usize = a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
                 assert!(
                     dist >= 2,
                     "Hamming distance {} < 2 between {:?} (0x{:02X}) and {:?} (0x{:02X})",
                     dist,
-                    WORDLIST[i],
+                    word_a,
                     i,
-                    WORDLIST[j],
+                    word_b,
                     j
                 );
             }

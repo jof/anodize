@@ -232,7 +232,7 @@ pub fn serial_to_hex(sn: &x509_cert::serial_number::SerialNumber) -> String {
 /// Decode an uppercase hex serial string back to raw bytes.
 /// Returns `None` on invalid hex.
 pub fn hex_serial_to_bytes(hex: &str) -> Option<Vec<u8>> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return None;
     }
     (0..hex.len())
@@ -334,9 +334,7 @@ pub fn build_cert_preview(
         "  Not After   : ~{not_after}  ({} days)",
         profile.validity_days
     ));
-    lines.push(format!(
-        "  Serial      : (random — assigned at signing time)"
-    ));
+    lines.push("  Serial      : (random — assigned at signing time)".to_string());
     lines.push(String::new());
     lines.push(format!("  Public Key  : {pub_key_alg}"));
     lines.push("  Signature   : ecdsa-with-SHA384 (P-384)".into());
@@ -383,6 +381,24 @@ fn describe_spki_algorithm(oid: &der::oid::ObjectIdentifier) -> &'static str {
         "1.2.840.113549.1.1.1" => "RSA",
         _ => "Unknown",
     }
+}
+
+// ── SoftHSM2 shuttle backend (dev-softhsm-usb feature) ───────────────────────
+
+#[cfg(feature = "dev-softhsm-usb")]
+pub fn configure_softhsm_from_shuttle(shuttle_mount: &std::path::Path) -> anyhow::Result<()> {
+    let token_dir = shuttle_mount.join("softhsm2/tokens");
+    if !token_dir.exists() {
+        return Ok(());
+    }
+    let conf_path = std::path::PathBuf::from("/tmp/anodize-softhsm2.conf");
+    let conf = format!(
+        "directories.tokendir = {}\nobjectstore.backend = file\nlog.level = ERROR\nslots.removable = false\n",
+        token_dir.display()
+    );
+    std::fs::write(&conf_path, conf)?;
+    unsafe { std::env::set_var("SOFTHSM2_CONF", &conf_path) };
+    Ok(())
 }
 
 #[cfg(test)]
@@ -749,22 +765,4 @@ mod tests {
         let unknown_oid = der::oid::ObjectIdentifier::new_unwrap("1.2.3.4.5");
         assert_eq!(describe_spki_algorithm(&unknown_oid), "Unknown");
     }
-}
-
-// ── SoftHSM2 shuttle backend (dev-softhsm-usb feature) ───────────────────────
-
-#[cfg(feature = "dev-softhsm-usb")]
-pub fn configure_softhsm_from_shuttle(shuttle_mount: &std::path::Path) -> anyhow::Result<()> {
-    let token_dir = shuttle_mount.join("softhsm2/tokens");
-    if !token_dir.exists() {
-        return Ok(());
-    }
-    let conf_path = std::path::PathBuf::from("/tmp/anodize-softhsm2.conf");
-    let conf = format!(
-        "directories.tokendir = {}\nobjectstore.backend = file\nlog.level = ERROR\nslots.removable = false\n",
-        token_dir.display()
-    );
-    std::fs::write(&conf_path, conf)?;
-    unsafe { std::env::set_var("SOFTHSM2_CONF", &conf_path) };
-    Ok(())
 }

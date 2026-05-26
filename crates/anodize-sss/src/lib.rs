@@ -535,7 +535,7 @@ mod tests {
         // The hex-encoded PIN is what yubihsm-shell receives.
         let pin_hex = hex::encode(&recovered);
         assert_eq!(pin_hex.len(), 64);
-        assert_eq!(pin_hex, hex::encode(&pin_bytes));
+        assert_eq!(pin_hex, hex::encode(pin_bytes));
     }
 
     /// PIN rotation round-trip: mirrors the RekeyShares flow.

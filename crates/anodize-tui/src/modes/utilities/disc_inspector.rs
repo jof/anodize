@@ -597,7 +597,7 @@ pub fn gather_cert_detail_pub(
         .map(|c| c.join(""))
         .collect::<Vec<_>>()
         .join(":");
-    lines.push(format!("  SHA-256 Fingerprint:"));
+    lines.push("  SHA-256 Fingerprint:".to_string());
     lines.push(format!("    {fp}"));
     lines.push(String::new());
 

@@ -109,7 +109,7 @@ impl SignCsrCtx {
                 OpAction::Noop
             }
             Err(e) => {
-                shared.set_status(format!("{e}"));
+                shared.set_status(e.to_string());
                 OpAction::Abort
             }
         }

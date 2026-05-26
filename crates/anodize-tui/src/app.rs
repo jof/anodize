@@ -170,7 +170,7 @@ impl App {
                 if self.ceremony.state == CeremonyPhase::ActiveOp {
                     self.active_op
                         .as_ref()
-                        .map_or(false, |op| op.holds_ephemeral_state())
+                        .is_some_and(|op| op.holds_ephemeral_state())
                 } else {
                     self.ceremony.holds_ephemeral_state()
                 }
@@ -193,9 +193,7 @@ impl App {
         // Log view toggle (except during text entry)
         let in_text_entry = self.mode == Mode::Ceremony
             && if self.ceremony.state == CeremonyPhase::ActiveOp {
-                self.active_op
-                    .as_ref()
-                    .map_or(false, |op| op.in_text_entry())
+                self.active_op.as_ref().is_some_and(|op| op.in_text_entry())
             } else {
                 self.ceremony.in_text_entry()
             };
@@ -436,7 +434,7 @@ impl App {
                                 if self
                                     .active_op
                                     .as_ref()
-                                    .map_or(false, |op| op.needs_abort_confirmation())
+                                    .is_some_and(|op| op.needs_abort_confirmation())
                                 {
                                     self.show_abort_confirm(Action::CeremonyCancel);
                                 } else {
@@ -486,7 +484,7 @@ impl App {
                     match action {
                         Action::CeremonyCancel => {
                             self.show_abort_confirm(action);
-                            return Action::Noop;
+                            Action::Noop
                         }
                         _ => action,
                     }
@@ -529,7 +527,7 @@ impl App {
         if self
             .active_op
             .as_ref()
-            .map_or(false, |op| op.wants_disc_scan())
+            .is_some_and(|op| op.wants_disc_scan())
         {
             self.tick_wait_disc(true);
         }

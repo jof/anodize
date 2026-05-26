@@ -10,6 +10,7 @@ pub mod iso9660;
 pub mod mmc;
 pub mod sgdev;
 
+#[allow(unused_imports)]
 pub use iso9660::{IsoFile, SessionEntry};
 
 use std::path::{Path, PathBuf};
@@ -44,6 +45,7 @@ use sgdev::{SgDev, CDS_DISC_OK};
 ///   "No sd* devices in /sys/block"
 ///   "sda (removable=1)"
 ///   "sda (removable=0), sdb (removable=1)"
+#[allow(dead_code)]
 pub fn usb_scan_diagnostics() -> String {
     let Ok(entries) = std::fs::read_dir("/sys/block") else {
         return "Cannot read /sys/block".into();
@@ -85,6 +87,7 @@ pub fn usb_scan_diagnostics() -> String {
 /// backing block device is gone.  All file access returns ENOENT even
 /// though the mount entry persists.  Hardware testing (NixOS 25.11,
 /// kernel 6.x, vfat) confirmed this behaviour.
+#[allow(dead_code)]
 pub fn verify_shuttle_mount(mountpoint: &Path) -> Result<()> {
     if !mountpoint.exists() {
         anyhow::bail!("shuttle mountpoint {} does not exist", mountpoint.display());
@@ -137,6 +140,7 @@ pub fn verify_shuttle_mount(mountpoint: &Path) -> Result<()> {
 /// Write `data` to `path`, then fsync the file to ensure the data actually
 /// reached the underlying device.  Returns a descriptive error on failure
 /// instead of silently succeeding on a stale mount.
+#[allow(dead_code)]
 pub fn write_and_sync(path: &Path, data: &[u8]) -> Result<()> {
     use std::io::Write;
 
@@ -152,6 +156,7 @@ pub fn write_and_sync(path: &Path, data: &[u8]) -> Result<()> {
 // ── Optical disc discovery ────────────────────────────────────────────────────
 
 /// Scan /sys/block/sr* for optical drives and return their /dev paths.
+#[allow(dead_code)]
 pub fn scan_optical_drives() -> Vec<PathBuf> {
     let mut result = Vec::new();
     let Ok(entries) = std::fs::read_dir("/sys/block") else {

@@ -619,7 +619,7 @@ mod tests {
         state.phase = SyncPhase::WaitTarget;
 
         // Simulate what do_scan_target checks — prefix mismatch at index 1
-        let target = vec![
+        let target = [
             make_session_with_audit("s1", "genesis"),
             make_session("s2-different"),
         ];

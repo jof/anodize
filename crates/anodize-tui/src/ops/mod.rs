@@ -38,6 +38,7 @@ pub enum ActiveOperation {
     MigrateDisc(migrate_disc::MigrateCtx),
     ValidateDisc(validate_disc::ValidateCtx),
     #[cfg(feature = "dev-burn")]
+    #[allow(dead_code)]
     RefreshDisc(RefreshCtx),
 }
 
