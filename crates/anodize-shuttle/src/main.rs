@@ -15,6 +15,7 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Initialize a blank USB stick as an anodize shuttle.
     ///

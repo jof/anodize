@@ -372,11 +372,11 @@ pub fn run(args: LintArgs) -> Result<()> {
 
 fn enumerate_files(root: &Path) -> Result<Vec<PathBuf>> {
     let mut result = Vec::new();
-    enumerate_files_recursive(root, root, &mut result)?;
+    enumerate_files_recursive(root, &mut result)?;
     Ok(result)
 }
 
-fn enumerate_files_recursive(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+fn enumerate_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return Ok(()),
@@ -389,7 +389,7 @@ fn enumerate_files_recursive(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) ->
         if ft.is_file() {
             out.push(path);
         } else if ft.is_dir() {
-            enumerate_files_recursive(root, &path, out)?;
+            enumerate_files_recursive(&path, out)?;
         }
     }
     Ok(())

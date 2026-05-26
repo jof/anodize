@@ -260,8 +260,9 @@ fn mount_device(device: &str) -> Result<PathBuf> {
     } else {
         // Linux: mount manually
         let mount_point = PathBuf::from("/mnt/anodize-shuttle");
+        let mp = mount_point.to_string_lossy();
         let status = Command::new("sudo")
-            .args(["mkdir", "-p", &mount_point.to_string_lossy().to_string()])
+            .args(["mkdir", "-p", mp.as_ref()])
             .status()
             .context("mkdir mount point")?;
         if !status.success() {
@@ -281,7 +282,7 @@ fn mount_device(device: &str) -> Result<PathBuf> {
                 "-o",
                 &mount_opts,
                 &part_dev,
-                &mount_point.to_string_lossy().to_string(),
+                mp.as_ref(),
             ])
             .status()
             .context("mount")?;
@@ -302,8 +303,9 @@ impl Drop for UnmountGuard {
                 .args(["unmount", &self.0.to_string_lossy()])
                 .status();
         } else {
+            let mp = self.0.to_string_lossy();
             let _ = Command::new("sudo")
-                .args(["umount", &self.0.to_string_lossy().to_string()])
+                .args(["umount", mp.as_ref()])
                 .status();
         }
     }
