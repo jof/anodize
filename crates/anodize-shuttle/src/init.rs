@@ -277,13 +277,7 @@ fn mount_device(device: &str) -> Result<PathBuf> {
             .to_string();
         let mount_opts = format!("uid={uid},gid={gid}");
         let status = Command::new("sudo")
-            .args([
-                "mount",
-                "-o",
-                &mount_opts,
-                &part_dev,
-                mp.as_ref(),
-            ])
+            .args(["mount", "-o", &mount_opts, &part_dev, mp.as_ref()])
             .status()
             .context("mount")?;
         if !status.success() {
@@ -304,9 +298,7 @@ impl Drop for UnmountGuard {
                 .status();
         } else {
             let mp = self.0.to_string_lossy();
-            let _ = Command::new("sudo")
-                .args(["umount", mp.as_ref()])
-                .status();
+            let _ = Command::new("sudo").args(["umount", mp.as_ref()]).status();
         }
     }
 }
