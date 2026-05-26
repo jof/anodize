@@ -103,27 +103,18 @@ jobs:
       - name: Build production ISO (amd64)
         run: nix build .#prod-amd64 --out-link prod-result
 
-      - name: Build dev ISO (amd64)
-        run: nix build .#dev-amd64 --out-link dev-result
-
-      - name: Stage ISOs for upload
+      - name: Stage ISO for upload
         id: stage
         run: |
           tag="${GITHUB_REF_NAME}"
           prod_src=$(ls prod-result/iso/*.iso | head -1)
-          dev_src=$(ls dev-result/iso/*.iso | head -1)
-          prod_out="anodize-prod-amd64-${tag}.iso"
-          dev_out="anodize-dev-amd64-${tag}.iso"
+          prod_out="anodize-${tag}.iso"
           cp "$prod_src" "$prod_out"
-          cp "$dev_src"  "$dev_out"
           echo "prod=$prod_out" >> "$GITHUB_OUTPUT"
-          echo "dev=$dev_out"   >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           prerelease: ${{ startsWith(github.ref_name, 'v0.') || contains(github.ref_name, '-') }}
-          files: |
-            ${{ steps.stage.outputs.prod }}
-            ${{ steps.stage.outputs.dev }}
+          files: ${{ steps.stage.outputs.prod }}
