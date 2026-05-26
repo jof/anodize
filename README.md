@@ -1,6 +1,6 @@
 # Anodize
 
-[![Latest release](https://img.shields.io/github/v/release/jof/anodize?label=download+ISO&style=for-the-badge)](https://github.com/jof/anodize/releases/latest)
+[![Latest release](https://img.shields.io/github/v/release/jof/anodize?include_prereleases&label=download+ISO&style=for-the-badge)](https://github.com/jof/anodize/releases/latest)
 
 > An offline Rust root CA. Like aluminum's oxide layer, the rust *is* the protection.
 > ("Anodize" — to deliberately oxidize for protection. Also: to make *not a node*.)
