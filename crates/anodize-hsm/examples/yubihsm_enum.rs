@@ -109,12 +109,9 @@ fn probe_device(serial: yubihsm::device::SerialNumber) -> Option<(String, &'stat
     // Try factory-default auth first.
     let default_creds =
         yubihsm::Credentials::from_password(DEFAULT_AUTH_KEY_ID, DEFAULT_AUTH_PASSWORD);
-    match yubihsm::Client::open(connector.clone(), default_creds, false) {
-        Ok(client) => {
-            let fw = device_firmware(&client);
-            return Some((fw, "factory-default (key 1)"));
-        }
-        Err(_) => {}
+    if let Ok(client) = yubihsm::Client::open(connector.clone(), default_creds, false) {
+        let fw = device_firmware(&client);
+        return Some((fw, "factory-default (key 1)"));
     }
 
     // Default auth failed — device may have been bootstrapped (anodize auth key 2).
@@ -337,27 +334,24 @@ fn factory_reset_all(serials: &[yubihsm::device::SerialNumber]) {
         // Try factory-default auth first.
         let connector = yubihsm::Connector::usb(&cfg);
         let creds = yubihsm::Credentials::from_password(DEFAULT_AUTH_KEY_ID, DEFAULT_AUTH_PASSWORD);
-        match yubihsm::Client::open(connector, creds, false) {
-            Ok(client) => {
-                // Free audit log entries first (required if force-audit filled the log).
-                match client.get_log_entries() {
-                    Ok(entries) => {
-                        if let Some(last) = entries.entries.last() {
-                            let _ = client.set_log_index(last.item);
-                            println!("freed {} audit log entries... ", entries.entries.len());
-                        }
+        if let Ok(client) = yubihsm::Client::open(connector, creds, false) {
+            // Free audit log entries first (required if force-audit filled the log).
+            match client.get_log_entries() {
+                Ok(entries) => {
+                    if let Some(last) = entries.entries.last() {
+                        let _ = client.set_log_index(last.item);
+                        println!("freed {} audit log entries... ", entries.entries.len());
                     }
-                    Err(e) => println!("(get_log_entries: {e})"),
                 }
-                match client.reset_device() {
-                    Ok(_) => println!("✓ reset"),
-                    Err(e) => println!("✗ reset failed: {e}"),
-                }
-                // Device needs time to reboot after reset
-                std::thread::sleep(std::time::Duration::from_secs(3));
-                continue;
+                Err(e) => println!("(get_log_entries: {e})"),
             }
-            Err(_) => {}
+            match client.reset_device() {
+                Ok(_) => println!("✓ reset"),
+                Err(e) => println!("✗ reset failed: {e}"),
+            }
+            // Device needs time to reboot after reset
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            continue;
         }
 
         // Factory auth failed — try anodize auth key (ID 2) with no password
