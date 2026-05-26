@@ -26,9 +26,15 @@ ignore = [
     # paste is a transitive dep of cryptoki; RUSTSEC-2024-0436 flags it as
     # unmaintained but it has no known vulnerability — acceptable for now.
     "RUSTSEC-2024-0436",
+    # Marvin Attack: RSA timing side-channel in the `rsa` crate (transitive
+    # through yubihsm). No patch available. Risk is acceptable: the ceremony
+    # runs air-gapped; the rsa crate is used only for RSA key-format handling
+    # inside yubihsm, not for any network-facing RSA operations.
+    "RUSTSEC-2023-0071",
 ]
 
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = ["https://github.com/jof/yubihsm.rs"]
