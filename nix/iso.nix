@@ -84,6 +84,12 @@ in
   # ISO never uses nix, so clear these commands.
   boot.postBootCommands = lib.mkForce "";
 
+  # Force man-db + groff out — still in system-path despite documentation.enable.
+  documentation.man.enable = lib.mkForce false;
+
+  # Trim glibc-locales to just en_US (saves ~2 MiB over the full set).
+  i18n.supportedLocales = [ "en_US.UTF-8/UTF-8" ];
+
   # ── ISO image settings ─────────────────────────────────────────────────────
 
   isoImage.squashfsCompression = "zstd -Xcompression-level 6";
