@@ -1,11 +1,16 @@
-.PHONY: ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 dev-burn-amd64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev ssh-dev-vm ceremony-dev-vm list-usb write-usb write-usb-dev write-usb-dev-burn hash-iso verify-iso deploy-dev cdemu-swap-disc cdemu-swap-disc-local clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
+.DEFAULT_GOAL := help
+.PHONY: help ci nix-check nix-reset prod-amd64 prod-arm64 dev-amd64 dev-arm64 dev-burn-amd64 qemu qemu-sdl qemu-nographic qemu-aarch64 qemu-aarch64-nographic qemu-dev qemu-dev-sdl qemu-dev-nographic ssh-dev ssh-dev-vm ceremony-dev-vm list-usb write-usb write-usb-dev write-usb-dev-burn hash-iso verify-iso deploy-dev cdemu-swap-disc cdemu-swap-disc-local clean test fmt lint deny build-dev build-shuttle shuttle-lint setup
+
+help: ## Show available targets
+	@grep -E '^[a-zA-Z0-9._-]+:.*## ' $(MAKEFILE_LIST) | \
+		awk 'BEGIN {FS = ":.*## "}; {printf "  \033[36m%-28s\033[0m %s\n", $$1, $$2}' | sort
 
 # Run the full GitHub Actions CI job locally via act + Docker
-ci:
+ci: ## Run full CI locally via act + Docker
 	act push --job check
 
 # Run the Nix build job locally via act + Docker (same philosophy as 'make ci')
-nix-check:
+nix-check: ## Run Nix build job locally via act
 	act push --job nix
 
 # ---------------------------------------------------------------------------
@@ -140,7 +145,7 @@ anodize-dev-burn-amd64.iso: $(NIX_SOURCES)
 
 # Reset the build cache.  Remote mode: wipe the remote directory.
 # Local mode: remove Docker Nix store volumes.
-nix-reset:
+nix-reset: ## Reset Nix build cache
 ifdef NIX_BUILDER
 	ssh $(SSH_OPTS) $(NIX_BUILDER) 'rm -rf $(NIX_BUILDER_DIR)'
 	@echo "Remote build directory removed."
@@ -154,18 +159,18 @@ else
 	done
 endif
 
-prod-amd64: anodize-prod-amd64.iso
-prod-arm64: anodize-prod-arm64.iso
-dev-amd64:  anodize-dev-amd64.iso
-dev-arm64:  anodize-dev-arm64.iso
-dev-burn-amd64: anodize-dev-burn-amd64.iso
+prod-amd64: anodize-prod-amd64.iso ## Build production ISO (amd64)
+prod-arm64: anodize-prod-arm64.iso ## Build production ISO (arm64)
+dev-amd64:  anodize-dev-amd64.iso ## Build dev ISO (amd64)
+dev-arm64:  anodize-dev-arm64.iso ## Build dev ISO (arm64)
+dev-burn-amd64: anodize-dev-burn-amd64.iso ## Build dev-burn ISO (amd64)
 
 # Create a 64 MiB FAT shuttle image with a profile.toml and an empty
 # SoftHSM2 token directory.  The actual token is initialized during the
 # ceremony's InitRoot phase via C_InitToken — no pre-seeded credentials.
 # Requires: mtools (mcopy, mmd).
 # Only built once — delete to recreate.
-fake-shuttle.img:
+fake-shuttle.img: ## Create 64 MiB FAT shuttle image
 	truncate -s 64M $@
 	mkfs.vfat -n SHUTTLE $@
 	printf '%s\n' \
@@ -288,27 +293,27 @@ QEMU_AARCH64_BASE = qemu-system-aarch64 \
 	  -no-reboot \
 	  -serial stdio
 
-qemu: qemu-sdl
+qemu: qemu-sdl ## Alias for qemu-sdl
 
 # Boot production ISO in SDL graphical window.
-qemu-sdl: anodize-prod-amd64.iso fake-shuttle.img
+qemu-sdl: anodize-prod-amd64.iso fake-shuttle.img ## Boot prod ISO in SDL window
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_BASE) -display $(QEMU_DISPLAY) -vga std
 
 # Boot production ISO — serial console only.  Ctrl-A X to quit.
-qemu-nographic: anodize-prod-amd64.iso fake-shuttle.img
+qemu-nographic: anodize-prod-amd64.iso fake-shuttle.img ## Boot prod ISO, serial only
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(subst -serial stdio,-nographic,$(QEMU_BASE))
 
 # Dev arm64 with graphical window — near-native speed via HVF on Apple Silicon.
-qemu-aarch64: anodize-dev-arm64.iso fake-shuttle.img
+qemu-aarch64: anodize-dev-arm64.iso fake-shuttle.img ## Boot dev arm64 ISO (HVF, graphical)
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	@# 9p mapped-xattr leaves 0600 perms; strip so cdemu can read on next boot
 	@for f in $(DEV_DISC_DIR)/*.iso; do [ -f "$$f" ] && xattr -c "$$f" && chmod 666 "$$f"; done 2>/dev/null || true
 	$(QEMU_AARCH64_BASE) -display cocoa -device virtio-gpu-pci
 
 # Dev arm64 serial console only.  Ctrl-A X to quit.
-qemu-aarch64-nographic: anodize-dev-arm64.iso fake-shuttle.img
+qemu-aarch64-nographic: anodize-dev-arm64.iso fake-shuttle.img ## Boot dev arm64 ISO, serial only
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	@for f in $(DEV_DISC_DIR)/*.iso; do [ -f "$$f" ] && xattr -c "$$f" && chmod 666 "$$f"; done 2>/dev/null || true
 	$(subst -serial stdio,-nographic,$(QEMU_AARCH64_BASE))
@@ -329,7 +334,7 @@ qemu-aarch64-nographic: anodize-dev-arm64.iso fake-shuttle.img
 USB_SERIAL ?=
 
 ifeq ($(shell uname),Darwin)
-list-usb:
+list-usb: ## List USB storage devices
 	@python3 -c '\
 	import subprocess, re, sys; \
 	data = subprocess.check_output(["ioreg", "-r", "-c", "IOUSBHostDevice", "-l"]).decode(); \
@@ -391,19 +396,19 @@ define write-usb-iso
 endef
 endif
 
-write-usb: anodize-prod-amd64.iso
+write-usb: anodize-prod-amd64.iso ## Write prod ISO to USB (USB_SERIAL=…)
 ifndef USB_SERIAL
 	$(error USB_SERIAL is required — set it to your USB stick serial number)
 endif
 	$(call write-usb-iso,anodize-prod-amd64.iso)
 
-write-usb-dev: anodize-dev-amd64.iso
+write-usb-dev: anodize-dev-amd64.iso ## Write dev ISO to USB (USB_SERIAL=…)
 ifndef USB_SERIAL
 	$(error USB_SERIAL is required — set it to your USB stick serial number)
 endif
 	$(call write-usb-iso,anodize-dev-amd64.iso)
 
-write-usb-dev-burn: anodize-dev-burn-amd64.iso
+write-usb-dev-burn: anodize-dev-burn-amd64.iso ## Write dev-burn ISO to USB (USB_SERIAL=…)
 ifndef USB_SERIAL
 	$(error USB_SERIAL is required — set it to your USB stick serial number)
 endif
@@ -416,12 +421,12 @@ endif
 # verify-iso: Rebuild from the same commit and compare checksums.
 # ---------------------------------------------------------------------------
 
-hash-iso: anodize-prod-amd64.iso
+hash-iso: anodize-prod-amd64.iso ## Record ISO checksum + git commit
 	@commit=$$(git rev-parse --short HEAD 2>/dev/null || echo unknown); \
 	sha=$$(shasum -a 256 anodize-prod-amd64.iso | cut -d' ' -f1); \
 	echo "$$sha  anodize-prod-amd64.iso  # git:$$commit" | tee anodize-prod-amd64.iso.sha256
 
-verify-iso: anodize-prod-amd64.iso.sha256
+verify-iso: anodize-prod-amd64.iso.sha256 ## Verify ISO matches recorded checksum
 	@expected=$$(awk '{print $$1}' anodize-prod-amd64.iso.sha256); \
 	actual=$$(shasum -a 256 anodize-prod-amd64.iso | cut -d' ' -f1); \
 	if [ "$$expected" = "$$actual" ]; then \
@@ -451,15 +456,15 @@ verify-iso: anodize-prod-amd64.iso.sha256
 #   make ssh-dev          # (separate terminal) SSH into the running VM
 #   make save-disc        # flush cdemu BD-R image to dev-disc/ for inspection
 
-qemu-dev: qemu-dev-sdl
+qemu-dev: qemu-dev-sdl ## Alias for qemu-dev-sdl
 
-qemu-dev-sdl: anodize-dev-amd64.iso fake-shuttle.img
+qemu-dev-sdl: anodize-dev-amd64.iso fake-shuttle.img ## Boot dev amd64 ISO in SDL window
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	@for f in $(DEV_DISC_DIR)/*.iso; do [ -f "$$f" ] && xattr -c "$$f" && chmod 666 "$$f"; done 2>/dev/null || true
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
 	$(QEMU_DEV_BASE) -display sdl -vga std
 
-qemu-dev-nographic: anodize-dev-amd64.iso fake-shuttle.img
+qemu-dev-nographic: anodize-dev-amd64.iso fake-shuttle.img ## Boot dev amd64 ISO, serial only
 	mkdir -p $(DEV_DISC_DIR) && chmod 777 $(DEV_DISC_DIR)
 	@for f in $(DEV_DISC_DIR)/*.iso; do [ -f "$$f" ] && xattr -c "$$f" && chmod 666 "$$f"; done 2>/dev/null || true
 	cp $(OVMF_VARS) /tmp/anodize-ovmf-vars.fd
@@ -478,7 +483,7 @@ SSH_OPTS = -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
 	   -i $(CURDIR)/scripts/dev-ssh-key
 
 # Local QEMU — ceremony user (sentinel TUI).
-ssh-dev:
+ssh-dev: ## SSH into local QEMU (ceremony user)
 	@echo "Waiting for SSH on localhost:$(DEV_SSH_PORT)..."
 	@until nc -z localhost $(DEV_SSH_PORT) 2>/dev/null; do sleep 1; done
 	@echo "Connected."
@@ -487,13 +492,13 @@ ssh-dev:
 # List per-session ISO files saved by the dev build to the 9p share.
 # The ceremony binary (with feature dev-softhsm-usb) writes each session's
 # ISO image to /run/anodize/share/session-NN.iso automatically.
-save-disc:
+save-disc: ## List session ISOs from 9p share
 	@echo "Session ISOs in $(DEV_DISC_DIR)/:"
 	@ls -lh $(DEV_DISC_DIR)/session-*.iso 2>/dev/null \
 	  || echo "  (none — run a ceremony first)"
 
 # Local QEMU — debug user (bash shell).
-ssh-dev-debug:
+ssh-dev-debug: ## SSH into local QEMU (debug user)
 	@echo "Waiting for SSH on localhost:$(DEV_SSH_PORT)..."
 	@until nc -z localhost $(DEV_SSH_PORT) 2>/dev/null; do sleep 1; done
 	@echo "Connected."
@@ -501,7 +506,7 @@ ssh-dev-debug:
 
 # Remote VM — ceremony user (sentinel TUI via sudo).
 # Sources /etc/set-environment so PKCS#11 env vars are available.
-ssh-vm:
+ssh-vm: ## SSH into remote VM (ceremony, DEV_VM_IP=…)
 ifndef DEV_VM_IP
 	$(error DEV_VM_IP is required — set it to the dev VM's IP address)
 endif
@@ -509,7 +514,7 @@ endif
 	    'sudo -u ceremony sh -c ". /etc/set-environment && exec anodize-sentinel"'
 
 # Remote VM — debug user (bash shell).
-ssh-vm-debug:
+ssh-vm-debug: ## SSH into remote VM (debug, DEV_VM_IP=…)
 ifndef DEV_VM_IP
 	$(error DEV_VM_IP is required — set it to the dev VM's IP address)
 endif
@@ -523,18 +528,18 @@ endif
 # Usage (remote VM):  DEV_VM_IP=192.168.178.76 make cdemu-swap-disc
 # Usage (local QEMU): make cdemu-swap-disc-local
 
-cdemu-swap-disc:
+cdemu-swap-disc: ## Swap cdemu disc on remote VM (DEV_VM_IP=…)
 ifndef DEV_VM_IP
 	$(error DEV_VM_IP is required — set it to the dev VM's IP address)
 endif
 	ssh $(SSH_OPTS) debug@$(DEV_VM_IP) 'sudo bash -s' < $(CURDIR)/scripts/cdemu-swap-disc.sh
 
-cdemu-swap-disc-local:
+cdemu-swap-disc-local: ## Swap cdemu disc on local QEMU
 	@until nc -z localhost $(DEV_SSH_PORT) 2>/dev/null; do sleep 1; done
 	ssh $(SSH_OPTS) -p $(DEV_SSH_PORT) debug@localhost 'sudo bash -s' < $(CURDIR)/scripts/cdemu-swap-disc.sh
 
 # Build anodize-ceremony with dev-softhsm-usb (never use in a real ceremony).
-build-dev:
+build-dev: ## Build ceremony binary with dev features
 	cargo build -p anodize-tui --features dev-softhsm-usb
 
 # ── Hot-deploy binary to running dev VM ─────────────────────────────────
@@ -584,7 +589,7 @@ define nix-build-bin
 endef
 endif
 
-deploy-dev: .FORCE
+deploy-dev: .FORCE ## Hot-deploy binary to dev VM (DEV_VM_IP=…)
 ifndef DEV_VM_IP
 	$(error DEV_VM_IP is required)
 endif
@@ -624,11 +629,11 @@ endif
 
 .FORCE:
 
-clean:
+clean: ## Remove build artifacts
 	rm -rf anodize-prod-amd64.iso anodize-prod-arm64.iso anodize-dev-amd64.iso anodize-dev-arm64.iso anodize-dev-burn-amd64.iso anodize-prod-amd64.iso.sha256 fake-shuttle.img anodize-ceremony-dev.bin dev-disc /tmp/anodize-ovmf-vars.fd
 
 # One-time repo setup — configures git to use the committed hooks directory.
-setup:
+setup: ## One-time repo setup (git hooks)
 	git config core.hooksPath .githooks
 	@echo "Git hooks configured (.githooks/)."
 
@@ -645,24 +650,24 @@ setup:
 
 SHUTTLE_PATH ?=
 
-build-shuttle:
+build-shuttle: ## Build shuttle CLI tool
 	cargo build -p anodize-shuttle
 
-shuttle-lint:
+shuttle-lint: ## Lint shuttle USB (SHUTTLE_PATH=…)
 ifndef SHUTTLE_PATH
 	$(error SHUTTLE_PATH is required — set it to the mounted shuttle volume)
 endif
 	cargo run -p anodize-shuttle -- lint --path $(SHUTTLE_PATH)
 
 # Inner-loop shortcuts (no Docker overhead)
-fmt:
+fmt: ## Check formatting
 	cargo fmt --all -- --check
 
-lint:
+lint: ## Run clippy lints
 	cargo clippy --all-targets --all-features -- -D warnings
 
-test:
+test: ## Run tests
 	cargo test --all -- --test-threads=1
 
-deny:
+deny: ## Run cargo-deny checks
 	cargo deny check
