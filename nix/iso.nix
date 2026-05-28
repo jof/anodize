@@ -56,6 +56,12 @@ in
   # separately via system.nixos.revision in flake.nix.
   system.nixos.versionSuffix = lib.mkForce "";
 
+  # ── Documentation: disabled ────────────────────────────────────────────────
+  # The NixOS ISO module enables the manual, man pages, and info pages by
+  # default.  None are useful on an air-gapped appliance, and the manual
+  # build drags in rust-docs and other heavy doc infrastructure.
+  documentation.enable = false;
+
   # ── ISO image settings ─────────────────────────────────────────────────────
 
   isoImage.squashfsCompression = "zstd -Xcompression-level 6";
