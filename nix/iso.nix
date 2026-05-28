@@ -62,6 +62,19 @@ in
   # build drags in rust-docs and other heavy doc infrastructure.
   documentation.enable = false;
 
+  # ── Closure trimming ─────────────────────────────────────────────────────
+  # Remove NixOS admin/installer tools (nixos-rebuild-ng, nixos-option,
+  # nixos-generate-config, nixos-install, nixos-enter) — none are useful on
+  # a read-only ISO appliance.  This also drops the Python3 dependency.
+  system.disableInstallerTools = true;
+
+  # Clear default packages (perl, rsync, strace) — not needed on the appliance.
+  environment.defaultPackages = [];
+
+  # Remove the Nix daemon and CLI from the closure entirely.  An air-gapped
+  # appliance ISO will never run nix build.
+  nix.enable = false;
+
   # ── ISO image settings ─────────────────────────────────────────────────────
 
   isoImage.squashfsCompression = "zstd -Xcompression-level 6";
