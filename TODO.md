@@ -96,6 +96,3 @@ a fingerprint derived from the CSR's public key so they can independently verify
 (e.g. via `openssl req -in req.pem -noout -pubkey | openssl sha256`) that the
 key about to be signed matches what they expect.
 
-## anodize-shuttle adds no default [[cert_profiles]] to profile.toml
-
-We should add some kind of reasonable L1 profile in here so that a default anodize deployment works out of the box.

@@ -170,6 +170,11 @@ backend      = {:?}
 token_label  = {:?}
 key_label    = {:?}
 key_spec     = "ecdsa-p384"
+
+[[cert_profiles]]
+name          = "subordinate-ca"
+validity_days = 3650
+path_len      = 0
 "#,
         args.common_name,
         args.organization,
