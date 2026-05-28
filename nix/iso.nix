@@ -75,6 +75,15 @@ in
   # appliance ISO will never run nix build.
   nix.enable = false;
 
+  # No speakers on a ceremony machine — drop pulseaudio, alsa, codecs, etc.
+  hardware.alsa.enable = false;
+
+  # The iso-image module's postBootCommands runs nix-store --load-db and
+  # nix-env to register the Nix store on the live ISO.  This drags the
+  # entire nix CLI + boost + aws-sdk-cpp into the closure.  An appliance
+  # ISO never uses nix, so clear these commands.
+  boot.postBootCommands = lib.mkForce "";
+
   # ── ISO image settings ─────────────────────────────────────────────────────
 
   isoImage.squashfsCompression = "zstd -Xcompression-level 6";
