@@ -9,7 +9,7 @@ use anodize_config::state::SssMetadata;
 use anodize_sss::Share;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Wrap},
@@ -478,10 +478,6 @@ impl ShareInput {
                     }
                 }
 
-                lines.push(Line::from(Span::styled(
-                    "  [Enter] Submit   [BS] Edit   [Esc] Cancel",
-                    dim,
-                )));
             } else {
                 // Active input state
                 let word_valid =
@@ -524,10 +520,6 @@ impl ShareInput {
                     Self::render_result(&mut lines, result, green);
                 }
 
-                lines.push(Line::from(Span::styled(
-                    "  [Tab] Complete   [Space/-] Next word   [BS] Undo   [Esc] Cancel",
-                    dim,
-                )));
             }
         } else {
             lines.push(Line::from(""));
@@ -544,15 +536,42 @@ impl ShareInput {
             )));
         }
 
+        // Split inner into scrollable content + pinned footer for key hints.
+        let hint_line: Line = if remaining == 0 {
+            Line::from("")
+        } else if self.pending_submit {
+            Line::from(Span::styled(
+                "  [Enter] Submit   [BS] Edit   [Esc] Cancel",
+                dim,
+            ))
+        } else {
+            Line::from(Span::styled(
+                "  [Tab] Complete   [Space/-] Next word   [BS] Undo   [Esc] Cancel",
+                dim,
+            ))
+        };
+
+        let footer_height = if remaining > 0 { 1u16 } else { 0 };
+        let chunks = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(footer_height),
+        ])
+        .split(inner);
+
         // Anchor view to bottom: scroll so the last lines are always visible.
         let content_height = lines.len() as u16;
-        let visible_height = inner.height;
+        let visible_height = chunks[0].height;
         let scroll_offset = content_height.saturating_sub(visible_height);
 
         let para = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .scroll((scroll_offset, 0));
-        frame.render_widget(para, inner);
+        frame.render_widget(para, chunks[0]);
+
+        if footer_height > 0 {
+            let footer = Paragraph::new(hint_line);
+            frame.render_widget(footer, chunks[1]);
+        }
     }
 
     /// Append result feedback lines.

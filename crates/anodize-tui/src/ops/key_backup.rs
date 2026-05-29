@@ -405,12 +405,11 @@ impl OpContext for BackupCtx {
     fn build_body(&self) -> Vec<String> {
         match self.phase {
             BackupPhase::Quorum => {
+                // Body is intentionally minimal — the ShareInput overlay
+                // renders itself on top of this area via render_overlay().
                 vec![
                     String::new(),
-                    "  Collecting threshold shares to reconstruct the HSM PIN.".into(),
-                    String::new(),
-                    "  The share input component is active.".into(),
-                    "  [Esc]  Abort".into(),
+                    "  Selecting threshold shares to reconstruct the HSM PIN.".into(),
                 ]
             }
             _ => self.lines.clone(),
