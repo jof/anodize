@@ -20,7 +20,7 @@ pub struct InitArgs {
     mode: HsmMode,
 
     /// USB device path (e.g. /dev/disk4 on macOS, /dev/sdb on Linux).
-    /// Use `anodize-shuttle lint --list-usb` or `diskutil list` to find it.
+    /// Use `make list-usb` or `diskutil list` to find it.
     #[arg(long)]
     device: String,
 

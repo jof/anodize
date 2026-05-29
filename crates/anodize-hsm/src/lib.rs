@@ -163,6 +163,20 @@ pub trait HsmBackend: Send {
     fn list_all_slots(&self) -> Result<Vec<SlotTokenInfo>> {
         self.list_tokens()
     }
+
+    /// Query the HSM audit log state for the device at `slot_id`, using
+    /// factory-default credentials, without modifying any state.
+    ///
+    /// Returns `Some((used, capacity))` for backends that support it
+    /// (YubiHSM). Returns `None` for backends that have no audit log
+    /// (SoftHSM) or when the device cannot be reached with factory credentials
+    /// (already bootstrapped or unavailable).
+    ///
+    /// Called before `bootstrap()` so the TUI can detect a full log and
+    /// require explicit operator confirmation before draining it.
+    fn query_bootstrap_audit_log(&self, _slot_id: u64) -> Option<(u8, u8)> {
+        None
+    }
 }
 
 /// Instantiate the appropriate backend for the given model.
