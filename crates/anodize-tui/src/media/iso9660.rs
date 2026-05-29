@@ -523,7 +523,12 @@ pub fn parse_iso(image: &[u8], lba_offset: u32) -> Result<Vec<SessionEntry>> {
     Ok(sessions)
 }
 
-fn parse_subdir(image: &[u8], dir_lba: usize, dir_size: usize, lba_offset: u32) -> Result<Vec<IsoFile>> {
+fn parse_subdir(
+    image: &[u8],
+    dir_lba: usize,
+    dir_size: usize,
+    lba_offset: u32,
+) -> Result<Vec<IsoFile>> {
     if (dir_lba + 1) * SECTOR > image.len() {
         bail!("session subdir LBA {dir_lba} outside image");
     }
@@ -730,13 +735,24 @@ mod tests {
         assert_eq!(parsed[0].dir_name, "20260425T143000_000000000Z");
         assert_eq!(parsed[1].dir_name, "20260426T091500_000000000Z");
 
-        let f0 = parsed[0].files.iter().find(|f| f.name == "ROOT.CRT").unwrap();
+        let f0 = parsed[0]
+            .files
+            .iter()
+            .find(|f| f.name == "ROOT.CRT")
+            .unwrap();
         assert_eq!(f0.data, b"cert-der-bytes");
-        let f1 = parsed[1].files.iter().find(|f| f.name == "INTCA1.CRT").unwrap();
+        let f1 = parsed[1]
+            .files
+            .iter()
+            .find(|f| f.name == "INTCA1.CRT")
+            .unwrap();
         assert_eq!(f1.data, b"int-cert");
 
         // parse_iso with offset=0 should fail (LBAs point outside the image)
-        assert!(parse_iso(&img, 0).is_err(), "offset=0 should fail on offset-built image");
+        assert!(
+            parse_iso(&img, 0).is_err(),
+            "offset=0 should fail on offset-built image"
+        );
     }
 
     /// Simulate what scan_disc does: build an ISO at a nonzero NWA, place it
@@ -781,11 +797,11 @@ mod tests {
         // Read just the track's sectors (what read_sectors does)
         let track_start = nwa;
         let track_sectors = img2.len() / SECTOR;
-        let track_data = &disc[track_start as usize * SECTOR
-            ..track_start as usize * SECTOR + track_sectors * SECTOR];
+        let track_data = &disc
+            [track_start as usize * SECTOR..track_start as usize * SECTOR + track_sectors * SECTOR];
 
-        let parsed = parse_iso(track_data, track_start)
-            .expect("parse_iso should succeed for track 2");
+        let parsed =
+            parse_iso(track_data, track_start).expect("parse_iso should succeed for track 2");
         assert_eq!(parsed.len(), 2, "should find 2 sessions in track 2's ISO");
 
         // Verify file data comes from the correct track, not track 1
@@ -830,24 +846,35 @@ mod tests {
 
         // PVD root dir extent
         let root_lba = u32::from_le_bytes(pvd[158..162].try_into().unwrap());
-        assert!(root_lba >= offset, "root LBA {root_lba} should be >= offset {offset}");
+        assert!(
+            root_lba >= offset,
+            "root LBA {root_lba} should be >= offset {offset}"
+        );
 
         // Path table L entry for root
         let pt_l = &img[18 * SECTOR..19 * SECTOR];
         let pt_root_lba = u32::from_le_bytes(pt_l[2..6].try_into().unwrap());
-        assert_eq!(pt_root_lba, root_lba, "path table root LBA should match PVD");
+        assert_eq!(
+            pt_root_lba, root_lba,
+            "path table root LBA should match PVD"
+        );
 
         // Path table M entry for root
         let pt_m = &img[19 * SECTOR..20 * SECTOR];
         let pt_root_lba_be = u32::from_be_bytes(pt_m[2..6].try_into().unwrap());
-        assert_eq!(pt_root_lba_be, root_lba, "path table M root LBA should match PVD");
+        assert_eq!(
+            pt_root_lba_be, root_lba,
+            "path table M root LBA should match PVD"
+        );
 
         // Root directory: session subdir LBA should also be absolute
         let root_dir = &img[20 * SECTOR..21 * SECTOR];
         // Skip "." and ".." (34 bytes each), then read the first real entry
         let entry_start = 34 + 34; // dot + dotdot
         let subdir_lba = u32::from_le_bytes(
-            root_dir[entry_start + 2..entry_start + 6].try_into().unwrap(),
+            root_dir[entry_start + 2..entry_start + 6]
+                .try_into()
+                .unwrap(),
         );
         assert!(
             subdir_lba >= offset,
@@ -858,7 +885,9 @@ mod tests {
         let subdir = &img[21 * SECTOR..22 * SECTOR];
         let file_entry_start = 34 + 34; // skip "." and ".."
         let file_lba = u32::from_le_bytes(
-            subdir[file_entry_start + 2..file_entry_start + 6].try_into().unwrap(),
+            subdir[file_entry_start + 2..file_entry_start + 6]
+                .try_into()
+                .unwrap(),
         );
         assert!(
             file_lba >= offset,

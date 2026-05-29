@@ -2658,7 +2658,7 @@ dependencies = [
 [[package]]
 name = "yubihsm"
 version = "0.43.0-pre"
-source = "git+https://github.com/jof/yubihsm.rs.git?branch=add-change-authentication-key#d40c5e2f3a4bec43afca406f9d64c652aa2f8606"
+source = "git+https://github.com/jof/yubihsm.rs.git?branch=anodize#4d0196d9b08f01423784e42449543c4fcf25d7ab"
 dependencies = [
  "aes",
  "bitflags 2.11.1",

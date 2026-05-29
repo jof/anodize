@@ -477,7 +477,6 @@ impl ShareInput {
                         }
                     }
                 }
-
             } else {
                 // Active input state
                 let word_valid =
@@ -519,7 +518,6 @@ impl ShareInput {
                 if let Some(ref result) = self.last_result {
                     Self::render_result(&mut lines, result, green);
                 }
-
             }
         } else {
             lines.push(Line::from(""));
@@ -552,11 +550,8 @@ impl ShareInput {
         };
 
         let footer_height = if remaining > 0 { 1u16 } else { 0 };
-        let chunks = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(footer_height),
-        ])
-        .split(inner);
+        let chunks =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(footer_height)]).split(inner);
 
         // Anchor view to bottom: scroll so the last lines are always visible.
         let content_height = lines.len() as u16;

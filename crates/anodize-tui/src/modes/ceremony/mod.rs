@@ -105,7 +105,10 @@ impl CeremonyMode {
             CeremonyPhase::Commit => "Committing Intent to Disc\u{2026}",
             CeremonyPhase::BurningDisc => "Writing Session\u{2026}",
             CeremonyPhase::DiscDone => {
-                let op_failed = app.active_op.as_ref().map_or(false, |op| !op.op_succeeded());
+                let op_failed = app
+                    .active_op
+                    .as_ref()
+                    .map_or(false, |op| !op.op_succeeded());
                 if op_failed {
                     match app.current_op() {
                         Some(Operation::KeyBackup) => "Key Backup FAILED",
@@ -272,7 +275,10 @@ impl CeremonyMode {
                     Some(Operation::RefreshDisc) => "Disc refresh",
                     None => "Session",
                 };
-                let op_failed = app.active_op.as_ref().map_or(false, |op| !op.op_succeeded());
+                let op_failed = app
+                    .active_op
+                    .as_ref()
+                    .map_or(false, |op| !op.op_succeeded());
                 let err_msg = app.active_op.as_ref().and_then(|op| op.op_error_message());
                 let fp = app.active_op.as_ref().and_then(|op| op.fingerprint());
                 let mut lines = vec![String::new()];

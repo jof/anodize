@@ -53,9 +53,54 @@ fn main() {
             println!("\n=== Factory Reset All Devices ===\n");
             factory_reset_all(&serials);
         }
+        Some("--probe") => {
+            // --probe PIN SERIAL
+            let pin = args.get(2).unwrap_or_else(|| {
+                eprintln!("Usage: yubihsm_enum --probe PIN SERIAL");
+                process::exit(1);
+            });
+            let serial_str = format!(
+                "{:0>10}",
+                args.get(3).unwrap_or_else(|| {
+                    eprintln!("Usage: yubihsm_enum --probe PIN SERIAL");
+                    process::exit(1);
+                })
+            );
+            let serial: yubihsm::device::SerialNumber = serial_str.parse().unwrap_or_else(|e| {
+                eprintln!("Invalid serial: {e}");
+                process::exit(1);
+            });
+            println!("\n=== Probe Device {serial} ===\n");
+            probe_bootstrapped(serial, pin);
+        }
+        Some("--export-test") => {
+            // --export-test PIN SERIAL_SRC SERIAL_DST
+            let pin = args.get(2).unwrap_or_else(|| {
+                eprintln!("Usage: yubihsm_enum --export-test PIN SERIAL_SRC SERIAL_DST");
+                process::exit(1);
+            });
+            let src_str = format!(
+                "{:0>10}",
+                args.get(3).unwrap_or_else(|| {
+                    eprintln!("Usage: yubihsm_enum --export-test PIN SERIAL_SRC SERIAL_DST");
+                    process::exit(1);
+                })
+            );
+            let dst_str = format!(
+                "{:0>10}",
+                args.get(4).unwrap_or_else(|| {
+                    eprintln!("Usage: yubihsm_enum --export-test PIN SERIAL_SRC SERIAL_DST");
+                    process::exit(1);
+                })
+            );
+            let src: yubihsm::device::SerialNumber = src_str.parse().unwrap();
+            let dst: yubihsm::device::SerialNumber = dst_str.parse().unwrap();
+            println!("\n=== Export-Wrapped Test: {src} → {dst} ===\n");
+            export_test(src, dst, pin);
+        }
         Some(other) => {
             eprintln!("Unknown flag: {other}");
-            eprintln!("Usage: yubihsm_enum [--dual|--roundtrip|--reset] SERIAL_A SERIAL_B");
+            eprintln!("Usage: yubihsm_enum [--dual|--roundtrip|--reset|--probe|--export-test] ...");
             process::exit(1);
         }
         None => {
@@ -365,6 +410,153 @@ fn factory_reset_all(serials: &[yubihsm::device::SerialNumber]) {
     // Brief delay then re-enumerate
     std::thread::sleep(std::time::Duration::from_secs(2));
     enumerate();
+}
+
+// ── Audit log drain ──────────────────────────────────────────────────────────
+
+fn drain_audit_log(client: &yubihsm::Client, label: &str) {
+    match client.get_log_entries() {
+        Ok(entries) => {
+            let count = entries.entries.len();
+            if let Some(last) = entries.entries.last() {
+                match client.set_log_index(last.item) {
+                    Ok(_) => println!(
+                        "  Drained {count} audit log entries on {label} (last={})",
+                        last.item
+                    ),
+                    Err(e) => println!("  Warning: set_log_index failed on {label}: {e}"),
+                }
+            } else {
+                println!("  Audit log empty on {label}");
+            }
+        }
+        Err(e) => {
+            println!("  get_log_entries failed on {label}: {e}");
+            println!("  Attempting brute-force log index drain...");
+            // Try setting log index to various values to unblock the HSM.
+            for idx in (1u16..=512).rev() {
+                if client.set_log_index(idx).is_ok() {
+                    println!("  ✓ set_log_index({idx}) succeeded on {label}");
+                    // Try again now that some space is freed
+                    if let Ok(entries) = client.get_log_entries() {
+                        if let Some(last) = entries.entries.last() {
+                            let _ = client.set_log_index(last.item);
+                            println!("  ✓ Fully drained on {label} (last={})", last.item);
+                        }
+                    }
+                    return;
+                }
+            }
+            println!("  ✗ Could not drain audit log on {label}");
+        }
+    }
+}
+
+// ── Probe bootstrapped device ─────────────────────────────────────────────────
+
+fn open_with_pin(serial: yubihsm::device::SerialNumber, pin: &str) -> yubihsm::Client {
+    let cfg = yubihsm::UsbConfig {
+        serial: Some(serial),
+        ..Default::default()
+    };
+    let connector = yubihsm::Connector::usb(&cfg);
+    let creds = yubihsm::Credentials::from_password(2, pin.as_bytes());
+    yubihsm::Client::open(connector, creds, true).unwrap_or_else(|e| {
+        eprintln!("Failed to connect with anodize auth key 2: {e}");
+        process::exit(1);
+    })
+}
+
+fn probe_bootstrapped(serial: yubihsm::device::SerialNumber, pin: &str) {
+    let client = open_with_pin(serial, pin);
+    println!("Connected to {serial} with anodize auth key");
+
+    // List all objects
+    let objects = client.list_objects(&[]).unwrap_or_else(|e| {
+        eprintln!("list_objects failed: {e}");
+        process::exit(1);
+    });
+    println!("Objects ({}):", objects.len());
+    for entry in &objects {
+        println!(
+            "  ID=0x{:04X}  type={:?}  seq={}",
+            entry.object_id, entry.object_type, entry.sequence
+        );
+        // Get detailed info
+        if let Ok(info) = client.get_object_info(entry.object_id, entry.object_type) {
+            println!("    algorithm:    {:?}", info.algorithm);
+            println!("    capabilities: {:?}", info.capabilities);
+            println!("    delegated:    {:?}", info.delegated_capabilities);
+            println!("    domains:      {:?}", info.domains);
+            println!("    label:        {:?}", info.label);
+            println!("    origin:       {:?}", info.origin);
+        }
+    }
+}
+
+fn export_test(src: yubihsm::device::SerialNumber, dst: yubihsm::device::SerialNumber, pin: &str) {
+    // Open source, export, then drop client before opening dest (avoids USB contention).
+    println!("Opening source {src}...");
+    let client_src = open_with_pin(src, pin);
+    drain_audit_log(&client_src, "source");
+
+    // Check objects on source
+    println!("--- Source {src} objects ---");
+    let objects = client_src.list_objects(&[]).unwrap();
+    for entry in &objects {
+        println!(
+            "  ID=0x{:04X}  type={:?}",
+            entry.object_id, entry.object_type
+        );
+        if let Ok(info) = client_src.get_object_info(entry.object_id, entry.object_type) {
+            println!(
+                "    caps: {:?}  algo: {:?}",
+                info.capabilities, info.algorithm
+            );
+        }
+    }
+
+    // Try get_public_key
+    println!("\nget_public_key(0x0100)...");
+    match client_src.get_public_key(0x0100) {
+        Ok(pk) => println!("  ✓ {} bytes", pk.as_ref().len()),
+        Err(e) => println!("  ✗ {e}"),
+    }
+
+    // Try export_wrapped
+    println!("\nexport_wrapped(wrap=0x0200, key=0x0100)...");
+    let wrapped = match client_src.export_wrapped(
+        WRAP_KEY_ID,
+        yubihsm::object::Type::AsymmetricKey,
+        0x0100,
+    ) {
+        Ok(wrapped) => {
+            println!(
+                "  ✓ nonce={:02x?}, ciphertext={} bytes",
+                wrapped.nonce.0,
+                wrapped.ciphertext.len()
+            );
+            wrapped
+        }
+        Err(e) => {
+            println!("  ✗ {e}");
+            return;
+        }
+    };
+
+    // Drop source client before opening dest
+    drop(client_src);
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Import into dest
+    println!("\nOpening dest {dst}...");
+    let client_dst = open_with_pin(dst, pin);
+    println!("import_wrapped into {dst}...");
+    let _ = client_dst.delete_object(0x0100, yubihsm::object::Type::AsymmetricKey);
+    match client_dst.import_wrapped(WRAP_KEY_ID, wrapped) {
+        Ok(handle) => println!("  ✓ imported as 0x{:04X}", handle.object_id),
+        Err(e) => println!("  ✗ import_wrapped: {e}"),
+    }
 }
 
 // ── CLI helpers ────────────────────────────────────────────────────────────────
