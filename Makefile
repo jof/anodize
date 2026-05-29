@@ -101,6 +101,8 @@ define nix-iso-build
 		       nix --extra-experimental-features "nix-command flakes" \
 		           --option build-users-group "" \
 		           --option sandbox false \
+		           --option connect-timeout 15 \
+		           --option stalled-download-timeout 60 \
 		           $(NIX_SANDBOX_FLAG) build .#$(1) && \
 		       rm -f /src/$(2) && cp -L result/iso/*.iso /src/$(2)'
 	@echo "ISO ready: $(2)"
@@ -585,6 +587,8 @@ define nix-build-bin
 		       nix --extra-experimental-features "nix-command flakes" \
 		           --option build-users-group "" \
 		           --option sandbox false \
+		           --option connect-timeout 15 \
+		           --option stalled-download-timeout 60 \
 		           $(NIX_SANDBOX_FLAG) build .#$(1) && \
 		       rm -f /src/$(2) && cp -L result/bin/anodize-ceremony /src/$(2)'
 endef

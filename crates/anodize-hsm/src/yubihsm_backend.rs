@@ -152,6 +152,23 @@ impl HsmBackend for YubiHsmBackend {
         Ok(Box::new(YubiHsmSession { client }))
     }
 
+    fn query_bootstrap_audit_log(&self, slot_id: u64) -> Option<(u8, u8)> {
+        let serials = yubihsm::connector::usb::Devices::serial_numbers().ok()?;
+        let serial = serials.get(slot_id as usize)?;
+        let cfg = yubihsm::UsbConfig {
+            serial: Some(*serial),
+            ..Default::default()
+        };
+        let connector = yubihsm::Connector::usb(&cfg);
+        let creds = yubihsm::Credentials::from_password(
+            DEFAULT_AUTH_KEY_ID,
+            DEFAULT_AUTH_PASSWORD.as_bytes(),
+        );
+        let client = yubihsm::Client::open(connector, creds, false).ok()?;
+        let di = client.device_info().ok()?;
+        Some((di.log_store_used, di.log_store_capacity))
+    }
+
     fn bootstrap(
         &self,
         slot_id: u64,
@@ -184,6 +201,50 @@ impl HsmBackend for YubiHsmBackend {
             HsmError::BackendError(format!("YubiHSM bootstrap connect ({serial}): {e}"))
         })?;
 
+        // 1a. Drain the audit log as the very first operation after opening a session.
+        //
+        // GetLogEntries and SetLogIndex are always allowed by the YubiHSM — they
+        // are explicitly exempt from Force Audit blocking even when the log is full.
+        // All other auditable commands (including PutAuthenticationKey below) are
+        // blocked when Force Audit = Fix AND the log is full.  A prior failed
+        // bootstrap may have left the device in exactly that state, so we drain
+        // unconditionally here before touching anything else.
+        let pre_log = client
+            .get_log_entries()
+            .map_err(|e| HsmError::BackendError(format!("get_log_entries (pre-drain): {e}")))?;
+        if let Some(last) = pre_log.entries.last() {
+            client
+                .set_log_index(last.item)
+                .map_err(|e| HsmError::BackendError(format!("set_log_index (pre-drain): {e}")))?;
+        }
+        tracing::info!(
+            "YubiHSM bootstrap: pre-drained {} log entries",
+            pre_log.entries.len()
+        );
+
+        // 1b. Remove the anodize auth key if it already exists from a prior
+        //     partial bootstrap.  After the drain the log has room, so
+        //     DeleteObject is unblocked even if Force Audit = Fix.
+        //     Ignore ObjectNotFound — that is the expected case on a fresh device.
+        if let Err(e) = client.delete_object(
+            ANODIZE_AUTH_KEY_ID,
+            yubihsm::object::Type::AuthenticationKey,
+        ) {
+            let msg = e.to_string();
+            if !msg.contains("ObjectNotFound") && !msg.contains("object not found") {
+                return Err(HsmError::BackendError(format!(
+                    "delete existing anodize auth key: {e}"
+                )));
+            }
+            tracing::debug!(
+                "YubiHSM bootstrap: anodize auth key {ANODIZE_AUTH_KEY_ID} not present (fresh device)"
+            );
+        } else {
+            tracing::info!(
+                "YubiHSM bootstrap: removed stale anodize auth key {ANODIZE_AUTH_KEY_ID} from partial bootstrap"
+            );
+        }
+
         // 2. Create a new auth key (ID 2) derived from the SSS user_pin.
         //    This replaces the factory default for future sessions.
         let auth_key =
@@ -204,13 +265,25 @@ impl HsmBackend for YubiHsmBackend {
         tracing::info!("YubiHSM bootstrap: created auth key {ANODIZE_AUTH_KEY_ID}");
 
         // 2a. Enable Force Audit permanently — HSM blocks ops when log is full.
-        client
-            .set_force_audit_option(yubihsm::audit::AuditOption::Fix)
-            .map_err(|e| HsmError::BackendError(format!("set_force_audit_option: {e}")))?;
-
-        tracing::info!("YubiHSM bootstrap: force audit set to Fix");
+        //     The log has room now (drained above), so this call cannot be blocked.
+        //     Once set to Fix the firmware rejects any further SetOption for this
+        //     flag (including setting it to Fix again) with InvalidData.  Treat
+        //     InvalidData as "already Fix" and continue.
+        match client.set_force_audit_option(yubihsm::audit::AuditOption::Fix) {
+            Ok(()) => tracing::info!("YubiHSM bootstrap: force audit set to Fix"),
+            Err(ref e) if e.device_error() == Some(yubihsm::device::ErrorKind::InvalidData) => {
+                tracing::info!("YubiHSM bootstrap: force audit already Fix — skipping");
+            }
+            Err(e) => {
+                return Err(HsmError::BackendError(format!(
+                    "set_force_audit_option: {e}"
+                )))
+            }
+        }
 
         // 2b. Fix per-command audit for all security-critical commands.
+        //     Same InvalidData guard: once a command's audit is set to Fix it
+        //     cannot be changed, so a repeat bootstrap attempt would get rejected.
         const FIXED_AUDIT_COMMANDS: &[yubihsm::command::Code] = &[
             yubihsm::command::Code::SignEcdsa,
             yubihsm::command::Code::GenerateAsymmetricKey,
@@ -227,11 +300,17 @@ impl HsmBackend for YubiHsmBackend {
         ];
 
         for &cmd in FIXED_AUDIT_COMMANDS {
-            client
-                .set_command_audit_option(cmd, yubihsm::audit::AuditOption::Fix)
-                .map_err(|e| {
-                    HsmError::BackendError(format!("set_command_audit_option({cmd:?}): {e}"))
-                })?;
+            match client.set_command_audit_option(cmd, yubihsm::audit::AuditOption::Fix) {
+                Ok(()) => {}
+                Err(ref e) if e.device_error() == Some(yubihsm::device::ErrorKind::InvalidData) => {
+                    tracing::debug!("YubiHSM bootstrap: {cmd:?} audit already Fix — skipping");
+                }
+                Err(e) => {
+                    return Err(HsmError::BackendError(format!(
+                        "set_command_audit_option({cmd:?}): {e}"
+                    )))
+                }
+            }
         }
 
         tracing::info!(
@@ -239,19 +318,18 @@ impl HsmBackend for YubiHsmBackend {
             FIXED_AUDIT_COMMANDS.len()
         );
 
-        // 2c. Drain the initial log so the validator has a clean baseline.
-        let log = client
+        // 2c. Drain the bootstrap audit entries to leave a clean baseline.
+        let post_log = client
             .get_log_entries()
-            .map_err(|e| HsmError::BackendError(format!("get_log_entries: {e}")))?;
-        if let Some(last) = log.entries.last() {
+            .map_err(|e| HsmError::BackendError(format!("get_log_entries (post-drain): {e}")))?;
+        if let Some(last) = post_log.entries.last() {
             client
                 .set_log_index(last.item)
-                .map_err(|e| HsmError::BackendError(format!("set_log_index: {e}")))?;
+                .map_err(|e| HsmError::BackendError(format!("set_log_index (post-drain): {e}")))?;
         }
-
         tracing::info!(
-            "YubiHSM bootstrap: drained {} initial log entries",
-            log.entries.len()
+            "YubiHSM bootstrap: post-drained {} bootstrap log entries",
+            post_log.entries.len()
         );
 
         // 3. Delete the factory default auth key to lock down the device.
