@@ -96,9 +96,3 @@ a fingerprint derived from the CSR's public key so they can independently verify
 (e.g. via `openssl req -in req.pem -noout -pubkey | openssl sha256`) that the
 key about to be signed matches what they expect.
 
-## Key Backup
-When initially gathering key shares to reconstruct the HSM pin for the backup, the TUI output got a bit garbled and didn't show the expected output. There is a string that says "Selecting threadhold shares to reconstruct the HSM PIN" but it is taking over the space on the screen where the green/accepted word parts are shown.
-
-There is some other weird text fighting for the screen after I start to type that says "share input component is active".
-
-Maybe there are multiple components fighting for the same screen space?
