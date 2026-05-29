@@ -137,27 +137,42 @@ fn path_entry(dir_id: &[u8], lba: u32, parent: u16, le: bool) -> Vec<u8> {
 
 /// Build a complete ISO 9660 Level 2 image from all sessions (prior + current).
 /// The caller passes sessions in chronological order; the last entry is the newest.
-pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
+///
+/// `lba_offset` is the absolute disc LBA where this image will be written
+/// (i.e. the Next Writable Address for a multi-session append).  All internal
+/// LBA references (PVD, path tables, directory records) are shifted by this
+/// offset so that an OS reading the disc can locate extents correctly.
+/// Pass 0 for a single-session / first-session write.
+pub fn build_iso(sessions: &[SessionEntry], lba_offset: u32) -> Vec<u8> {
     let n = sessions.len();
     assert!(n > 0, "build_iso called with no sessions");
 
     // ── Compute layout ────────────────────────────────────────────────────────
-    let root_dir_lba: u32 = 20;
-    let session_dir_start: u32 = 21;
-    let file_data_start: u32 = session_dir_start + n as u32;
+    // Buffer-relative sector positions (where data sits in the image array).
+    let root_dir_sec: u32 = 20;
+    let session_dir_sec_start: u32 = 21;
+    let file_data_sec_start: u32 = session_dir_sec_start + n as u32;
 
-    // For each session, for each file: compute LBA.
+    // On-disc LBA = buffer sector + lba_offset (stored in ISO metadata).
+    let root_dir_lba: u32 = root_dir_sec + lba_offset;
+    let session_dir_lba_start: u32 = session_dir_sec_start + lba_offset;
+
+    // For each session, for each file: compute buffer sector and on-disc LBA.
+    let mut file_secs: Vec<Vec<u32>> = Vec::with_capacity(n);
     let mut file_lbas: Vec<Vec<u32>> = Vec::with_capacity(n);
-    let mut cur_lba = file_data_start;
+    let mut cur_sec = file_data_sec_start;
     for sess in sessions {
+        let mut secs = Vec::with_capacity(sess.files.len());
         let mut lbas = Vec::with_capacity(sess.files.len());
         for f in &sess.files {
-            lbas.push(cur_lba);
-            cur_lba += sectors_for(f.data.len()) as u32;
+            secs.push(cur_sec);
+            lbas.push(cur_sec + lba_offset);
+            cur_sec += sectors_for(f.data.len()) as u32;
         }
+        file_secs.push(secs);
         file_lbas.push(lbas);
     }
-    let total_sectors = (cur_lba as usize).max(MIN_SECTORS);
+    let total_sectors = (cur_sec as usize).max(MIN_SECTORS);
 
     let mut image = vec![0u8; total_sectors * SECTOR];
 
@@ -194,10 +209,10 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
         w32(s, 132, pt_size as u32);
 
         // Location of Type L path table (bytes 140–143, LE)
-        s[140..144].copy_from_slice(&18u32.to_le_bytes());
+        s[140..144].copy_from_slice(&(18u32 + lba_offset).to_le_bytes());
         // Location of Optional Type L path table (144–147): 0 (already)
         // Location of Type M path table (bytes 148–151, BE)
-        s[148..152].copy_from_slice(&19u32.to_be_bytes());
+        s[148..152].copy_from_slice(&(19u32 + lba_offset).to_be_bytes());
         // Location of Optional Type M path table (152–155): 0
 
         // Directory record for root (bytes 156–189, 34 bytes)
@@ -275,7 +290,7 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
         off += re.len();
         // Entries 2..N+1: session subdirectories
         for (i, sess) in sessions.iter().enumerate() {
-            let dir_lba = session_dir_start + i as u32;
+            let dir_lba = session_dir_lba_start + i as u32;
             let e = path_entry(sess.dir_name.as_bytes(), dir_lba, 1, le);
             pt[off..off + e.len()].copy_from_slice(&e);
             off += e.len();
@@ -284,7 +299,7 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
 
     // ── Root directory records (sector 20) ────────────────────────────────────
     {
-        let root = &mut image[root_dir_lba as usize * SECTOR..(root_dir_lba as usize + 1) * SECTOR];
+        let root = &mut image[root_dir_sec as usize * SECTOR..(root_dir_sec as usize + 1) * SECTOR];
         let root_data_len = root_dir_size(sessions) as u32;
         let mut off = 0;
 
@@ -310,7 +325,7 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
         off += dotdot.len();
         // Session subdirectories
         for (i, sess) in sessions.iter().enumerate() {
-            let dir_lba = session_dir_start + i as u32;
+            let dir_lba = session_dir_lba_start + i as u32;
             let dir_data_len = session_dir_size(&sess.files) as u32;
             let rec = dir_rec(
                 true,
@@ -326,11 +341,12 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
 
     // ── Session directory records ──────────────────────────────────────────────
     for (i, sess) in sessions.iter().enumerate() {
-        let dir_lba = session_dir_start + i as u32;
+        let dir_lba = session_dir_lba_start + i as u32;
+        let dir_sec = session_dir_sec_start + i as u32;
         let dir_data_len = session_dir_size(&sess.files) as u32;
         let root_data_len = root_dir_size(sessions) as u32;
 
-        let sec = &mut image[dir_lba as usize * SECTOR..(dir_lba as usize + 1) * SECTOR];
+        let sec = &mut image[dir_sec as usize * SECTOR..(dir_sec as usize + 1) * SECTOR];
         let mut off = 0;
 
         // "."
@@ -359,8 +375,8 @@ pub fn build_iso(sessions: &[SessionEntry]) -> Vec<u8> {
     // ── File data ─────────────────────────────────────────────────────────────
     for (i, sess) in sessions.iter().enumerate() {
         for (j, f) in sess.files.iter().enumerate() {
-            let lba = file_lbas[i][j] as usize;
-            let off = lba * SECTOR;
+            let sec = file_secs[i][j] as usize;
+            let off = sec * SECTOR;
             image[off..off + f.data.len()].copy_from_slice(&f.data);
         }
     }
@@ -422,7 +438,12 @@ fn session_dir_size(files: &[IsoFile]) -> usize {
 
 /// Parse an ISO 9660 image (raw sector bytes) and extract its SessionEntry list.
 /// Only reads timestamped subdirectories of the root (skips "." and "..").
-pub fn parse_iso(image: &[u8]) -> Result<Vec<SessionEntry>> {
+///
+/// `lba_offset` is the disc LBA where the image was written (the NWA at write
+/// time).  Internal LBA references in the ISO are absolute; subtracting this
+/// offset converts them to byte positions within `image`.
+/// Pass 0 when parsing a standalone image or the first session.
+pub fn parse_iso(image: &[u8], lba_offset: u32) -> Result<Vec<SessionEntry>> {
     if image.len() < 17 * SECTOR + SECTOR {
         bail!("image too small to contain a PVD");
     }
@@ -433,11 +454,12 @@ pub fn parse_iso(image: &[u8]) -> Result<Vec<SessionEntry>> {
         bail!("sector 16 is not a Primary Volume Descriptor");
     }
     // Root directory record is at bytes 156–189
-    let root_lba = u32::from_le_bytes(pvd[158..162].try_into().unwrap()) as usize;
+    let root_lba_abs = u32::from_le_bytes(pvd[158..162].try_into().unwrap());
     let root_size = u32::from_le_bytes(pvd[166..170].try_into().unwrap()) as usize;
+    let root_lba = root_lba_abs.wrapping_sub(lba_offset) as usize;
 
     if (root_lba + 1) * SECTOR > image.len() {
-        bail!("root directory LBA {root_lba} is outside image");
+        bail!("root directory LBA {root_lba_abs} (local {root_lba}) is outside image");
     }
 
     // ── Walk root directory ───────────────────────────────────────────────────
@@ -475,7 +497,8 @@ pub fn parse_iso(image: &[u8]) -> Result<Vec<SessionEntry>> {
             let dir_name = std::str::from_utf8(&rec[33..33 + id_len])
                 .unwrap_or("?")
                 .to_string();
-            let dir_lba = u32::from_le_bytes(rec[2..6].try_into().unwrap()) as usize;
+            let dir_lba_abs = u32::from_le_bytes(rec[2..6].try_into().unwrap());
+            let dir_lba = dir_lba_abs.wrapping_sub(lba_offset) as usize;
             let dir_size = u32::from_le_bytes(rec[10..14].try_into().unwrap()) as usize;
 
             // Reconstruct timestamp from 7-byte dir record field
@@ -483,7 +506,7 @@ pub fn parse_iso(image: &[u8]) -> Result<Vec<SessionEntry>> {
             let timestamp = parse_dt7(dt);
 
             // Read session subdir
-            let files = parse_subdir(image, dir_lba, dir_size)?;
+            let files = parse_subdir(image, dir_lba, dir_size, lba_offset)?;
 
             sessions.push(SessionEntry {
                 dir_name,
@@ -500,7 +523,7 @@ pub fn parse_iso(image: &[u8]) -> Result<Vec<SessionEntry>> {
     Ok(sessions)
 }
 
-fn parse_subdir(image: &[u8], dir_lba: usize, dir_size: usize) -> Result<Vec<IsoFile>> {
+fn parse_subdir(image: &[u8], dir_lba: usize, dir_size: usize, lba_offset: u32) -> Result<Vec<IsoFile>> {
     if (dir_lba + 1) * SECTOR > image.len() {
         bail!("session subdir LBA {dir_lba} outside image");
     }
@@ -536,12 +559,13 @@ fn parse_subdir(image: &[u8], dir_lba: usize, dir_size: usize) -> Result<Vec<Iso
         let name = std::str::from_utf8(&rec[33..33 + id_len])
             .unwrap_or("?")
             .to_string();
-        let file_lba = u32::from_le_bytes(rec[2..6].try_into().unwrap()) as usize;
+        let file_lba_abs = u32::from_le_bytes(rec[2..6].try_into().unwrap());
+        let file_lba = file_lba_abs.wrapping_sub(lba_offset) as usize;
         let file_size = u32::from_le_bytes(rec[10..14].try_into().unwrap()) as usize;
 
         let end = file_lba * SECTOR + file_size;
         if end > image.len() {
-            bail!("file '{name}' data at LBA {file_lba} size {file_size} overruns image");
+            bail!("file '{name}' data at LBA {file_lba_abs} (local {file_lba}) size {file_size} overruns image");
         }
         let data = image[file_lba * SECTOR..file_lba * SECTOR + file_size].to_vec();
 
@@ -610,7 +634,7 @@ mod tests {
             1_000_000,
             &[("ROOT.CRT", b"fakecert"), ("AUDIT.LOG", b"fakelog")],
         );
-        let img = build_iso(&[s]);
+        let img = build_iso(&[s], 0);
         assert_eq!(img.len() % SECTOR, 0);
         assert!(
             img.len() >= MIN_SECTORS * SECTOR,
@@ -626,7 +650,7 @@ mod tests {
             1_000_000,
             &[("ROOT.CRT", b"x")],
         );
-        let img = build_iso(&[s]);
+        let img = build_iso(&[s], 0);
         assert_eq!(img[16 * SECTOR], 0x01);
         assert_eq!(&img[16 * SECTOR + 1..16 * SECTOR + 6], b"CD001");
     }
@@ -652,8 +676,8 @@ mod tests {
                 ],
             ),
         ];
-        let img = build_iso(&sessions);
-        let parsed = parse_iso(&img).expect("parse_iso failed");
+        let img = build_iso(&sessions, 0);
+        let parsed = parse_iso(&img, 0).expect("parse_iso failed");
 
         assert_eq!(parsed.len(), 2, "expected 2 sessions, got {}", parsed.len());
         assert_eq!(parsed[0].dir_name, "20260425T143000_000000000Z");
@@ -675,13 +699,181 @@ mod tests {
     }
 
     #[test]
+    fn parse_roundtrip_with_lba_offset() {
+        let offset: u32 = 5504; // realistic BD-R NWA for session 20
+        let sessions = vec![
+            make_session(
+                "20260425T143000_000000000Z",
+                1_000_000,
+                &[("ROOT.CRT", b"cert-der-bytes"), ("AUDIT.LOG", b"log1\n")],
+            ),
+            make_session(
+                "20260426T091500_000000000Z",
+                2_000_000,
+                &[
+                    ("ROOT.CRT", b"cert-der-bytes"),
+                    ("INTCA1.CRT", b"int-cert"),
+                    ("AUDIT.LOG", b"log1\nlog2\n"),
+                ],
+            ),
+        ];
+        let img = build_iso(&sessions, offset);
+
+        // PVD root dir LBA should be offset-adjusted
+        let pvd = &img[16 * SECTOR..17 * SECTOR];
+        let root_lba = u32::from_le_bytes(pvd[158..162].try_into().unwrap());
+        assert_eq!(root_lba, 20 + offset, "root dir LBA should include offset");
+
+        // parse_iso with the same offset should recover the data
+        let parsed = parse_iso(&img, offset).expect("parse_iso with offset failed");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].dir_name, "20260425T143000_000000000Z");
+        assert_eq!(parsed[1].dir_name, "20260426T091500_000000000Z");
+
+        let f0 = parsed[0].files.iter().find(|f| f.name == "ROOT.CRT").unwrap();
+        assert_eq!(f0.data, b"cert-der-bytes");
+        let f1 = parsed[1].files.iter().find(|f| f.name == "INTCA1.CRT").unwrap();
+        assert_eq!(f1.data, b"int-cert");
+
+        // parse_iso with offset=0 should fail (LBAs point outside the image)
+        assert!(parse_iso(&img, 0).is_err(), "offset=0 should fail on offset-built image");
+    }
+
+    /// Simulate what scan_disc does: build an ISO at a nonzero NWA, place it
+    /// on a "disc" at that offset, then read just the track's sectors back and
+    /// parse.  This is the scenario that the original bug silently corrupted —
+    /// the old code would succeed but return track-1's data for every session.
+    #[test]
+    fn scan_disc_simulation_multi_session() {
+        let nwa: u32 = 384; // realistic NWA for session 2 on BD-R
+
+        // Session 1 at LBA 0
+        let s1 = make_session(
+            "20260425T143000_000000000Z",
+            1_000_000,
+            &[("ROOT.CRT", b"root-cert-s1"), ("AUDIT.LOG", b"log-s1\n")],
+        );
+        let img1 = build_iso(&[s1.clone()], 0);
+
+        // Session 2 at LBA=nwa — contains both sessions (superset invariant)
+        let s2 = make_session(
+            "20260426T091500_000000000Z",
+            2_000_000,
+            &[
+                ("ROOT.CRT", b"root-cert-s1"),
+                ("INTCA1.CRT", b"intermediate-cert-s2"),
+                ("AUDIT.LOG", b"log-s1\nlog-s2\n"),
+            ],
+        );
+        let img2 = build_iso(&[s1, s2], nwa);
+
+        // Build a "disc" buffer large enough for both sessions
+        let disc_size = (nwa as usize + img2.len() / SECTOR + 64) * SECTOR;
+        let mut disc = vec![0u8; disc_size];
+
+        // Write session 1 at LBA 0
+        disc[..img1.len()].copy_from_slice(&img1);
+        // Write session 2 at LBA=nwa
+        let off = nwa as usize * SECTOR;
+        disc[off..off + img2.len()].copy_from_slice(&img2);
+
+        // --- Simulate scan_disc reading track 2 ---
+        // Read just the track's sectors (what read_sectors does)
+        let track_start = nwa;
+        let track_sectors = img2.len() / SECTOR;
+        let track_data = &disc[track_start as usize * SECTOR
+            ..track_start as usize * SECTOR + track_sectors * SECTOR];
+
+        let parsed = parse_iso(track_data, track_start)
+            .expect("parse_iso should succeed for track 2");
+        assert_eq!(parsed.len(), 2, "should find 2 sessions in track 2's ISO");
+
+        // Verify file data comes from the correct track, not track 1
+        let int_cert = parsed[1]
+            .files
+            .iter()
+            .find(|f| f.name == "INTCA1.CRT")
+            .expect("INTCA1.CRT should exist in session 2");
+        assert_eq!(
+            int_cert.data, b"intermediate-cert-s2",
+            "file data should come from track 2, not track 1"
+        );
+
+        // Also verify session 1 data in the second image is correct
+        let audit = parsed[0]
+            .files
+            .iter()
+            .find(|f| f.name == "AUDIT.LOG")
+            .expect("AUDIT.LOG should exist in session 1");
+        assert_eq!(audit.data, b"log-s1\n");
+
+        // Cross-check: parsing track 2 with offset=0 must fail — this is the
+        // exact scenario the old symmetric bug hid.
+        assert!(
+            parse_iso(track_data, 0).is_err(),
+            "parsing track 2 data with offset=0 must fail (LBAs point outside buffer)"
+        );
+    }
+
+    /// Verify that all stored LBAs in the ISO metadata are disc-absolute
+    /// (buffer position + lba_offset), not buffer-relative.
+    #[test]
+    fn stored_lbas_are_disc_absolute() {
+        let offset: u32 = 1024;
+        let s = make_session(
+            "20260425T143000_000000000Z",
+            1_000_000,
+            &[("ROOT.CRT", b"cert"), ("AUDIT.LOG", b"log")],
+        );
+        let img = build_iso(&[s], offset);
+        let pvd = &img[16 * SECTOR..17 * SECTOR];
+
+        // PVD root dir extent
+        let root_lba = u32::from_le_bytes(pvd[158..162].try_into().unwrap());
+        assert!(root_lba >= offset, "root LBA {root_lba} should be >= offset {offset}");
+
+        // Path table L entry for root
+        let pt_l = &img[18 * SECTOR..19 * SECTOR];
+        let pt_root_lba = u32::from_le_bytes(pt_l[2..6].try_into().unwrap());
+        assert_eq!(pt_root_lba, root_lba, "path table root LBA should match PVD");
+
+        // Path table M entry for root
+        let pt_m = &img[19 * SECTOR..20 * SECTOR];
+        let pt_root_lba_be = u32::from_be_bytes(pt_m[2..6].try_into().unwrap());
+        assert_eq!(pt_root_lba_be, root_lba, "path table M root LBA should match PVD");
+
+        // Root directory: session subdir LBA should also be absolute
+        let root_dir = &img[20 * SECTOR..21 * SECTOR];
+        // Skip "." and ".." (34 bytes each), then read the first real entry
+        let entry_start = 34 + 34; // dot + dotdot
+        let subdir_lba = u32::from_le_bytes(
+            root_dir[entry_start + 2..entry_start + 6].try_into().unwrap(),
+        );
+        assert!(
+            subdir_lba >= offset,
+            "session subdir LBA {subdir_lba} should be >= offset {offset}"
+        );
+
+        // Session subdir: file LBAs should be absolute
+        let subdir = &img[21 * SECTOR..22 * SECTOR];
+        let file_entry_start = 34 + 34; // skip "." and ".."
+        let file_lba = u32::from_le_bytes(
+            subdir[file_entry_start + 2..file_entry_start + 6].try_into().unwrap(),
+        );
+        assert!(
+            file_lba >= offset,
+            "file LBA {file_lba} should be >= offset {offset}"
+        );
+    }
+
+    #[test]
     fn both_endian_encoding() {
         let s = make_session(
             "20260425T143000_000000000Z",
             1_000_000,
             &[("ROOT.CRT", b"x")],
         );
-        let img = build_iso(&[s]);
+        let img = build_iso(&[s], 0);
         // Volume space size at PVD bytes 80–87: LE then BE
         let pvd = &img[16 * SECTOR..];
         let le = u32::from_le_bytes(pvd[80..84].try_into().unwrap());

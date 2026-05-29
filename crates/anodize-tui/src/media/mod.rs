@@ -258,7 +258,7 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
                 if read_sectors(&sg, read_lba, &mut image).is_err() {
                     continue;
                 }
-                match iso9660::parse_iso(&image) {
+                match iso9660::parse_iso(&image, read_lba) {
                     Ok(entries) => {
                         sessions.extend(entries);
                         parsed = true;
@@ -457,7 +457,7 @@ fn write_session_inner(
     step(progress, "Building ISO 9660 image…");
     let mut all_sessions = prior_sessions.to_vec();
     all_sessions.push(new_session);
-    let image = iso9660::build_iso(&all_sessions);
+    let image = iso9660::build_iso(&all_sessions, nwa);
     let total_sectors = image.len().div_ceil(iso9660::SECTOR);
     let image_kib = image.len() / 1024;
     tracing::info!(
