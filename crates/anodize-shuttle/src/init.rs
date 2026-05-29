@@ -52,10 +52,6 @@ pub struct InitArgs {
     #[arg(long)]
     yes: bool,
 
-    /// Volume label for the FAT32 filesystem.
-    #[arg(long, default_value = "SHUTTLE")]
-    volume_label: String,
-
     /// For softhsm2 mode: also initialize a SoftHSM2 token on the shuttle.
     /// Requires softhsm2-util and mtools (mmd, mcopy) on the host.
     #[arg(long)]
@@ -83,7 +79,7 @@ pub fn run(args: InitArgs) -> Result<()> {
         eprintln!("WARNING: This will ERASE ALL DATA on {device}.");
         eprintln!();
         eprintln!("  Mode         : {:?}", args.mode);
-        eprintln!("  Volume label : {}", args.volume_label);
+        eprintln!("  Volume label : {}", anodize_config::SHUTTLE_VOLUME_LABEL);
         eprintln!("  Common name  : {}", args.common_name);
         eprintln!("  Organization : {}", args.organization);
         eprintln!("  Country      : {}", args.country);
@@ -101,7 +97,7 @@ pub fn run(args: InitArgs) -> Result<()> {
     }
 
     // Step 1: Format the device
-    format_device(device, &args.volume_label)?;
+    format_device(device, anodize_config::SHUTTLE_VOLUME_LABEL)?;
 
     // Step 2: Mount the device and get the mount point
     let mount_point = mount_device(device)?;
@@ -137,7 +133,7 @@ pub fn run(args: InitArgs) -> Result<()> {
 
     eprintln!();
     eprintln!("Shuttle initialized on {device}.");
-    eprintln!("  Volume: {}", args.volume_label);
+    eprintln!("  Volume: {}", anodize_config::SHUTTLE_VOLUME_LABEL);
     eprintln!("  Mode:   {:?}", args.mode);
     eprintln!();
     eprintln!("Next steps:");

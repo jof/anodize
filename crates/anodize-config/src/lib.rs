@@ -3,6 +3,12 @@ pub mod state;
 
 use std::path::{Path, PathBuf};
 
+/// FAT32 volume label written to the shuttle USB during `anodize-shuttle init`.
+/// The ceremony ISO's udev rule matches on this label to create the
+/// `/dev/anodize-shuttle` symlink (see `iso.nix`).  Keep in sync with the
+/// `ID_FS_LABEL` match in `nix/iso.nix`.
+pub const SHUTTLE_VOLUME_LABEL: &str = "SHUTTLE";
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
