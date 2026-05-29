@@ -231,8 +231,19 @@ impl App {
                     op.advance_after_intent_burn(&mut shared);
                     self.active_op = Some(op);
                     // KeyBackup executes during advance and needs an immediate record burn.
+                    // But only if the operation succeeded — a failed backup should
+                    // show the error to the operator instead of burning a failure record.
                     if matches!(self.current_op(), Some(Operation::KeyBackup)) {
-                        self.do_start_burn();
+                        let op_ok = self
+                            .active_op
+                            .as_ref()
+                            .map_or(false, |op| op.op_succeeded());
+                        if op_ok {
+                            self.do_start_burn();
+                        } else {
+                            // Show the Error phase so the operator sees what went wrong.
+                            self.ceremony.state = CeremonyPhase::ActiveOp;
+                        }
                     } else {
                         self.ceremony.state = CeremonyPhase::ActiveOp;
                     }
@@ -2078,6 +2089,36 @@ mod tests {
             app.status.contains("FAILED"),
             "status should mention FAILED, got: {}",
             app.status
+        );
+    }
+
+    #[test]
+    fn failed_backup_skips_record_burn_shows_error() {
+        // When backup_key fails, tick_intent_burn should transition to ActiveOp
+        // (showing the Error phase) instead of calling do_start_burn.
+        let mut app = test_app();
+        let mut ctx = crate::ops::key_backup::BackupCtx::new(test_sss_meta());
+        ctx.phase = crate::ops::key_backup::BackupPhase::Error("export_wrapped: timeout".into());
+        app.active_op = Some(crate::ops::ActiveOperation::KeyBackup(ctx));
+        app.ceremony.state = CeremonyPhase::BurningDisc;
+
+        // Simulate intent burn completing successfully.
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::media::BurnProgress::Done(Ok(()))).unwrap();
+        app.disc.burn_rx = Some(rx);
+        app.disc.burn_started = Some(std::time::Instant::now());
+
+        app.tick_intent_burn();
+
+        // Should show the error in ActiveOp, not start a record burn.
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::ActiveOp,
+            "failed backup should show error in ActiveOp, not burn"
+        );
+        assert!(
+            app.disc.burn_rx.is_none(),
+            "should not have started a new burn"
         );
     }
 

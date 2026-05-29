@@ -111,54 +111,6 @@ Possible fixes:
   bootstrap, STATE.JSON only in record sessions).  The validator should
   understand the ceremony phase model.
 
-## Backup: failed operations should not burn a record session
-
-When the backup key transfer fails (`hsm.backup.key` with `success: false`),
-the TUI still writes a record session to disc containing only the failure
-audit entry.  This wastes a disc session and creates validation noise.
-
-Observed on disc: pairing (sessions 4-5) succeeded, but the subsequent
-backup attempt (sessions 6-7) failed with `wrap_key=""`, `public_keys_match=null`.
-The failure record was still burned.
-
-The backup flow should:
-- Offer the operator a retry before burning a failure record.
-- If the operator declines retry, skip the record burn entirely (the intent
-  session already documents the attempt).
-- At minimum, the validator should not count a recorded failure as a
-  continuity violation.
-
-## CRITICAL: DiscDone screen masks backup operation failures
-
-When `backup_key` fails (returns `Err`), the TUI correctly records `success: false`
-on disc.  However, `tick_record_burn` unconditionally transitions to `DiscDone`,
-which renders **"Key backup written to disc successfully."** — the operator sees
-this and believes the backup worked.
-
-The "Backup failed — recording result to disc…" status message (line 597 of
-`key_backup.rs`) is only visible during the few seconds of the disc burn, then
-overwritten by the DiscDone success message.
-
-Confirmed on disc: Track 33 contains `hsm.backup.key` with `success: false`,
-`public_keys_match: null`, but the operator saw "Key backup written to disc
-successfully" and "Ceremony complete."
-
-Fix: the `DiscDone` rendering (ceremony/mod.rs line 251+) must check the active
-op's `succeeded()` state.  For failed operations:
-- Title: "Key Backup FAILED" (not "Key Backup Written")
-- Body: "Backup operation failed — failure recorded to disc." with the error
-- Offer retry option before quitting
-
-## do_start_burn: silent failure when build_record_session returns None
-
-`do_start_burn` silently returns when `build_burn_session` yields `None`, leaving
-the ceremony stuck in `BurningDisc` state with no progress channel.  This is
-especially bad for `KeyBackup` where `do_start_burn` is called directly from
-`tick_intent_burn` (bypassing the `Action::DoStartBurn` dispatch).
-
-Fix: on `None`, transition to an error state and display the status message
-that `build_record_session` already set via `shared.set_status(...)`.
-
 ## SignCsr: display CSR public-key fingerprint before signing
 
 The Certificate Preview screen currently shows the SHA-256 fingerprint of the

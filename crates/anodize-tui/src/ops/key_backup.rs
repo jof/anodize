@@ -603,7 +603,8 @@ impl OpContext for BackupCtx {
         if self.succeeded() {
             shared.set_status("Backup succeeded. Writing record to disc\u{2026}");
         } else {
-            shared.set_status("Backup failed \u{2014} recording result to disc\u{2026}");
+            // Error phase will be displayed to the operator; no record burn.
+            shared.set_status("Backup failed. See error details above.");
         }
     }
 }
