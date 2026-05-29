@@ -71,6 +71,22 @@ impl ActiveOperation {
             _ => None,
         }
     }
+
+    /// Whether the operation itself succeeded (not the disc burn).
+    pub fn op_succeeded(&self) -> bool {
+        match self {
+            Self::KeyBackup(ctx) => ctx.succeeded(),
+            _ => true,
+        }
+    }
+
+    /// Human-readable error from the operation, if it failed.
+    pub fn op_error_message(&self) -> Option<&str> {
+        match self {
+            Self::KeyBackup(ctx) => ctx.error_message(),
+            _ => None,
+        }
+    }
 }
 
 // ── OpAction ────────────────────────────────────────────────────────────────
@@ -180,6 +196,19 @@ pub trait OpContext {
         None
     }
 
+    /// Whether the operation itself (not the disc burn) succeeded.
+    ///
+    /// Most operations either succeed or never reach `build_record_session`.
+    /// `KeyBackup` records failures to disc, so it overrides this.
+    fn succeeded(&self) -> bool {
+        true
+    }
+
+    /// Human-readable error from the operation, if it failed.
+    fn error_message(&self) -> Option<&str> {
+        None
+    }
+
     /// Returns `true` if this operation produces shuttle USB artifacts.
     fn has_shuttle_artifacts(&self) -> bool {
         false
@@ -281,6 +310,12 @@ impl OpContext for ActiveOperation {
         shared: &mut OpEnv<'_>,
     ) -> Option<crate::media::SessionEntry> {
         delegate_op!(self, build_record_session, dir_name, ts, staging, shared)
+    }
+    fn succeeded(&self) -> bool {
+        delegate_op!(self, succeeded)
+    }
+    fn error_message(&self) -> Option<&str> {
+        delegate_op!(self, error_message)
     }
     fn has_shuttle_artifacts(&self) -> bool {
         delegate_op!(self, has_shuttle_artifacts)

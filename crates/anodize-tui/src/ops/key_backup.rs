@@ -384,6 +384,13 @@ impl BackupCtx {
         // If we're not in Error phase after execute, it succeeded.
         !matches!(self.phase, BackupPhase::Error(_))
     }
+
+    pub fn error_message(&self) -> Option<&str> {
+        match &self.phase {
+            BackupPhase::Error(msg) => Some(msg.as_str()),
+            _ => None,
+        }
+    }
 }
 
 impl OpContext for BackupCtx {
@@ -554,6 +561,7 @@ impl OpContext for BackupCtx {
             "hsm.backup.key"
         };
         let pk_match = self.result.as_ref().map(|r| r.public_keys_match);
+        let error_detail: Option<&str> = self.error_message();
         if let Err(e) = log.append(
             event_name,
             serde_json::json!({
@@ -563,6 +571,7 @@ impl OpContext for BackupCtx {
                 "success": self.succeeded(),
                 "wrap_key": self.wrap_key_desc.as_deref().unwrap_or(""),
                 "public_keys_match": pk_match,
+                "error": error_detail,
             }),
         ) {
             shared.set_status(format!("Audit log append failed: {e}"));

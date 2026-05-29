@@ -296,7 +296,17 @@ impl App {
                     self.disc.prior_sessions.clear();
                     self.disc.session_state = None;
                 }
-                self.set_status(format!("{op_label} written to disc: {disc_label}"));
+                let op_failed = self
+                    .active_op
+                    .as_ref()
+                    .map_or(false, |op| !op.op_succeeded());
+                if op_failed {
+                    self.set_status(format!(
+                        "{op_label} FAILED \u{2014} failure recorded to disc: {disc_label}"
+                    ));
+                } else {
+                    self.set_status(format!("{op_label} written to disc: {disc_label}"));
+                }
             }
             Err(e) => {
                 self.set_status(format!("Burn failed: {e} — reinsert disc and retry."));
@@ -708,7 +718,13 @@ impl App {
 
         let new_session = match self.build_burn_session(&staging) {
             Some(s) => s,
-            None => return,
+            None => {
+                // build_burn_session already set the status message via shared.set_status().
+                // Transition to OperationSelect so the TUI is not stuck in BurningDisc
+                // with no progress channel.
+                self.ceremony.state = CeremonyPhase::OperationSelect;
+                return;
+            }
         };
 
         let (tx, rx) = mpsc::channel();
@@ -1972,6 +1988,95 @@ mod tests {
         assert!(
             app.status.contains("No optical drive"),
             "status should mention no drive, got: {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn do_start_burn_none_session_recovers_to_op_select() {
+        // When build_burn_session returns None (e.g. audit log failure),
+        // do_start_burn should transition to OperationSelect instead of
+        // leaving the TUI stuck in BurningDisc.
+        let mut app = test_app();
+        app.ceremony.state = CeremonyPhase::BurningDisc;
+        // No active_op → build_burn_session returns None immediately.
+        app.active_op = None;
+        app.do_start_burn();
+        assert_eq!(
+            app.ceremony.state,
+            CeremonyPhase::OperationSelect,
+            "should recover to OperationSelect when session build fails"
+        );
+    }
+
+    fn test_sss_meta() -> anodize_config::state::SssMetadata {
+        anodize_config::state::SssMetadata {
+            generation: 1,
+            threshold: 2,
+            total: 2,
+            custodians: vec![],
+            pin_verify_hash: String::new(),
+            share_commitments: vec![],
+        }
+    }
+
+    #[test]
+    fn disc_done_shows_failure_for_failed_backup() {
+        let mut app = test_app();
+        let mut ctx = crate::ops::key_backup::BackupCtx::new(test_sss_meta());
+        ctx.phase = crate::ops::key_backup::BackupPhase::Error("Backup failed: USB timeout".into());
+        app.active_op = Some(crate::ops::ActiveOperation::KeyBackup(ctx));
+        app.ceremony.state = CeremonyPhase::DiscDone;
+
+        assert!(
+            !app.active_op.as_ref().unwrap().op_succeeded(),
+            "op_succeeded should be false for Error phase"
+        );
+        assert_eq!(
+            app.active_op.as_ref().unwrap().op_error_message(),
+            Some("Backup failed: USB timeout"),
+            "op_error_message should return the error string"
+        );
+    }
+
+    #[test]
+    fn disc_done_shows_success_for_successful_backup() {
+        let mut app = test_app();
+        let mut ctx = crate::ops::key_backup::BackupCtx::new(test_sss_meta());
+        ctx.phase = crate::ops::key_backup::BackupPhase::Confirm;
+        app.active_op = Some(crate::ops::ActiveOperation::KeyBackup(ctx));
+        app.ceremony.state = CeremonyPhase::DiscDone;
+
+        assert!(
+            app.active_op.as_ref().unwrap().op_succeeded(),
+            "op_succeeded should be true for non-Error phase"
+        );
+        assert_eq!(
+            app.active_op.as_ref().unwrap().op_error_message(),
+            None,
+            "op_error_message should be None for non-Error phase"
+        );
+    }
+
+    #[test]
+    fn tick_record_burn_status_reflects_op_failure() {
+        let mut app = test_app();
+        let mut ctx = crate::ops::key_backup::BackupCtx::new(test_sss_meta());
+        ctx.phase = crate::ops::key_backup::BackupPhase::Error("export_wrapped: timeout".into());
+        app.active_op = Some(crate::ops::ActiveOperation::KeyBackup(ctx));
+        app.ceremony.state = CeremonyPhase::BurningDisc;
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        tx.send(crate::media::BurnProgress::Done(Ok(()))).unwrap();
+        app.disc.burn_rx = Some(rx);
+        app.disc.burn_started = Some(std::time::Instant::now());
+
+        app.tick_record_burn();
+
+        assert_eq!(app.ceremony.state, CeremonyPhase::DiscDone);
+        assert!(
+            app.status.contains("FAILED"),
+            "status should mention FAILED, got: {}",
             app.status
         );
     }
