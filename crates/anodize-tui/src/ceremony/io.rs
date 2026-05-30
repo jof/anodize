@@ -119,6 +119,19 @@ pub struct Artifact {
 pub struct RecordSession {
     pub audit_event: (String, serde_json::Value),
     pub artifacts: Vec<Artifact>,
+    /// Optional STATE.JSON update to fold into this record session. The archive
+    /// applies it to the base session state plus the post-append audit hash.
+    pub state: Option<StateDelta>,
+}
+
+/// A semantic update to STATE.JSON the script requests. The archive applies it
+/// to the base `SessionState` it holds, filling in the new audit-chain head
+/// (`last_audit_hash`) computed from the just-appended record event.
+#[derive(Debug, Clone, Default)]
+pub struct StateDelta {
+    pub crl_number: Option<u64>,
+    pub revocation_list: Vec<RevocationEntry>,
+    pub hsm_log_seq: Option<u64>,
 }
 
 // ── typestate tokens ──────────────────────────────────────────────────────
@@ -199,6 +212,13 @@ pub trait Vault {
 /// including when the script unwinds through an early `?`.
 pub trait Session {
     fn issue_crl(&mut self, plan: &CrlPlan, when: Timestamp) -> Result<SignedCrl, Abort>;
+
+    /// Return the HSM's latest internal audit-log sequence number and drain the
+    /// log up to it, so STATE.JSON can record the reconciliation point. Returns
+    /// `None` for backends without an internal audit log (e.g. SoftHSM).
+    fn record_audit_seq(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// The append-only archive: write-once optical disc plus the shuttle USB.

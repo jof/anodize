@@ -25,6 +25,7 @@ use super::io::{
 use super::prompt::Prompt;
 use crate::media::{self, BurnProgress, IsoFile, SessionEntry};
 use anodize_audit::{genesis_hash, AuditLog};
+use anodize_config::state::{SessionState, STATE_FILENAME};
 use anodize_hsm::{create_backend, create_inventory, open_session_any_recognized, HsmActor};
 
 /// Real HSM-backed [`Vault`]. Holds just enough config to log in; the
@@ -135,6 +136,24 @@ impl Session for HsmSession {
 
         Ok(SignedCrl::new(crl_der))
     }
+
+    fn record_audit_seq(&mut self) -> Option<u64> {
+        use anodize_hsm::Hsm as _;
+        match self.actor.get_audit_log() {
+            Ok(snapshot) => {
+                let last = snapshot.entries.last()?;
+                let seq = last.item as u64;
+                if let Err(e) = self.actor.drain_audit_log(last.item) {
+                    tracing::warn!(seq = last.item, "drain_audit_log failed: {e}");
+                }
+                Some(seq)
+            }
+            Err(e) => {
+                tracing::warn!("could not read HSM audit log: {e}");
+                None
+            }
+        }
+    }
 }
 
 // ── DiscArchive ──────────────────────────────────────────────────────────────
@@ -151,6 +170,8 @@ pub struct DiscArchive<'a> {
     profile_bytes: Vec<u8>,
     timestamp: SystemTime,
     sessions_remaining: Option<u16>,
+    /// Base STATE.JSON to update when a record session carries a `StateDelta`.
+    base_state: Option<SessionState>,
 }
 
 impl<'a> DiscArchive<'a> {
@@ -164,6 +185,7 @@ impl<'a> DiscArchive<'a> {
         profile_bytes: Vec<u8>,
         timestamp: SystemTime,
         sessions_remaining: Option<u16>,
+        base_state: Option<SessionState>,
     ) -> Self {
         Self {
             bridge,
@@ -174,6 +196,7 @@ impl<'a> DiscArchive<'a> {
             profile_bytes,
             timestamp,
             sessions_remaining,
+            base_state,
         }
     }
 
@@ -244,10 +267,13 @@ fn assemble_intent_session(
 }
 
 /// Assemble the record session: append the record event to the existing audit
-/// log (verifying the chain on open), then bundle the full log plus artifacts.
+/// log (verifying the chain on open), then bundle the full log, artifacts, and
+/// (if a `StateDelta` is present) the updated STATE.JSON anchored to the new
+/// audit-chain head.
 fn assemble_record_session(
     staging: &std::path::Path,
     timestamp: SystemTime,
+    base_state: Option<&SessionState>,
     record: &RecordSession,
 ) -> Result<SessionEntry, Abort> {
     let log_path = staging.join("audit.log");
@@ -262,7 +288,7 @@ fn assemble_record_session(
 
     let mut files = vec![IsoFile {
         name: "AUDIT.LOG".into(),
-        data: log_bytes,
+        data: log_bytes.clone(),
     }];
     for artifact in &record.artifacts {
         files.push(IsoFile {
@@ -270,11 +296,46 @@ fn assemble_record_session(
             data: artifact.bytes.clone(),
         });
     }
+
+    // Fold the requested STATE.JSON update onto the base state, anchoring it to
+    // the just-written audit-chain head.
+    if let (Some(delta), Some(base)) = (record.state.as_ref(), base_state) {
+        let mut state = base.clone();
+        state.last_audit_hash = last_entry_hash(&log_bytes);
+        if let Some(n) = delta.crl_number {
+            state.crl_number = n;
+        }
+        if !delta.revocation_list.is_empty() {
+            state.revocation_list = delta.revocation_list.clone();
+        }
+        if let Some(seq) = delta.hsm_log_seq {
+            state.last_hsm_log_seq = Some(seq);
+        }
+        files.push(IsoFile {
+            name: STATE_FILENAME.into(),
+            data: state.to_json(),
+        });
+    }
+
     Ok(SessionEntry {
         dir_name: media::session_dir_name(timestamp) + "-record",
         timestamp,
         files,
     })
+}
+
+/// Extract the `entry_hash` of the last non-empty line of an audit log.
+fn last_entry_hash(log_bytes: &[u8]) -> String {
+    log_bytes
+        .split(|&b| b == b'\n')
+        .rev()
+        .find(|line| !line.is_empty())
+        .and_then(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+        .and_then(|v| {
+            v.get("entry_hash")
+                .and_then(|h| h.as_str().map(String::from))
+        })
+        .unwrap_or_default()
 }
 
 impl Archive for DiscArchive<'_> {
@@ -295,7 +356,12 @@ impl Archive for DiscArchive<'_> {
         _intent: IntentCommitted,
         record: RecordSession,
     ) -> Result<RecordCommitted, Abort> {
-        let session = assemble_record_session(&self.staging, self.timestamp, &record)?;
+        let session = assemble_record_session(
+            &self.staging,
+            self.timestamp,
+            self.base_state.as_ref(),
+            &record,
+        )?;
         let dir = self.burn(session)?;
         Ok(RecordCommitted::new(dir))
     }
@@ -322,7 +388,7 @@ impl Archive for DiscArchive<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ceremony::io::Artifact;
+    use crate::ceremony::io::{Artifact, StateDelta};
 
     fn tmpdir(tag: &str) -> PathBuf {
         let nanos = SystemTime::now()
@@ -357,12 +423,14 @@ mod tests {
         let record = assemble_record_session(
             &staging,
             ts,
+            None,
             &RecordSession {
                 audit_event: ("crl.issue".into(), serde_json::json!({ "crl_number": 7 })),
                 artifacts: vec![Artifact {
                     name: "ROOT.CRL".into(),
                     bytes: vec![0xDE, 0xAD],
                 }],
+                state: None,
             },
         )
         .expect("assemble record");
@@ -385,12 +453,92 @@ mod tests {
         let err = assemble_record_session(
             &staging,
             SystemTime::now(),
+            None,
             &RecordSession {
                 audit_event: ("crl.issue".into(), serde_json::json!({})),
                 artifacts: vec![],
+                state: None,
             },
         );
         assert!(err.is_err());
+        std::fs::remove_dir_all(&staging).ok();
+    }
+
+    fn sample_state() -> SessionState {
+        SessionState {
+            version: 1,
+            root_cert_sha256: "ab".repeat(32),
+            root_cert_der_b64: String::new(),
+            sss: anodize_config::state::SssMetadata {
+                generation: 1,
+                threshold: 2,
+                total: 2,
+                custodians: vec![
+                    anodize_config::state::Custodian {
+                        name: "Alice".into(),
+                        index: 1,
+                    },
+                    anodize_config::state::Custodian {
+                        name: "Bob".into(),
+                        index: 2,
+                    },
+                ],
+                pin_verify_hash: "ab".repeat(32),
+                share_commitments: vec!["c1".into(), "c2".into()],
+            },
+            revocation_list: vec![],
+            crl_number: 1,
+            last_audit_hash: "old-hash".into(),
+            last_hsm_log_seq: None,
+            fleet: anodize_config::state::HsmFleet::default(),
+        }
+    }
+
+    #[test]
+    fn record_with_state_delta_writes_updated_state_json() {
+        let staging = tmpdir("state");
+        let ts = SystemTime::now();
+        assemble_intent_session(
+            &staging,
+            b"profile",
+            ts,
+            &IntentEvent {
+                name: "crl.intent".into(),
+                data: serde_json::json!({}),
+            },
+        )
+        .expect("intent");
+
+        let base = sample_state();
+        let record = assemble_record_session(
+            &staging,
+            ts,
+            Some(&base),
+            &RecordSession {
+                audit_event: ("crl.issue".into(), serde_json::json!({ "crl_number": 5 })),
+                artifacts: vec![],
+                state: Some(StateDelta {
+                    crl_number: Some(5),
+                    revocation_list: vec![],
+                    hsm_log_seq: Some(42),
+                }),
+            },
+        )
+        .expect("record");
+
+        let state_file = record
+            .files
+            .iter()
+            .find(|f| f.name == STATE_FILENAME)
+            .expect("STATE.JSON present");
+        let parsed = SessionState::from_json(&state_file.data).expect("valid STATE.JSON");
+        assert_eq!(parsed.crl_number, 5);
+        assert_eq!(parsed.last_hsm_log_seq, Some(42));
+        assert_ne!(
+            parsed.last_audit_hash, "old-hash",
+            "audit head must advance"
+        );
+
         std::fs::remove_dir_all(&staging).ok();
     }
 }

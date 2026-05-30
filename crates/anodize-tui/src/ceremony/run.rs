@@ -11,6 +11,7 @@ use ratatui::{layout::Rect, Frame};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
+use anodize_config::state::SessionState;
 use anodize_config::HsmBackendKind;
 
 use crate::components::share_input::ShareInput;
@@ -40,6 +41,7 @@ pub struct ArchiveConfig {
     pub profile_bytes: Vec<u8>,
     pub timestamp: SystemTime,
     pub sessions_remaining: Option<u16>,
+    pub base_state: Option<SessionState>,
 }
 
 /// A live ceremony, driven by the App's event loop.
@@ -74,6 +76,7 @@ impl CeremonyRun {
                 archive.profile_bytes,
                 archive.timestamp,
                 archive.sessions_remaining,
+                archive.base_state,
             );
             match issue_crl(&mut op, &mut hsm, &mut arc, &env) {
                 Ok(outcome) => Prompt::Done(outcome),

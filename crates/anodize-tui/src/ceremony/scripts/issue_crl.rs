@@ -66,9 +66,11 @@ pub fn issue_crl(
 
     // The signing key is unlocked only for the duration of this block; the
     // session logs out + zeroizes when `sess` drops, including on early return.
-    let crl = {
+    let (crl, hsm_log_seq) = {
         let mut sess = vault.login(pin)?;
-        sess.issue_crl(plan, when)?
+        let crl = sess.issue_crl(plan, when)?;
+        let seq = sess.record_audit_seq();
+        (crl, seq)
     };
 
     op.note("CRL signed. Writing record session to disc\u{2026}");
@@ -87,6 +89,11 @@ pub fn issue_crl(
                 name: "ROOT.CRL".into(),
                 bytes: crl.der().to_vec(),
             }],
+            state: Some(StateDelta {
+                crl_number: Some(plan.crl_number),
+                revocation_list: plan.revocation_list.clone(),
+                hsm_log_seq,
+            }),
         },
     )?;
 
