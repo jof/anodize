@@ -19,8 +19,8 @@ use secrecy::SecretString;
 
 use super::harness::Bridge;
 use super::io::{
-    Abort, Archive, CrlPlan, IntentCommitted, IntentEvent, Pin, RecordCommitted, RecordSession,
-    Session, SignedCrl, Timestamp, Vault,
+    Abort, Archive, CrlPlan, IntentCommitted, IntentEvent, IntermediateReq, Pin, RecordCommitted,
+    RecordSession, Session, SignedCert, SignedCrl, Timestamp, Vault,
 };
 use super::prompt::Prompt;
 use crate::media::{self, BurnProgress, IsoFile, SessionEntry};
@@ -135,6 +135,56 @@ impl Session for HsmSession {
             .map_err(|e| Abort::new(mechanism_error_msg("CRL signing failed", &e)))?;
 
         Ok(SignedCrl::new(crl_der))
+    }
+
+    fn sign_intermediate(
+        &mut self,
+        req: &IntermediateReq,
+        _when: Timestamp,
+    ) -> Result<SignedCert, Abort> {
+        use crate::helpers::mechanism_error_msg;
+        use anodize_ca::{sign_intermediate_csr, CaError, P384HsmSigner};
+        use anodize_hsm::Hsm as _;
+        use der::{Decode, Encode};
+        use x509_cert::certificate::Certificate;
+
+        let root_key = self
+            .actor
+            .find_key(&self.key_label)
+            .map_err(|e| Abort::new(format!("Root key not found: {e}")))?;
+        let signer = P384HsmSigner::new(self.actor.clone(), root_key)
+            .map_err(|e| Abort::new(format!("Signer error: {e}")))?;
+        let root_cert = Certificate::from_der(&req.root_cert_der)
+            .map_err(|e| Abort::new(format!("Root cert DER decode: {e}")))?;
+
+        let cert = sign_intermediate_csr(
+            &signer,
+            &root_cert,
+            &req.csr_der,
+            req.path_len,
+            req.validity_days,
+            req.cdp_url.as_deref(),
+            &req.existing_serials,
+        )
+        .map_err(|e| {
+            Abort::new(match e {
+                CaError::CsrSignatureInvalid => {
+                    "CSR signature verification failed \u{2014} CSR may be corrupt".to_string()
+                }
+                CaError::CsrAlgorithmUnsupported(alg) => format!(
+                    "CSR uses unsupported signature algorithm ({alg}). \
+                     Accepted: ECDSA P-256/SHA-256 or P-384/SHA-384."
+                ),
+                CaError::CsrExtensionRejected(oid) => {
+                    format!("CSR contains rejected extension OID: {oid}")
+                }
+                other => mechanism_error_msg("CSR signing failed", &other),
+            })
+        })?;
+        let der = cert
+            .to_der()
+            .map_err(|e| Abort::new(format!("DER encode failed: {e}")))?;
+        Ok(SignedCert::new(der))
     }
 
     fn record_audit_seq(&mut self) -> Option<u64> {

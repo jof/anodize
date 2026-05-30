@@ -82,6 +82,27 @@ pub struct RevokePlan {
     pub root_cert_der: Vec<u8>,
 }
 
+/// One selectable certificate profile, pre-rendered by the App (the script
+/// stays free of `Profile`/preview-building concerns).
+#[derive(Debug, Clone)]
+pub struct CsrProfileChoice {
+    pub name: String,
+    pub label: String,
+    pub validity_days: u32,
+    pub path_len: Option<u8>,
+    pub preview: Vec<String>,
+}
+
+/// Sign an intermediate CSR (loaded from the shuttle) under a chosen profile.
+#[derive(Debug, Clone)]
+pub struct SignCsrPlan {
+    pub csr_der: Vec<u8>,
+    pub root_cert_der: Vec<u8>,
+    pub cdp_url: Option<String>,
+    pub profiles: Vec<CsrProfileChoice>,
+    pub existing_serials: Vec<x509_cert::serial_number::SerialNumber>,
+}
+
 /// Read-only environment handed to a script, generic over the operation's plan.
 /// Built from disc/profile state before the ceremony thread is spawned.
 #[derive(Debug, Clone)]
@@ -105,6 +126,32 @@ impl SignedCrl {
     pub fn der(&self) -> &[u8] {
         &self.der
     }
+}
+
+/// A signed intermediate certificate produced by the HSM.
+#[derive(Debug, Clone)]
+pub struct SignedCert {
+    der: Vec<u8>,
+}
+
+impl SignedCert {
+    pub fn new(der: Vec<u8>) -> Self {
+        Self { der }
+    }
+    pub fn der(&self) -> &[u8] {
+        &self.der
+    }
+}
+
+/// Inputs the HSM needs to sign an intermediate certificate from a CSR.
+#[derive(Debug, Clone)]
+pub struct IntermediateReq {
+    pub csr_der: Vec<u8>,
+    pub root_cert_der: Vec<u8>,
+    pub path_len: Option<u8>,
+    pub validity_days: u32,
+    pub cdp_url: Option<String>,
+    pub existing_serials: Vec<x509_cert::serial_number::SerialNumber>,
 }
 
 /// The intent WAL event the script declares before any irreversible step.
@@ -225,7 +272,22 @@ pub trait Vault {
 /// An authenticated HSM session. Implementations log out and zeroize on drop —
 /// including when the script unwinds through an early `?`.
 pub trait Session {
-    fn issue_crl(&mut self, plan: &CrlPlan, when: Timestamp) -> Result<SignedCrl, Abort>;
+    /// Sign a CRL over the given plan. Defaulted so a session used only for
+    /// signing certs need not implement it.
+    fn issue_crl(&mut self, _plan: &CrlPlan, _when: Timestamp) -> Result<SignedCrl, Abort> {
+        Err(Abort::new("issue_crl not supported by this session"))
+    }
+
+    /// Sign an intermediate certificate from a CSR.
+    fn sign_intermediate(
+        &mut self,
+        _req: &IntermediateReq,
+        _when: Timestamp,
+    ) -> Result<SignedCert, Abort> {
+        Err(Abort::new(
+            "sign_intermediate not supported by this session",
+        ))
+    }
 
     /// Return the HSM's latest internal audit-log sequence number and drain the
     /// log up to it, so STATE.JSON can record the reconciliation point. Returns

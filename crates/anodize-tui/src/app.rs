@@ -226,6 +226,113 @@ impl App {
         self.set_status("RevokeCert ceremony started (script engine).");
     }
 
+    /// Start the SignCsr ceremony on the new script engine. Reads + validates
+    /// csr.der from the shuttle and pre-renders each profile's preview.
+    pub fn start_sign_csr(&mut self) {
+        use crate::ceremony::io::{CsrProfileChoice, Env, SignCsrPlan};
+        use crate::ceremony::run::{CeremonyRun, VaultConfig};
+        use crate::helpers::{
+            build_cert_preview, collect_serial_numbers_from_sessions,
+            load_root_cert_der_from_sessions,
+        };
+        use der::Decode as _;
+
+        let Some(profile) = self.profile.as_ref() else {
+            self.set_status("No profile loaded.");
+            return;
+        };
+        let Some(state) = self.disc.session_state.as_ref() else {
+            self.set_status("No STATE.JSON on disc \u{2014} run InitRoot first.");
+            return;
+        };
+        if profile.cert_profiles.is_empty() {
+            self.set_status("No [[cert_profiles]] defined in profile.toml.");
+            return;
+        }
+        let Some(root_cert_der) = load_root_cert_der_from_sessions(&self.disc.prior_sessions)
+        else {
+            self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
+            return;
+        };
+
+        let csr_path = self.shuttle_mount.join("csr.der");
+        let csr_der = match std::fs::read(&csr_path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.set_status(format!(
+                    "Cannot read csr.der from shuttle: {e} \u{2014} ensure csr.der is on the USB."
+                ));
+                return;
+            }
+        };
+        if let Err(e) = x509_cert::request::CertReq::from_der(&csr_der) {
+            self.set_status(format!("csr.der is not a valid DER-encoded CSR: {e}"));
+            return;
+        }
+
+        let cdp_url = profile.ca.cdp_url.clone();
+        let existing_serials = collect_serial_numbers_from_sessions(&self.disc.prior_sessions);
+        let profiles: Vec<CsrProfileChoice> = profile
+            .cert_profiles
+            .iter()
+            .enumerate()
+            .map(|(i, prof)| {
+                let path_str = prof
+                    .path_len
+                    .map(|n| format!("  path_len={n}"))
+                    .unwrap_or_default();
+                CsrProfileChoice {
+                    name: prof.name.clone(),
+                    label: format!(
+                        "[{}] {}  (validity={} days{})",
+                        i + 1,
+                        prof.name,
+                        prof.validity_days,
+                        path_str
+                    ),
+                    validity_days: prof.validity_days,
+                    path_len: prof.path_len,
+                    preview: build_cert_preview(
+                        &csr_der,
+                        prof,
+                        &profile.ca.common_name,
+                        &profile.ca.organization,
+                        &profile.ca.country,
+                        cdp_url.as_deref(),
+                        Some(root_cert_der.as_slice()),
+                    ),
+                }
+            })
+            .collect();
+
+        let env = Env {
+            sss: state.sss.clone(),
+            plan: SignCsrPlan {
+                csr_der,
+                root_cert_der,
+                cdp_url,
+                profiles,
+                existing_serials,
+            },
+        };
+        let vault = VaultConfig {
+            backend: profile.hsm.backend,
+            token_label: profile.hsm.token_label.clone(),
+            key_label: profile.hsm.key_label.clone(),
+            fleet_ids: state
+                .fleet
+                .active_device_ids()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        };
+        let archive = self.archive_config();
+
+        self.ceremony_run = Some(CeremonyRun::spawn_sign_csr(env, vault, archive));
+        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.set_status("SignCsr ceremony started (script engine).");
+    }
+
     /// Build the disc/shuttle archive configuration from live disc state.
     fn archive_config(&self) -> crate::ceremony::run::ArchiveConfig {
         crate::ceremony::run::ArchiveConfig {
@@ -772,6 +879,7 @@ impl App {
             Action::SelectOperation(op) => match op {
                 Operation::IssueCrl => self.start_issue_crl(),
                 Operation::RevokeCert => self.start_revoke_cert(),
+                Operation::SignCsr => self.start_sign_csr(),
                 _ => self.do_select_operation(op),
             },
             // Clock re-confirm: operator attests clock is correct at signing time

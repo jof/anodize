@@ -5,3 +5,4 @@
 
 pub mod issue_crl;
 pub mod revoke_cert;
+pub mod sign_csr;

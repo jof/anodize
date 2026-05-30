@@ -19,10 +19,11 @@ use crate::media::SessionEntry;
 
 use super::adapters::{DiscArchive, HsmVault};
 use super::harness::{CeremonyHandle, ChannelOperator};
-use super::io::{CrlPlan, Env, RevokePlan};
+use super::io::{CrlPlan, Env, RevokePlan, SignCsrPlan};
 use super::prompt::Prompt;
 use super::scripts::issue_crl::issue_crl;
 use super::scripts::revoke_cert::revoke_cert;
+use super::scripts::sign_csr::sign_csr;
 use super::ui;
 
 /// HSM login configuration, captured from profile + fleet state before spawn.
@@ -117,6 +118,42 @@ impl CeremonyRun {
                 archive.base_state,
             );
             match revoke_cert(&mut op, &mut hsm, &mut arc, &env) {
+                Ok(outcome) => Prompt::Done(outcome),
+                Err(abort) => Prompt::Aborted(abort.0),
+            }
+        });
+
+        Self::from_handle(handle, share_input)
+    }
+
+    /// Spawn the SignCsr ceremony.
+    pub fn spawn_sign_csr(
+        env: Env<SignCsrPlan>,
+        vault: VaultConfig,
+        archive: ArchiveConfig,
+    ) -> Self {
+        let share_input = Some(ShareInput::new(env.sss.clone(), 32));
+
+        let handle = CeremonyHandle::spawn(move |bridge| {
+            let mut op = ChannelOperator::new(&bridge);
+            let mut hsm = HsmVault::new(
+                vault.backend,
+                vault.token_label,
+                vault.key_label,
+                vault.fleet_ids,
+            );
+            let mut arc = DiscArchive::new(
+                &bridge,
+                archive.dev,
+                archive.prior_sessions,
+                archive.shuttle_mount,
+                archive.staging,
+                archive.profile_bytes,
+                archive.timestamp,
+                archive.sessions_remaining,
+                archive.base_state,
+            );
+            match sign_csr(&mut op, &mut hsm, &mut arc, &env) {
                 Ok(outcome) => Prompt::Done(outcome),
                 Err(abort) => Prompt::Aborted(abort.0),
             }
