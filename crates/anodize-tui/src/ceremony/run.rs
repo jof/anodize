@@ -19,9 +19,10 @@ use crate::media::SessionEntry;
 
 use super::adapters::{DiscArchive, HsmVault};
 use super::harness::{CeremonyHandle, ChannelOperator};
-use super::io::Env;
+use super::io::{CrlPlan, Env, RevokePlan};
 use super::prompt::Prompt;
 use super::scripts::issue_crl::issue_crl;
+use super::scripts::revoke_cert::revoke_cert;
 use super::ui;
 
 /// HSM login configuration, captured from profile + fleet state before spawn.
@@ -49,6 +50,7 @@ pub struct CeremonyRun {
     handle: CeremonyHandle,
     prompt: Prompt,
     share_input: Option<ShareInput>,
+    text_buf: String,
     spinner: usize,
     finished: bool,
 }
@@ -56,7 +58,7 @@ pub struct CeremonyRun {
 impl CeremonyRun {
     /// Spawn the IssueCrl ceremony. All configuration is moved into the worker
     /// thread, which builds the real adapters from it and runs the script.
-    pub fn spawn_issue_crl(env: Env, vault: VaultConfig, archive: ArchiveConfig) -> Self {
+    pub fn spawn_issue_crl(env: Env<CrlPlan>, vault: VaultConfig, archive: ArchiveConfig) -> Self {
         let share_input = Some(ShareInput::new(env.sss.clone(), 32));
 
         let handle = CeremonyHandle::spawn(move |bridge| {
@@ -84,7 +86,48 @@ impl CeremonyRun {
             }
         });
 
-        // Block briefly for the first prompt (the script emits it immediately).
+        Self::from_handle(handle, share_input)
+    }
+
+    /// Spawn the RevokeCert ceremony.
+    pub fn spawn_revoke_cert(
+        env: Env<RevokePlan>,
+        vault: VaultConfig,
+        archive: ArchiveConfig,
+    ) -> Self {
+        let share_input = Some(ShareInput::new(env.sss.clone(), 32));
+
+        let handle = CeremonyHandle::spawn(move |bridge| {
+            let mut op = ChannelOperator::new(&bridge);
+            let mut hsm = HsmVault::new(
+                vault.backend,
+                vault.token_label,
+                vault.key_label,
+                vault.fleet_ids,
+            );
+            let mut arc = DiscArchive::new(
+                &bridge,
+                archive.dev,
+                archive.prior_sessions,
+                archive.shuttle_mount,
+                archive.staging,
+                archive.profile_bytes,
+                archive.timestamp,
+                archive.sessions_remaining,
+                archive.base_state,
+            );
+            match revoke_cert(&mut op, &mut hsm, &mut arc, &env) {
+                Ok(outcome) => Prompt::Done(outcome),
+                Err(abort) => Prompt::Aborted(abort.0),
+            }
+        });
+
+        Self::from_handle(handle, share_input)
+    }
+
+    /// Block briefly for the first prompt (the script emits it immediately) and
+    /// assemble the run state.
+    fn from_handle(handle: CeremonyHandle, share_input: Option<ShareInput>) -> Self {
         let prompt = handle
             .recv()
             .unwrap_or_else(|| Prompt::Aborted("ceremony failed to start".into()));
@@ -94,6 +137,7 @@ impl CeremonyRun {
             handle,
             prompt,
             share_input,
+            text_buf: String::new(),
             spinner: 0,
             finished,
         }
@@ -108,7 +152,10 @@ impl CeremonyRun {
     /// so the App suppresses global single-key shortcuts (e.g. the `l` log
     /// toggle) while the operator types.
     pub fn wants_text_input(&self) -> bool {
-        matches!(self.prompt, Prompt::CollectShares { .. })
+        matches!(
+            self.prompt,
+            Prompt::CollectShares { .. } | Prompt::TextInput { .. }
+        )
     }
 
     /// Advance the spinner and drain any prompts the worker has produced.
@@ -119,6 +166,7 @@ impl CeremonyRun {
                 self.finished = true;
             }
             self.prompt = p;
+            self.text_buf.clear();
         }
     }
 
@@ -128,7 +176,9 @@ impl CeremonyRun {
         if self.finished {
             return false;
         }
-        if let Some(response) = ui::key_to_response(&self.prompt, key, &mut self.share_input) {
+        if let Some(response) =
+            ui::key_to_response(&self.prompt, key, &mut self.share_input, &mut self.text_buf)
+        {
             self.handle.answer(response);
             true
         } else {
@@ -143,6 +193,7 @@ impl CeremonyRun {
             area,
             &self.prompt,
             self.share_input.as_ref(),
+            &self.text_buf,
             self.spinner,
         );
     }

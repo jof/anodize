@@ -26,6 +26,8 @@ pub enum Prompt {
     Confirm { title: String, body: Vec<String> },
     /// Collect threshold SSS shares; expects [`Response::Shares`].
     CollectShares { sss: SssMetadata },
+    /// Collect a line of free text; expects [`Response::Text`].
+    TextInput { title: String, label: String },
     /// Re-confirm the system clock; expects [`Response::Ack`] or `Abort`.
     ReconfirmClock { rfc3339: String },
     /// A long-running disc burn is in progress. No input expected; the renderer
@@ -48,6 +50,8 @@ pub enum Response {
     Confirm,
     /// Supplied reconstructed shares.
     Shares(Vec<anodize_sss::Share>),
+    /// Supplied a line of free text.
+    Text(String),
     /// Acknowledged (clock correct, etc.).
     Ack,
     /// Aborted / quit.

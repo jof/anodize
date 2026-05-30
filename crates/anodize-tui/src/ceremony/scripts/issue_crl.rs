@@ -46,9 +46,9 @@ pub fn issue_crl(
     op: &mut dyn Operator,
     vault: &mut dyn Vault,
     arc: &mut dyn Archive,
-    env: &Env,
+    env: &Env<CrlPlan>,
 ) -> Result<Outcome, Abort> {
-    let plan = &env.crl_plan;
+    let plan = &env.plan;
 
     op.confirm("Sign and write CRL", &crl_preview(plan))?;
 
@@ -78,13 +78,13 @@ pub fn issue_crl(
     let record = arc.commit_record(
         intent,
         RecordSession {
-            audit_event: (
+            audit_events: vec![(
                 "crl.issue".into(),
                 serde_json::json!({
                     "crl_number": plan.crl_number,
                     "revocation_count": plan.revocation_list.len(),
                 }),
-            ),
+            )],
             artifacts: vec![Artifact {
                 name: "ROOT.CRL".into(),
                 bytes: crl.der().to_vec(),
@@ -169,6 +169,9 @@ mod tests {
             self.log.borrow_mut().push(Effect::ReconfirmClock);
             Ok(std::time::SystemTime::UNIX_EPOCH)
         }
+        fn prompt_text(&mut self, _: &str, _: &str) -> Result<String, Abort> {
+            Ok(String::new())
+        }
         fn note(&mut self, _: &str) {}
     }
 
@@ -228,7 +231,7 @@ mod tests {
         }
     }
 
-    fn test_env() -> Env {
+    fn test_env() -> Env<CrlPlan> {
         Env {
             sss: SssMetadata {
                 generation: 1,
@@ -247,7 +250,7 @@ mod tests {
                 pin_verify_hash: "deadbeef".into(),
                 share_commitments: vec![],
             },
-            crl_plan: CrlPlan {
+            plan: CrlPlan {
                 crl_number: 7,
                 revocation_list: vec![],
                 root_cert_der: vec![0x30, 0x00],

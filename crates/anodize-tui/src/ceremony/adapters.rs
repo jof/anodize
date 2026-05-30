@@ -279,9 +279,10 @@ fn assemble_record_session(
     let log_path = staging.join("audit.log");
     let mut log = AuditLog::open(&log_path)
         .map_err(|e| Abort::new(format!("Audit log open/verify failed: {e}")))?;
-    let (name, data) = &record.audit_event;
-    log.append(name, data.clone())
-        .map_err(|e| Abort::new(format!("Audit record append failed: {e}")))?;
+    for (name, data) in &record.audit_events {
+        log.append(name, data.clone())
+            .map_err(|e| Abort::new(format!("Audit record append failed: {e}")))?;
+    }
     drop(log);
     let log_bytes =
         std::fs::read(&log_path).map_err(|e| Abort::new(format!("Cannot read audit log: {e}")))?;
@@ -425,7 +426,7 @@ mod tests {
             ts,
             None,
             &RecordSession {
-                audit_event: ("crl.issue".into(), serde_json::json!({ "crl_number": 7 })),
+                audit_events: vec![("crl.issue".into(), serde_json::json!({ "crl_number": 7 }))],
                 artifacts: vec![Artifact {
                     name: "ROOT.CRL".into(),
                     bytes: vec![0xDE, 0xAD],
@@ -455,7 +456,7 @@ mod tests {
             SystemTime::now(),
             None,
             &RecordSession {
-                audit_event: ("crl.issue".into(), serde_json::json!({})),
+                audit_events: vec![("crl.issue".into(), serde_json::json!({}))],
                 artifacts: vec![],
                 state: None,
             },
@@ -515,7 +516,7 @@ mod tests {
             ts,
             Some(&base),
             &RecordSession {
-                audit_event: ("crl.issue".into(), serde_json::json!({ "crl_number": 5 })),
+                audit_events: vec![("crl.issue".into(), serde_json::json!({ "crl_number": 5 }))],
                 artifacts: vec![],
                 state: Some(StateDelta {
                     crl_number: Some(5),

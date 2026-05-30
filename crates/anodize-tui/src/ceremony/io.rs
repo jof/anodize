@@ -73,12 +73,21 @@ pub struct CrlPlan {
     pub root_cert_der: Vec<u8>,
 }
 
-/// Read-only environment handed to a script. Built from disc/profile state
-/// before the ceremony thread is spawned.
+/// A revocation: pick a certificate (or enter a serial), then re-sign the CRL.
 #[derive(Debug, Clone)]
-pub struct Env {
+pub struct RevokePlan {
+    pub cert_list: Vec<crate::disc::CertSummary>,
+    pub revocation_list: Vec<RevocationEntry>,
+    pub crl_number: u64,
+    pub root_cert_der: Vec<u8>,
+}
+
+/// Read-only environment handed to a script, generic over the operation's plan.
+/// Built from disc/profile state before the ceremony thread is spawned.
+#[derive(Debug, Clone)]
+pub struct Env<P> {
     pub sss: SssMetadata,
-    pub crl_plan: CrlPlan,
+    pub plan: P,
 }
 
 // ── artifacts ─────────────────────────────────────────────────────────────
@@ -117,7 +126,8 @@ pub struct Artifact {
 /// archive's responsibility (it owns the disc/session context).
 #[derive(Debug, Clone)]
 pub struct RecordSession {
-    pub audit_event: (String, serde_json::Value),
+    /// One or more audit events to append (in order) before bundling artifacts.
+    pub audit_events: Vec<(String, serde_json::Value)>,
     pub artifacts: Vec<Artifact>,
     /// Optional STATE.JSON update to fold into this record session. The archive
     /// applies it to the base session state plus the post-append audit hash.
@@ -198,6 +208,10 @@ pub trait Operator {
 
     /// Re-confirm the system clock immediately before a signing operation.
     fn reconfirm_clock(&mut self) -> Result<Timestamp, Abort>;
+
+    /// Collect a line of free text (e.g. a serial number or revocation reason).
+    /// The returned string may be empty (the script decides if that is valid).
+    fn prompt_text(&mut self, title: &str, label: &str) -> Result<String, Abort>;
 
     /// Emit an informational status line (no input expected).
     fn note(&mut self, msg: &str);

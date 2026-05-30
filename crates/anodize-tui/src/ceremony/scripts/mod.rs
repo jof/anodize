@@ -4,3 +4,4 @@
 //! is exercised identically by the live TUI adapters and by transcript tests.
 
 pub mod issue_crl;
+pub mod revoke_cert;

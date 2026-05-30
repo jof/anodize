@@ -186,6 +186,17 @@ impl Operator for ChannelOperator<'_> {
         }
     }
 
+    fn prompt_text(&mut self, title: &str, label: &str) -> Result<String, Abort> {
+        match self.bridge.ask(Prompt::TextInput {
+            title: title.into(),
+            label: label.into(),
+        })? {
+            Response::Text(s) => Ok(s),
+            Response::Abort => Err(Abort::new("text input aborted")),
+            _ => Err(Abort::new("unexpected response to TextInput")),
+        }
+    }
+
     fn note(&mut self, msg: &str) {
         self.bridge.tell(Prompt::Note(msg.into()));
     }
@@ -237,7 +248,7 @@ mod tests {
         }
     }
 
-    fn env_with_real_shares() -> (Env, Vec<anodize_sss::Share>) {
+    fn env_with_real_shares() -> (Env<CrlPlan>, Vec<anodize_sss::Share>) {
         let pin_bytes = [0x11u8; 32];
         let shares = anodize_sss::split(&pin_bytes, 2, 2).expect("split");
         let sss = SssMetadata {
@@ -259,7 +270,7 @@ mod tests {
         };
         let env = Env {
             sss,
-            crl_plan: CrlPlan {
+            plan: CrlPlan {
                 crl_number: 9,
                 revocation_list: vec![],
                 root_cert_der: vec![0x30, 0x00],
@@ -290,6 +301,7 @@ mod tests {
                 Prompt::ReconfirmClock { .. } => handle.answer(Response::Ack),
                 Prompt::Note(_) | Prompt::Burning { .. } => { /* no response */ }
                 Prompt::Choose { .. } => handle.answer(Response::Choice(0)),
+                Prompt::TextInput { .. } => handle.answer(Response::Text(String::new())),
                 Prompt::Done(o) => break o.headline,
                 Prompt::Aborted(e) => panic!("unexpected abort: {e}"),
             }

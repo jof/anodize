@@ -25,6 +25,7 @@ pub fn key_to_response(
     prompt: &Prompt,
     key: KeyEvent,
     share_input: &mut Option<ShareInput>,
+    text_buf: &mut String,
 ) -> Option<Response> {
     match prompt {
         Prompt::Confirm { .. } => match key.code {
@@ -64,6 +65,19 @@ pub fn key_to_response(
                 None
             }
         }
+        Prompt::TextInput { .. } => match key.code {
+            KeyCode::Enter => Some(Response::Text(std::mem::take(text_buf))),
+            KeyCode::Esc => Some(Response::Abort),
+            KeyCode::Backspace => {
+                text_buf.pop();
+                None
+            }
+            KeyCode::Char(c) => {
+                text_buf.push(c);
+                None
+            }
+            _ => None,
+        },
         // No operator input expected; the burn is not interruptible mid-write.
         Prompt::Note(_) | Prompt::Burning { .. } => None,
         // Terminal screens: any key returns to the menu (handled by the App).
@@ -78,6 +92,7 @@ pub fn render_prompt(
     area: Rect,
     prompt: &Prompt,
     share_input: Option<&ShareInput>,
+    text_buf: &str,
     spinner: usize,
 ) {
     match prompt {
@@ -121,6 +136,20 @@ pub fn render_prompt(
             }
             lines.push(Line::from(""));
             lines.push(hint("[n] Select    [Esc] Cancel"));
+            boxed(frame, area, title, lines, crate::theme::MODAL_BORDER_CYAN);
+        }
+        Prompt::TextInput { title, label } => {
+            let lines = vec![
+                Line::from(""),
+                Line::from(format!("  {label}")),
+                Line::from(""),
+                Line::from(Span::styled(
+                    format!("  > {text_buf}\u{2588}"),
+                    Style::default().fg(Color::Cyan),
+                )),
+                Line::from(""),
+                hint("[Enter] Confirm    [Esc] Cancel"),
+            ];
             boxed(frame, area, title, lines, crate::theme::MODAL_BORDER_CYAN);
         }
         Prompt::CollectShares { .. } => {
@@ -255,7 +284,7 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_prompt(f, f.area(), prompt, None, 0))
+            .draw(|f| render_prompt(f, f.area(), prompt, None, "", 0))
             .unwrap();
     }
 

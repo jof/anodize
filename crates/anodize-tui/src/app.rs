@@ -128,7 +128,7 @@ impl App {
     /// until they are ported.)
     pub fn start_issue_crl(&mut self) {
         use crate::ceremony::io::{CrlPlan, Env};
-        use crate::ceremony::run::{ArchiveConfig, CeremonyRun, VaultConfig};
+        use crate::ceremony::run::{CeremonyRun, VaultConfig};
         use crate::helpers::{
             load_revocation_from_sessions, load_root_cert_der_from_sessions,
             next_crl_number_from_sessions,
@@ -150,7 +150,7 @@ impl App {
 
         let env = Env {
             sss: state.sss.clone(),
-            crl_plan: CrlPlan {
+            plan: CrlPlan {
                 crl_number: next_crl_number_from_sessions(&self.disc.prior_sessions),
                 revocation_list: load_revocation_from_sessions(&self.disc.prior_sessions),
                 root_cert_der,
@@ -167,7 +167,68 @@ impl App {
                 .map(String::from)
                 .collect(),
         };
-        let archive = ArchiveConfig {
+        let archive = self.archive_config();
+
+        self.ceremony_run = Some(CeremonyRun::spawn_issue_crl(env, vault, archive));
+        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.set_status("IssueCrl ceremony started (script engine).");
+    }
+
+    /// Start the RevokeCert ceremony on the new script engine.
+    pub fn start_revoke_cert(&mut self) {
+        use crate::ceremony::io::{Env, RevokePlan};
+        use crate::ceremony::run::{CeremonyRun, VaultConfig};
+        use crate::helpers::{
+            gather_cert_list_from_sessions, load_revocation_from_sessions,
+            load_root_cert_der_from_sessions, next_crl_number_from_sessions,
+        };
+
+        let Some(profile) = self.profile.as_ref() else {
+            self.set_status("No profile loaded.");
+            return;
+        };
+        let Some(state) = self.disc.session_state.as_ref() else {
+            self.set_status("No STATE.JSON on disc \u{2014} run InitRoot first.");
+            return;
+        };
+        let Some(root_cert_der) = load_root_cert_der_from_sessions(&self.disc.prior_sessions)
+        else {
+            self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
+            return;
+        };
+
+        let revocation_list = load_revocation_from_sessions(&self.disc.prior_sessions);
+        let cert_list = gather_cert_list_from_sessions(&self.disc.prior_sessions, &revocation_list);
+        let env = Env {
+            sss: state.sss.clone(),
+            plan: RevokePlan {
+                cert_list,
+                revocation_list,
+                crl_number: next_crl_number_from_sessions(&self.disc.prior_sessions),
+                root_cert_der,
+            },
+        };
+        let vault = VaultConfig {
+            backend: profile.hsm.backend,
+            token_label: profile.hsm.token_label.clone(),
+            key_label: profile.hsm.key_label.clone(),
+            fleet_ids: state
+                .fleet
+                .active_device_ids()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        };
+        let archive = self.archive_config();
+
+        self.ceremony_run = Some(CeremonyRun::spawn_revoke_cert(env, vault, archive));
+        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.set_status("RevokeCert ceremony started (script engine).");
+    }
+
+    /// Build the disc/shuttle archive configuration from live disc state.
+    fn archive_config(&self) -> crate::ceremony::run::ArchiveConfig {
+        crate::ceremony::run::ArchiveConfig {
             dev: self.disc.optical_dev.clone(),
             prior_sessions: self.disc.prior_sessions.clone(),
             shuttle_mount: self.shuttle_mount.clone(),
@@ -176,11 +237,7 @@ impl App {
             timestamp: self.confirmed_time.unwrap_or_else(SystemTime::now),
             sessions_remaining: self.disc.sessions_remaining,
             base_state: self.disc.session_state.clone(),
-        };
-
-        self.ceremony_run = Some(CeremonyRun::spawn_issue_crl(env, vault, archive));
-        self.ceremony.state = CeremonyPhase::ActiveOp;
-        self.set_status("IssueCrl ceremony started (script engine).");
+        }
     }
 
     /// Dismiss a finished ceremony run and return to the operation menu.
@@ -712,13 +769,11 @@ impl App {
             }
 
             // Ceremony operations
-            Action::SelectOperation(op) => {
-                if op == Operation::IssueCrl {
-                    self.start_issue_crl();
-                } else {
-                    self.do_select_operation(op);
-                }
-            }
+            Action::SelectOperation(op) => match op {
+                Operation::IssueCrl => self.start_issue_crl(),
+                Operation::RevokeCert => self.start_revoke_cert(),
+                _ => self.do_select_operation(op),
+            },
             // Clock re-confirm: operator attests clock is correct at signing time
             Action::ReconfirmClock => {
                 self.confirmed_time = Some(SystemTime::now());
