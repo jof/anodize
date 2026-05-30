@@ -9,6 +9,10 @@
 //!
 //! The transcript tests live alongside each script and drive it with scripted
 //! fakes — no terminal, HSM, or disc required.
+//!
+//! See `docs/ceremony-scripts.md` for the design rationale and a guide to
+//! reviewing a ceremony script (the `pub fn` in each `scripts/*` file is the
+//! whole ceremony; everything under `#[cfg(test)]` is fakes + ordering asserts).
 
 #[allow(dead_code)]
 pub mod adapters;

@@ -41,6 +41,7 @@ Anodize is an offline root-CA ceremony tool written in Rust. It runs air-gapped 
 ### Design & architecture
 - **[Architecture](architecture.md)** — crate structure, HSM traits, actor pattern, X.509 signing bridge, crate rationale
 - **[Ceremony Pipeline](ceremony-pipeline.md)** — setup phases, operation lifecycle, state machine, crash recovery
+- **[Ceremonies as Scripts](ceremony-scripts.md)** — experimental script engine: one straight-line function per operation, how to review one, ordering enforced by typestate
 - **[Optical Disc Archive](optical-disc.md)** — multi-session SAO format, ISO 9660, SG_IO MMC, WAL pattern
 - **[SSS & PIN Management](sss-pin-management.md)** — Shamir splitting, wordlist encoding, share commitments, PIN rotation
 - **[HSM Fleet & Key Backup](hsm-fleet.md)** — multi-device fleet, inventory, wrap-export/import, PIN propagation
