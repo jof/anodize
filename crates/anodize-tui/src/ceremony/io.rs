@@ -1,0 +1,223 @@
+//! The ceremony effect vocabulary.
+//!
+//! A ceremony script is a straight-line function written against the three
+//! traits in this module — [`Operator`] (the human), [`Vault`] (the HSM), and
+//! [`Archive`] (optical disc + shuttle USB). In production these are backed by
+//! the real TUI/HSM/media adapters; in tests they are backed by scripted fakes.
+//!
+//! The script never knows whether it is talking to a terminal or a test
+//! harness, which is the whole point: the same `fn` is exercised by the
+//! transcript test and by the live ceremony.
+//!
+//! Irreversible ordering is enforced two ways:
+//! 1. **Source order** — the script runs top to bottom; an early `?` on
+//!    [`Abort`] short-circuits before any later effect can run.
+//! 2. **Typestate** — [`IntentCommitted`] / [`RecordCommitted`] are tokens with
+//!    private fields that only an [`Archive`] impl can mint. You cannot commit a
+//!    record without proving the intent was committed, nor export to shuttle
+//!    without proving the record was committed (the disc-before-shuttle
+//!    invariant, by type).
+
+use anodize_config::state::SssMetadata;
+use anodize_config::RevocationEntry;
+use secrecy::SecretString;
+
+// ── shared value types ──────────────────────────────────────────────────────
+
+/// The operator aborted the ceremony (quit, cancel, or a failed quorum).
+///
+/// Propagated via `?`; unwinding the script runs every RAII guard on the way
+/// out (HSM logout, PIN zeroization).
+#[derive(Debug, Clone)]
+pub struct Abort(pub String);
+
+impl Abort {
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self(reason.into())
+    }
+}
+
+impl std::fmt::Display for Abort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A reconstructed HSM PIN (hex string). Zeroized on drop by `SecretString`.
+pub type Pin = SecretString;
+
+/// A confirmed signing timestamp.
+pub type Timestamp = std::time::SystemTime;
+
+/// One selectable option in a [`Operator::choose`] prompt.
+#[derive(Debug, Clone)]
+pub struct Choice {
+    pub key: char,
+    pub label: String,
+}
+
+/// The result of a completed ceremony, rendered on the done screen.
+#[derive(Debug, Clone)]
+pub struct Outcome {
+    pub headline: String,
+    pub detail: Vec<String>,
+}
+
+// ── operation context (read-only inputs gathered before the script runs) ──────
+
+/// Everything an `IssueCrl` ceremony needs to know up front.
+#[derive(Debug, Clone)]
+pub struct CrlPlan {
+    pub crl_number: u64,
+    pub revocation_list: Vec<RevocationEntry>,
+    pub root_cert_der: Vec<u8>,
+}
+
+/// Read-only environment handed to a script. Built from disc/profile state
+/// before the ceremony thread is spawned.
+#[derive(Debug, Clone)]
+pub struct Env {
+    pub sss: SssMetadata,
+    pub crl_plan: CrlPlan,
+}
+
+// ── artifacts ─────────────────────────────────────────────────────────────
+
+/// A signed CRL produced by the HSM.
+#[derive(Debug, Clone)]
+pub struct SignedCrl {
+    der: Vec<u8>,
+}
+
+impl SignedCrl {
+    pub fn new(der: Vec<u8>) -> Self {
+        Self { der }
+    }
+    pub fn der(&self) -> &[u8] {
+        &self.der
+    }
+}
+
+/// The intent WAL event the script declares before any irreversible step.
+#[derive(Debug, Clone)]
+pub struct IntentEvent {
+    pub name: String,
+    pub data: serde_json::Value,
+}
+
+/// A single named file destined for the optical disc.
+#[derive(Debug, Clone)]
+pub struct Artifact {
+    pub name: String,
+    pub bytes: Vec<u8>,
+}
+
+/// The record session the script asks the archive to burn: an audit event to
+/// append to the WAL plus the artifact files. STATE.JSON assembly is the
+/// archive's responsibility (it owns the disc/session context).
+#[derive(Debug, Clone)]
+pub struct RecordSession {
+    pub audit_event: (String, serde_json::Value),
+    pub artifacts: Vec<Artifact>,
+}
+
+// ── typestate tokens ──────────────────────────────────────────────────────
+
+/// Proof that the intent WAL session was committed to disc.
+///
+/// The private field makes this unconstructible by struct literal outside this
+/// module; only an [`Archive`] impl mints one via [`IntentCommitted::new`].
+/// [`Archive::commit_record`] consumes it, so a record can never be written
+/// before its intent.
+#[derive(Debug)]
+pub struct IntentCommitted {
+    dir_name: String,
+    _seal: (),
+}
+
+impl IntentCommitted {
+    pub(crate) fn new(dir_name: impl Into<String>) -> Self {
+        Self {
+            dir_name: dir_name.into(),
+            _seal: (),
+        }
+    }
+    pub fn dir_name(&self) -> &str {
+        &self.dir_name
+    }
+}
+
+/// Proof that the record session was committed to disc.
+///
+/// Required by [`Archive::export_shuttle`]; this is the disc-before-shuttle
+/// invariant expressed as a type, not a runtime phase check.
+#[derive(Debug)]
+pub struct RecordCommitted {
+    dir_name: String,
+    _seal: (),
+}
+
+impl RecordCommitted {
+    pub(crate) fn new(dir_name: impl Into<String>) -> Self {
+        Self {
+            dir_name: dir_name.into(),
+            _seal: (),
+        }
+    }
+    pub fn dir_name(&self) -> &str {
+        &self.dir_name
+    }
+}
+
+// ── effect traits ──────────────────────────────────────────────────────────
+
+/// The human in the loop. Every method may return [`Abort`] if the operator
+/// quits or cancels.
+pub trait Operator {
+    /// Present a numbered menu and return the chosen index.
+    fn choose(&mut self, title: &str, body: &[String], options: &[Choice]) -> Result<usize, Abort>;
+
+    /// Two-key confirmation gate.
+    fn confirm(&mut self, title: &str, body: &[String]) -> Result<(), Abort>;
+
+    /// Collect threshold SSS shares, reconstruct + verify the PIN, return it.
+    fn collect_quorum(&mut self, sss: &SssMetadata) -> Result<Pin, Abort>;
+
+    /// Re-confirm the system clock immediately before a signing operation.
+    fn reconfirm_clock(&mut self) -> Result<Timestamp, Abort>;
+
+    /// Emit an informational status line (no input expected).
+    fn note(&mut self, msg: &str);
+}
+
+/// The HSM. [`Vault::login`] yields an authenticated [`Session`] guard.
+pub trait Vault {
+    fn login<'a>(&'a mut self, pin: Pin) -> Result<Box<dyn Session + 'a>, Abort>;
+}
+
+/// An authenticated HSM session. Implementations log out and zeroize on drop —
+/// including when the script unwinds through an early `?`.
+pub trait Session {
+    fn issue_crl(&mut self, plan: &CrlPlan, when: Timestamp) -> Result<SignedCrl, Abort>;
+}
+
+/// The append-only archive: write-once optical disc plus the shuttle USB.
+pub trait Archive {
+    /// Burn the intent WAL session. Crash-safe commit point.
+    fn commit_intent(&mut self, event: IntentEvent) -> Result<IntentCommitted, Abort>;
+
+    /// Burn the record session. Requires proof the intent was committed.
+    fn commit_record(
+        &mut self,
+        intent: IntentCommitted,
+        session: RecordSession,
+    ) -> Result<RecordCommitted, Abort>;
+
+    /// Copy artifacts to the shuttle USB. Requires proof the record was burned
+    /// to disc first.
+    fn export_shuttle(
+        &mut self,
+        record: &RecordCommitted,
+        files: &[(&str, &[u8])],
+    ) -> Result<(), Abort>;
+}

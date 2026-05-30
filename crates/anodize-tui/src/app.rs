@@ -79,6 +79,10 @@ pub struct App {
 
     // Content area vertical scroll offset
     pub content_scroll: u16,
+
+    // New script engine: when `Some`, the Ceremony mode is driving a
+    // coroutine-based ceremony, replacing the active_op/CeremonyPhase machinery.
+    pub ceremony_run: Option<crate::ceremony::run::CeremonyRun>,
 }
 
 impl App {
@@ -109,12 +113,82 @@ impl App {
             confirm_dialog: None,
             pending_burn_reconfirm: false,
             content_scroll: 0,
+            ceremony_run: None,
         }
     }
 
     /// Derive which `Operation` is active from `active_op`.
     pub fn current_op(&self) -> Option<Operation> {
         self.active_op.as_ref().map(|op| op.operation())
+    }
+
+    /// Start the IssueCrl ceremony on the new script engine. Builds the
+    /// read-only `Env` plus vault/archive configs from live setup + disc state,
+    /// then spawns the coroutine. (Other operations still use the legacy path
+    /// until they are ported.)
+    pub fn start_issue_crl(&mut self) {
+        use crate::ceremony::io::{CrlPlan, Env};
+        use crate::ceremony::run::{ArchiveConfig, CeremonyRun, VaultConfig};
+        use crate::helpers::{
+            load_revocation_from_sessions, load_root_cert_der_from_sessions,
+            next_crl_number_from_sessions,
+        };
+
+        let Some(profile) = self.profile.as_ref() else {
+            self.set_status("No profile loaded.");
+            return;
+        };
+        let Some(state) = self.disc.session_state.as_ref() else {
+            self.set_status("No STATE.JSON on disc \u{2014} run InitRoot first.");
+            return;
+        };
+        let Some(root_cert_der) = load_root_cert_der_from_sessions(&self.disc.prior_sessions)
+        else {
+            self.set_status("No ROOT.CRT found on disc. Generate root CA first.");
+            return;
+        };
+
+        let env = Env {
+            sss: state.sss.clone(),
+            crl_plan: CrlPlan {
+                crl_number: next_crl_number_from_sessions(&self.disc.prior_sessions),
+                revocation_list: load_revocation_from_sessions(&self.disc.prior_sessions),
+                root_cert_der,
+            },
+        };
+        let vault = VaultConfig {
+            backend: profile.hsm.backend,
+            token_label: profile.hsm.token_label.clone(),
+            key_label: profile.hsm.key_label.clone(),
+            fleet_ids: state
+                .fleet
+                .active_device_ids()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        };
+        let archive = ArchiveConfig {
+            dev: self.disc.optical_dev.clone(),
+            prior_sessions: self.disc.prior_sessions.clone(),
+            shuttle_mount: self.shuttle_mount.clone(),
+            staging: PathBuf::from("/run/anodize/staging"),
+            profile_bytes: self.profile_toml_bytes.clone().unwrap_or_default(),
+            timestamp: self.confirmed_time.unwrap_or_else(SystemTime::now),
+            sessions_remaining: self.disc.sessions_remaining,
+        };
+
+        self.ceremony_run = Some(CeremonyRun::spawn_issue_crl(env, vault, archive));
+        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.set_status("IssueCrl ceremony started (script engine).");
+    }
+
+    /// Dismiss a finished ceremony run and return to the operation menu.
+    fn finish_ceremony_run(&mut self) {
+        if let Some(run) = self.ceremony_run.take() {
+            run.join();
+        }
+        self.ceremony.state = CeremonyPhase::OperationSelect;
+        self.set_status("Returned to operation menu.");
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
@@ -167,7 +241,11 @@ impl App {
         // Ctrl+C: quit with confirmation (blocked during ephemeral ceremony phases)
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             let blocked = if self.mode == Mode::Ceremony {
-                if self.ceremony.state == CeremonyPhase::ActiveOp {
+                if let Some(run) = self.ceremony_run.as_ref() {
+                    // A live script ceremony holds ephemeral state (PIN, HSM
+                    // session) until it reaches a terminal prompt.
+                    !run.is_finished()
+                } else if self.ceremony.state == CeremonyPhase::ActiveOp {
                     self.active_op
                         .as_ref()
                         .is_some_and(|op| op.holds_ephemeral_state())
@@ -192,7 +270,9 @@ impl App {
 
         // Log view toggle (except during text entry)
         let in_text_entry = self.mode == Mode::Ceremony
-            && if self.ceremony.state == CeremonyPhase::ActiveOp {
+            && if let Some(run) = self.ceremony_run.as_ref() {
+                run.wants_text_input()
+            } else if self.ceremony.state == CeremonyPhase::ActiveOp {
                 self.active_op.as_ref().is_some_and(|op| op.in_text_entry())
             } else {
                 self.ceremony.in_text_entry()
@@ -417,6 +497,27 @@ impl App {
         match self.mode {
             Mode::Setup => self.setup.handle_key_event(key),
             Mode::Ceremony => {
+                // New script engine takes over the Ceremony mode when a run is
+                // active: keys go to the coroutine, or dismiss a finished run.
+                if self.ceremony_run.is_some() {
+                    let finished = self
+                        .ceremony_run
+                        .as_ref()
+                        .map(|r| r.is_finished())
+                        .unwrap_or(true);
+                    if finished {
+                        if matches!(
+                            key.code,
+                            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('Q')
+                        ) {
+                            self.finish_ceremony_run();
+                        }
+                    } else if let Some(run) = self.ceremony_run.as_mut() {
+                        run.on_key(key);
+                    }
+                    return Action::Noop;
+                }
+
                 // ActiveOp: delegate key handling to the per-operation context.
                 if self.ceremony.state == CeremonyPhase::ActiveOp {
                     if let Some(mut op) = self.active_op.take() {
@@ -503,7 +604,13 @@ impl App {
 
         match self.mode {
             Mode::Setup => self.setup.handle_tick(),
-            Mode::Ceremony => self.ceremony.handle_tick(),
+            Mode::Ceremony => {
+                if let Some(run) = self.ceremony_run.as_mut() {
+                    run.on_tick();
+                    return Action::Noop;
+                }
+                self.ceremony.handle_tick()
+            }
             Mode::Utilities => self.utilities.handle_tick(),
         }
     }
@@ -605,7 +712,11 @@ impl App {
 
             // Ceremony operations
             Action::SelectOperation(op) => {
-                self.do_select_operation(op);
+                if op == Operation::IssueCrl {
+                    self.start_issue_crl();
+                } else {
+                    self.do_select_operation(op);
+                }
             }
             // Clock re-confirm: operator attests clock is correct at signing time
             Action::ReconfirmClock => {

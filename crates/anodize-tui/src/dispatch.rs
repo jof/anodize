@@ -835,6 +835,11 @@ impl App {
     }
 
     pub(crate) fn render_ceremony_content(&self, frame: &mut Frame, area: Rect) {
+        // New script engine: render the current prompt when a run is active.
+        if let Some(run) = self.ceremony_run.as_ref() {
+            run.render(frame, area);
+            return;
+        }
         // ActiveOp: delegate rendering to the per-operation context.
         if self.ceremony.state == CeremonyPhase::ActiveOp {
             if let Some(ref op) = self.active_op {

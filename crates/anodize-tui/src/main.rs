@@ -7,6 +7,7 @@
 
 mod action;
 mod app;
+mod ceremony;
 mod components;
 mod disc;
 mod dispatch;
