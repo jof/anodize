@@ -440,6 +440,10 @@ pub trait Operator {
         Err(Abort::new("wait_for_disc_swap not supported"))
     }
 
+    /// Show a scrollable read-only review screen. The operator dismisses it
+    /// with any key (Esc, Q, Enter) — there is no abort path.
+    fn review(&mut self, _title: &str, _body: &[String]) {}
+
     /// Emit an informational status line (no input expected).
     fn note(&mut self, msg: &str);
 }

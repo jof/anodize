@@ -240,6 +240,14 @@ impl Operator for ChannelOperator<'_> {
         }
     }
 
+    fn review(&mut self, title: &str, body: &[String]) {
+        // Review is non-abortable — any response proceeds.
+        let _ = self.bridge.ask(Prompt::Review {
+            title: title.into(),
+            body: body.to_vec(),
+        });
+    }
+
     fn note(&mut self, msg: &str) {
         self.bridge.tell(Prompt::Note(msg.into()));
     }
@@ -352,6 +360,7 @@ mod tests {
                 Prompt::RevealShares { .. } => handle.answer(Response::Ack),
                 Prompt::VerifyShares { .. } => handle.answer(Response::Ack),
                 Prompt::WaitDiscSwap { .. } => handle.answer(Response::Ack),
+                Prompt::Review { .. } => handle.answer(Response::Confirm),
                 Prompt::Done(o) => break o.headline,
                 Prompt::Aborted(e) => panic!("unexpected abort: {e}"),
             }
@@ -387,6 +396,7 @@ mod tests {
                 Prompt::RevealShares { .. } => handle.answer(Response::Ack),
                 Prompt::VerifyShares { .. } => handle.answer(Response::Ack),
                 Prompt::WaitDiscSwap { .. } => handle.answer(Response::Ack),
+                Prompt::Review { .. } => handle.answer(Response::Confirm),
                 Prompt::Done(_) => panic!("should have aborted"),
                 Prompt::Aborted(e) => break e,
                 other => panic!("unexpected prompt: {other:?}"),

@@ -337,6 +337,9 @@ pub(crate) mod tests {
             self.transcript.push("wait_for_disc_swap".into());
             Ok(())
         }
+        fn review(&mut self, _: &str, _: &[String]) {
+            self.transcript.push("review".into());
+        }
         fn note(&mut self, _: &str) {}
     }
 

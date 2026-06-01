@@ -6,7 +6,7 @@
 //! and renders via [`CeremonyRun::render`] — it never touches threads or
 //! channels directly.
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{layout::Rect, Frame};
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -65,6 +65,7 @@ pub struct CeremonyRun {
     share_reveal: Option<ShareReveal>,
     text_buf: String,
     spinner: usize,
+    review_scroll: u16,
     finished: bool,
 }
 
@@ -415,6 +416,7 @@ impl CeremonyRun {
             share_reveal,
             text_buf: String::new(),
             spinner: 0,
+            review_scroll: 0,
             finished,
         }
     }
@@ -477,6 +479,7 @@ impl CeremonyRun {
             }
             self.prompt = p;
             self.text_buf.clear();
+            self.review_scroll = 0;
         }
         notes
     }
@@ -486,6 +489,28 @@ impl CeremonyRun {
     pub fn on_key(&mut self, key: KeyEvent) -> bool {
         if self.finished {
             return false;
+        }
+        // Handle scroll keys for Review prompts before the response mapper.
+        if matches!(self.prompt, Prompt::Review { .. }) {
+            match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.review_scroll = self.review_scroll.saturating_sub(1);
+                    return true;
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.review_scroll = self.review_scroll.saturating_add(1);
+                    return true;
+                }
+                KeyCode::PageUp => {
+                    self.review_scroll = self.review_scroll.saturating_sub(10);
+                    return true;
+                }
+                KeyCode::PageDown => {
+                    self.review_scroll = self.review_scroll.saturating_add(10);
+                    return true;
+                }
+                _ => {}
+            }
         }
         if let Some(response) = ui::key_to_response(
             &self.prompt,
@@ -513,6 +538,7 @@ impl CeremonyRun {
             self.share_reveal.as_ref(),
             &self.text_buf,
             self.spinner,
+            self.review_scroll,
         );
     }
 

@@ -39,6 +39,13 @@ pub fn key_to_response(
             KeyCode::Esc => Some(Response::Abort),
             _ => None,
         },
+        Prompt::Review { .. } => match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Enter => {
+                Some(Response::Confirm)
+            }
+            // Scroll keys are consumed by CeremonyRun, not here.
+            _ => None,
+        },
         Prompt::ReconfirmClock { .. } => match key.code {
             KeyCode::Char('1') | KeyCode::Enter => Some(Response::Ack),
             KeyCode::Esc => Some(Response::Abort),
@@ -146,6 +153,7 @@ pub fn render_prompt(
     share_reveal: Option<&ShareReveal>,
     text_buf: &str,
     spinner: usize,
+    review_scroll: u16,
 ) {
     match prompt {
         Prompt::Confirm { title, body } => {
@@ -153,6 +161,23 @@ pub fn render_prompt(
             lines.push(Line::from(""));
             lines.push(hint("[1] Proceed    [Esc] Cancel"));
             boxed(frame, area, title, lines, crate::theme::MODAL_BORDER_YELLOW);
+        }
+        Prompt::Review { title, body } => {
+            let mut lines = body_lines(body);
+            lines.push(Line::from(""));
+            lines.push(hint("[\u{2191}/\u{2193}] Scroll    [Esc/Q] Done"));
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .title(title.to_string())
+                .style(crate::theme::BLOCK)
+                .border_style(crate::theme::MODAL_BORDER_CYAN)
+                .title_style(crate::theme::TITLE);
+            let para = Paragraph::new(lines)
+                .block(block)
+                .alignment(Alignment::Left)
+                .wrap(Wrap { trim: false })
+                .scroll((review_scroll, 0));
+            frame.render_widget(para, area);
         }
         Prompt::ReconfirmClock { rfc3339 } => {
             let lines = vec![
@@ -377,7 +402,7 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_prompt(f, f.area(), prompt, None, None, None, "", 0))
+            .draw(|f| render_prompt(f, f.area(), prompt, None, None, None, "", 0, 0))
             .unwrap();
     }
 
@@ -386,6 +411,10 @@ mod tests {
         render_one(&Prompt::Confirm {
             title: "Sign and write CRL".into(),
             body: vec!["CRL number: 7".into()],
+        });
+        render_one(&Prompt::Review {
+            title: "Validation Report".into(),
+            body: vec!["PASS: disc_status".into()],
         });
         render_one(&Prompt::ReconfirmClock {
             rfc3339: "2026-01-01T00:00:00Z".into(),

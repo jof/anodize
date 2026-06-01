@@ -24,6 +24,8 @@ pub enum Prompt {
     },
     /// Two-key confirmation gate; expects [`Response::Confirm`] or `Abort`.
     Confirm { title: String, body: Vec<String> },
+    /// Scrollable read-only review; expects [`Response::Confirm`] (never aborts).
+    Review { title: String, body: Vec<String> },
     /// Collect threshold SSS shares; expects [`Response::Shares`].
     CollectShares { sss: SssMetadata },
     /// Collect a line of free text; expects [`Response::Text`].
