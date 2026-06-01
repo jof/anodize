@@ -22,8 +22,6 @@ pub enum Action {
     Render,
     // Navigation
     SwitchMode(Mode),
-    // Status updates
-    SetStatus(String),
     // Setup flow
     ConfirmClock,
     HsmDetected,
@@ -31,17 +29,9 @@ pub enum Action {
     // Ceremony flow
     SetupComplete,
     SelectOperation(Operation),
-    // Disc + Shuttle
     ConfirmDisc,
-    DoWriteIntent,
-    DoStartBurn,
-    DoWriteShuttle,
-    // Clock re-confirm before signing
-    ReconfirmClock,
     // Utilities sub-screens (1=SystemInfo, 2=AuditLog, 3=HsmInventory, 4=DiscInspector)
     UtilScreen(u8),
-    // Generic cancel: return to OperationSelect from any ceremony phase
-    CeremonyCancel,
 }
 
 /// Top-level application modes, switchable via F1/F2/F3.

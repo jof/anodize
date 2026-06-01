@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use anodize_config::Profile;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -24,12 +24,6 @@ use crate::modes::ceremony::CeremonyMode;
 use crate::modes::ceremony::CeremonyPhase;
 use crate::modes::setup::{SetupMode, SetupPhase};
 use crate::modes::utilities::UtilitiesMode;
-
-/// Maximum elapsed time since the last clock confirmation before a
-/// re-confirm is required.  On a live-boot, air-gapped system the clock
-/// cannot drift, but the guard catches the case where the operator walks
-/// away mid-ceremony and returns much later.
-pub const CLOCK_DRIFT_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 
 /// Top-level application state.
 pub struct App {
@@ -102,15 +96,6 @@ impl App {
         }
     }
 
-    /// Derive which `Operation` is active.
-    ///
-    /// In the new script-engine world, the operation is not tracked here;
-    /// this always returns `None`. Callers that need the operation name should
-    /// check `ceremony_run`.
-    pub fn current_op(&self) -> Option<Operation> {
-        None
-    }
-
     /// Start the InitRoot ceremony on the new script engine. No existing
     /// STATE.JSON is required — this is the genesis operation.
     pub fn start_init_root(&mut self) {
@@ -150,7 +135,7 @@ impl App {
         let archive = self.archive_config();
 
         self.ceremony_run = Some(CeremonyRun::spawn_init_root(env, vault, archive));
-        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.ceremony.state = CeremonyPhase::OperationSelect;
         self.set_status("InitRoot ceremony started (script engine).");
     }
 
@@ -202,7 +187,7 @@ impl App {
         let archive = self.archive_config();
 
         self.ceremony_run = Some(CeremonyRun::spawn_issue_crl(env, vault, archive));
-        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.ceremony.state = CeremonyPhase::OperationSelect;
         self.set_status("IssueCrl ceremony started (script engine).");
     }
 
@@ -254,7 +239,7 @@ impl App {
         let archive = self.archive_config();
 
         self.ceremony_run = Some(CeremonyRun::spawn_revoke_cert(env, vault, archive));
-        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.ceremony.state = CeremonyPhase::OperationSelect;
         self.set_status("RevokeCert ceremony started (script engine).");
     }
 
@@ -361,7 +346,7 @@ impl App {
         let archive = self.archive_config();
 
         self.ceremony_run = Some(CeremonyRun::spawn_sign_csr(env, vault, archive));
-        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.ceremony.state = CeremonyPhase::OperationSelect;
         self.set_status("SignCsr ceremony started (script engine).");
     }
 
@@ -397,7 +382,7 @@ impl App {
         let archive = self.archive_config();
 
         self.ceremony_run = Some(CeremonyRun::spawn_rekey_shares(env, vault, archive));
-        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.ceremony.state = CeremonyPhase::OperationSelect;
         self.set_status("RekeyShares ceremony started (script engine).");
     }
 
@@ -436,7 +421,7 @@ impl App {
         let archive = self.archive_config();
 
         self.ceremony_run = Some(CeremonyRun::spawn_key_backup(env, vault, archive));
-        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.ceremony.state = CeremonyPhase::OperationSelect;
         self.set_status("KeyBackup ceremony started (script engine).");
     }
 
@@ -470,7 +455,7 @@ impl App {
         let archive = self.archive_config();
 
         self.ceremony_run = Some(CeremonyRun::spawn_refresh_disc(env, archive));
-        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.ceremony.state = CeremonyPhase::OperationSelect;
         self.set_status("RefreshDisc ceremony started (script engine).");
     }
 
@@ -544,7 +529,7 @@ impl App {
         let archive = self.archive_config();
 
         self.ceremony_run = Some(CeremonyRun::spawn_migrate_disc(env, archive));
-        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.ceremony.state = CeremonyPhase::OperationSelect;
         self.set_status("MigrateDisc ceremony started (script engine).");
     }
 
@@ -696,7 +681,7 @@ impl App {
         let archive = self.archive_config();
 
         self.ceremony_run = Some(CeremonyRun::spawn_validate_disc(env, vault, archive));
-        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.ceremony.state = CeremonyPhase::OperationSelect;
         self.set_status("ValidateDisc ceremony started (script engine).");
     }
 
@@ -732,15 +717,6 @@ impl App {
         self.content_scroll = 0;
     }
 
-    /// Returns `true` if the operator's clock confirmation is recent enough
-    /// for a disc-write operation (within [`CLOCK_DRIFT_THRESHOLD`]).
-    pub fn clock_is_fresh(&self) -> bool {
-        match self.confirmed_time {
-            Some(t) => t.elapsed().unwrap_or(Duration::ZERO) < CLOCK_DRIFT_THRESHOLD,
-            None => false,
-        }
-    }
-
     /// Process a crossterm key event at the app level.
     pub fn handle_key_event(&mut self, key: KeyEvent) -> Action {
         // Confirm dialog intercepts all keys when active
@@ -755,13 +731,11 @@ impl App {
         // Ctrl+C: quit with confirmation (blocked during ephemeral ceremony phases)
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             let blocked = if self.mode == Mode::Ceremony {
-                if let Some(run) = self.ceremony_run.as_ref() {
-                    // A live script ceremony holds ephemeral state (PIN, HSM
-                    // session) until it reaches a terminal prompt.
-                    !run.is_finished()
-                } else {
-                    self.ceremony.holds_ephemeral_state()
-                }
+                // A live script ceremony holds ephemeral state (PIN, HSM
+                // session) until it reaches a terminal prompt.
+                self.ceremony_run
+                    .as_ref()
+                    .map_or(false, |run| !run.is_finished())
             } else {
                 false
             };
@@ -1026,20 +1000,7 @@ impl App {
                     return Action::Noop;
                 }
 
-                let action = self.ceremony.handle_key_event(key);
-                // Gate full-ceremony-abort actions behind a confirmation
-                // dialog when the current phase warrants it.
-                if self.ceremony.needs_abort_confirmation() {
-                    match action {
-                        Action::CeremonyCancel => {
-                            self.show_abort_confirm(action);
-                            Action::Noop
-                        }
-                        _ => action,
-                    }
-                } else {
-                    action
-                }
+                self.ceremony.handle_key_event(key)
             }
             Mode::Utilities => self.utilities.handle_key_event(key),
         }
@@ -1099,8 +1060,6 @@ impl App {
                 self.mode = mode;
                 self.content_scroll = 0;
             }
-            Action::SetStatus(msg) => self.set_status(msg),
-
             // Setup flow
             Action::ConfirmClock => {
                 self.confirmed_time = Some(SystemTime::now());
@@ -1149,15 +1108,6 @@ impl App {
                 #[cfg(feature = "dev-burn")]
                 Operation::RefreshDisc => self.start_refresh_disc(),
             },
-            // Clock re-confirm: operator attests clock is correct at signing time
-            Action::ReconfirmClock => {
-                self.confirmed_time = Some(SystemTime::now());
-            }
-
-            // Legacy action variants — no longer reachable but kept for
-            // exhaustive match until the Action enum is trimmed.
-            Action::DoWriteIntent | Action::DoStartBurn | Action::DoWriteShuttle => {}
-
             // Utilities sub-screens
             Action::UtilScreen(idx) => {
                 use crate::modes::utilities::{UtilScreen, UtilitiesMode};
@@ -1199,11 +1149,6 @@ impl App {
                     self.utilities.set_cached_lines(lines);
                 }
                 self.content_scroll = 0;
-            }
-
-            Action::CeremonyCancel => {
-                self.ceremony.state = CeremonyPhase::OperationSelect;
-                self.set_status("Cancelled.");
             }
         }
     }
@@ -1285,10 +1230,7 @@ impl App {
         // Phase bar
         let phase_steps = match self.mode {
             Mode::Setup => modes::setup_phases(self.setup.phase.index()),
-            Mode::Ceremony => {
-                let idx = self.ceremony.phase_index();
-                modes::ceremony_phases(idx)
-            }
+            Mode::Ceremony => modes::ceremony_phases(0),
             Mode::Utilities => modes::utility_phases(&self.utilities.screen),
         };
         let phase_bar = PhaseBar {
@@ -1333,29 +1275,6 @@ impl App {
     /// Show a two-key confirmation dialog for a critical action.
     pub fn show_confirm(&mut self, title: impl Into<String>, body: Vec<String>, action: Action) {
         self.confirm_dialog = Some(ConfirmDialog::new(title, body, action));
-    }
-
-    /// Show a two-key confirmation dialog before aborting the active ceremony.
-    fn show_abort_confirm(&mut self, action: Action) {
-        let body = self.abort_confirm_body();
-        self.show_confirm("Abort Ceremony?", body, action);
-    }
-
-    /// Context-sensitive warning body for the abort confirmation dialog.
-    fn abort_confirm_body(&self) -> Vec<String> {
-        use CeremonyPhase::*;
-        match &self.ceremony.state {
-            ClockReconfirm => {
-                vec![
-                    "HSM session and partially-reconstructed PIN".into(),
-                    "will be discarded.".into(),
-                ]
-            }
-            ActiveOp => {
-                vec!["All ceremony progress will be lost.".into()]
-            }
-            _ => vec!["All ceremony progress will be lost.".into()],
-        }
     }
 
     /// Show a quit-confirmation dialog (two-key: [1] then [Enter]).

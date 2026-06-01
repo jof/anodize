@@ -16,7 +16,6 @@ mod hardware;
 mod helpers;
 mod media;
 mod modes;
-mod ops;
 mod theme;
 mod tui;
 

@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use anodize_hsm::{HsmActor, KeyHandle};
+use anodize_hsm::HsmActor;
 
 use crate::components::status_bar::HwState;
 
@@ -14,10 +14,6 @@ pub struct HardwareManager {
     pub disc_state: HwState,
     pub shuttle_state: HwState,
     pub actor: Option<HsmActor>,
-    pub root_key: Option<KeyHandle>,
-    /// Backend-specific device ID of the currently authenticated HSM
-    /// (USB serial for YubiHSM, token label for SoftHSM).
-    pub device_id: Option<String>,
 }
 
 impl HardwareManager {
@@ -27,8 +23,6 @@ impl HardwareManager {
             disc_state: HwState::Absent,
             shuttle_state: HwState::Absent,
             actor: None,
-            root_key: None,
-            device_id: None,
         }
     }
 

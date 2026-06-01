@@ -350,7 +350,6 @@ mod tests {
                 cert_list: vec![CertSummary {
                     serial: "ABCD".into(),
                     subject: "CN=leaf".into(),
-                    not_after: "2030-01-01T00:00:00Z".into(),
                     is_root: false,
                     already_revoked: false,
                 }],

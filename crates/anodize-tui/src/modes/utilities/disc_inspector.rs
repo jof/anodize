@@ -727,12 +727,7 @@ mod tests {
         DiscContext {
             optical_dev: Some("/dev/sr0".into()),
             prior_sessions: sessions,
-            burn_rx: None,
-            burn_log: Vec::new(),
-            burn_started: None,
             sessions_remaining: Some(10),
-            intent_session_dir_name: None,
-            pending_intent_session: None,
             disc_scan_rx: None,
             session_state: Some(SessionState {
                 version: 1,

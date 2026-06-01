@@ -237,5 +237,3 @@ impl App {
         self.ceremony.render_with_app(frame, area, self);
     }
 }
-
-// TODO: Re-add dispatch tests exercising the script-engine based ceremonies.
