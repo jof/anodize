@@ -104,32 +104,7 @@ impl CeremonyMode {
             CeremonyPhase::OperationSelect => "Select Operation",
             CeremonyPhase::Commit => "Committing Intent to Disc\u{2026}",
             CeremonyPhase::BurningDisc => "Writing Session\u{2026}",
-            CeremonyPhase::DiscDone => {
-                let op_failed = app
-                    .active_op
-                    .as_ref()
-                    .map_or(false, |op| !op.op_succeeded());
-                if op_failed {
-                    match app.current_op() {
-                        Some(Operation::KeyBackup) => "Key Backup FAILED",
-                        _ => "Operation FAILED",
-                    }
-                } else {
-                    match app.current_op() {
-                        Some(Operation::InitRoot) => "Root Init Written",
-                        Some(Operation::SignCsr) => "Certificate Written",
-                        Some(Operation::RevokeCert) => "Revocation Record Written",
-                        Some(Operation::IssueCrl) => "CRL Refresh Written",
-                        Some(Operation::RekeyShares) => "Re-key Shares Written",
-                        Some(Operation::MigrateDisc) => "Disc Migration Written",
-                        Some(Operation::KeyBackup) => "Key Backup Written",
-                        Some(Operation::ValidateDisc) => "Disc Validation Written",
-                        #[cfg(feature = "dev-burn")]
-                        Some(Operation::RefreshDisc) => "Disc Refreshed",
-                        None => "Disc Session Written",
-                    }
-                }
-            }
+            CeremonyPhase::DiscDone => "Disc Session Written",
             CeremonyPhase::ActiveOp => {
                 // Title comes from the active operation context; rendered in render_with_app.
                 "Operation"
@@ -275,28 +250,8 @@ impl CeremonyMode {
                     Some(Operation::RefreshDisc) => "Disc refresh",
                     None => "Session",
                 };
-                let op_failed = app
-                    .active_op
-                    .as_ref()
-                    .map_or(false, |op| !op.op_succeeded());
-                let err_msg = app.active_op.as_ref().and_then(|op| op.op_error_message());
-                let fp = app.active_op.as_ref().and_then(|op| op.fingerprint());
                 let mut lines = vec![String::new()];
-                if op_failed {
-                    lines.push(format!(
-                        "  {op_label} FAILED \u{2014} failure recorded to disc."
-                    ));
-                    if let Some(msg) = err_msg {
-                        lines.push(String::new());
-                        lines.push(format!("  Error: {msg}"));
-                    }
-                } else {
-                    lines.push(format!("  {op_label} written to disc successfully."));
-                }
-                if let Some(fp) = fp {
-                    lines.push(String::new());
-                    lines.push(format!("  Fingerprint: {fp}"));
-                }
+                lines.push(format!("  {op_label} written to disc successfully."));
                 lines.push(String::new());
                 match app.current_op() {
                     Some(Operation::MigrateDisc) => {
