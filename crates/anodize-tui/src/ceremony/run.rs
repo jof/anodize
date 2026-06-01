@@ -379,12 +379,40 @@ impl CeremonyRun {
             .unwrap_or_else(|| Prompt::Aborted("ceremony failed to start".into()));
         let finished = matches!(prompt, Prompt::Done(_) | Prompt::Aborted(_));
 
+        // Lazily create interactive components from the initial prompt, matching
+        // the logic in on_tick. Without this, prompts that need a component
+        // (e.g. CustodianSetup for InitRoot) render blank.
+        let mut custodian_setup = None;
+        let mut share_reveal = None;
+        let mut share_input = share_input;
+        match &prompt {
+            Prompt::CustodianSetup { title } => {
+                custodian_setup = Some(CustodianSetup::new(title));
+            }
+            Prompt::RevealShares {
+                shares,
+                names,
+                generation,
+            } => {
+                share_reveal = Some(ShareReveal::new(shares.clone(), names, *generation));
+            }
+            Prompt::VerifyShares { sss } => {
+                let mut si = ShareInput::new(sss.clone(), 32);
+                si.verify_all = true;
+                share_input = Some(si);
+            }
+            Prompt::CollectShares { sss } if share_input.is_none() => {
+                share_input = Some(ShareInput::new(sss.clone(), 32));
+            }
+            _ => {}
+        }
+
         Self {
             handle,
             prompt,
             share_input,
-            custodian_setup: None,
-            share_reveal: None,
+            custodian_setup,
+            share_reveal,
             text_buf: String::new(),
             spinner: 0,
             finished,
