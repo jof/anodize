@@ -150,7 +150,8 @@ pub fn build_iso(sessions: &[SessionEntry], lba_offset: u32) -> Vec<u8> {
     // ── Compute layout ────────────────────────────────────────────────────────
     // Buffer-relative sector positions (where data sits in the image array).
     let root_dir_sec: u32 = 20;
-    let session_dir_sec_start: u32 = 21;
+    let root_dir_secs = sectors_for(root_dir_size(sessions)) as u32;
+    let session_dir_sec_start: u32 = root_dir_sec + root_dir_secs;
     let file_data_sec_start: u32 = session_dir_sec_start + n as u32;
 
     // On-disc LBA = buffer sector + lba_offset (stored in ISO metadata).
@@ -299,7 +300,8 @@ pub fn build_iso(sessions: &[SessionEntry], lba_offset: u32) -> Vec<u8> {
 
     // ── Root directory records (sector 20) ────────────────────────────────────
     {
-        let root = &mut image[root_dir_sec as usize * SECTOR..(root_dir_sec as usize + 1) * SECTOR];
+        let root = &mut image[root_dir_sec as usize * SECTOR
+            ..(root_dir_sec as usize + root_dir_secs as usize) * SECTOR];
         let root_data_len = root_dir_size(sessions) as u32;
         let mut off = 0;
 
@@ -458,12 +460,13 @@ pub fn parse_iso(image: &[u8], lba_offset: u32) -> Result<Vec<SessionEntry>> {
     let root_size = u32::from_le_bytes(pvd[166..170].try_into().unwrap()) as usize;
     let root_lba = root_lba_abs.wrapping_sub(lba_offset) as usize;
 
-    if (root_lba + 1) * SECTOR > image.len() {
+    let root_end = root_lba * SECTOR + root_size;
+    if root_end > image.len() {
         bail!("root directory LBA {root_lba_abs} (local {root_lba}) is outside image");
     }
 
     // ── Walk root directory ───────────────────────────────────────────────────
-    let root_data = &image[root_lba * SECTOR..root_lba * SECTOR + root_size.min(SECTOR)];
+    let root_data = &image[root_lba * SECTOR..root_end];
     let mut sessions = Vec::new();
     let mut pos = 0usize;
 
@@ -841,7 +844,7 @@ mod tests {
             1_000_000,
             &[("ROOT.CRT", b"cert"), ("AUDIT.LOG", b"log")],
         );
-        let img = build_iso(&[s], offset);
+        let img = build_iso(&[s.clone()], offset);
         let pvd = &img[16 * SECTOR..17 * SECTOR];
 
         // PVD root dir extent
@@ -868,7 +871,8 @@ mod tests {
         );
 
         // Root directory: session subdir LBA should also be absolute
-        let root_dir = &img[20 * SECTOR..21 * SECTOR];
+        let root_secs = sectors_for(root_dir_size(&[s.clone()])) as usize;
+        let root_dir = &img[20 * SECTOR..(20 + root_secs) * SECTOR];
         // Skip "." and ".." (34 bytes each), then read the first real entry
         let entry_start = 34 + 34; // dot + dotdot
         let subdir_lba = u32::from_le_bytes(
@@ -882,7 +886,8 @@ mod tests {
         );
 
         // Session subdir: file LBAs should be absolute
-        let subdir = &img[21 * SECTOR..22 * SECTOR];
+        let subdir_sec = 20 + root_secs;
+        let subdir = &img[subdir_sec * SECTOR..(subdir_sec + 1) * SECTOR];
         let file_entry_start = 34 + 34; // skip "." and ".."
         let file_lba = u32::from_le_bytes(
             subdir[file_entry_start + 2..file_entry_start + 6]
@@ -893,6 +898,39 @@ mod tests {
             file_lba >= offset,
             "file LBA {file_lba} should be >= offset {offset}"
         );
+    }
+
+    /// Regression: root directory with 31+ sessions used to overflow one sector.
+    #[test]
+    fn many_sessions_root_dir_multi_sector() {
+        let n = 35;
+        let sessions: Vec<SessionEntry> = (0..n)
+            .map(|i| {
+                make_session(
+                    &format!("20260501T{:02}{:02}00_000000000Z-record", i / 60, i % 60),
+                    1_000_000 + i as u64 * 1000,
+                    &[("AUDIT.LOG", b"log")],
+                )
+            })
+            .collect();
+
+        // Must not panic (previously panicked at iso9660.rs:337).
+        let img = build_iso(&sessions, 0);
+
+        // Roundtrip parse must recover all sessions.
+        let parsed = parse_iso(&img, 0).expect("parse many-session ISO");
+        assert_eq!(
+            parsed.len(),
+            n,
+            "expected {n} sessions, got {}",
+            parsed.len()
+        );
+
+        // With an LBA offset too.
+        let offset: u32 = 8000;
+        let img2 = build_iso(&sessions, offset);
+        let parsed2 = parse_iso(&img2, offset).expect("parse many-session ISO with offset");
+        assert_eq!(parsed2.len(), n);
     }
 
     #[test]
