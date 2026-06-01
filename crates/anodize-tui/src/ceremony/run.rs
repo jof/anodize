@@ -14,16 +14,26 @@ use std::time::SystemTime;
 use anodize_config::state::SessionState;
 use anodize_config::HsmBackendKind;
 
+use crate::components::custodian_setup::CustodianSetup;
 use crate::components::share_input::ShareInput;
+use crate::components::share_reveal::ShareReveal;
 use crate::media::SessionEntry;
 
 use super::adapters::{DiscArchive, HsmVault};
 use super::harness::{CeremonyHandle, ChannelOperator};
-use super::io::{CrlPlan, Env, RevokePlan, SignCsrPlan};
+use super::io::{
+    CrlPlan, Env, InitRootPlan, KeyBackupPlan, MigrateDiscPlan, RekeyPlan, RevokePlan, SignCsrPlan,
+    ValidateDiscPlan,
+};
 use super::prompt::Prompt;
+use super::scripts::init_root::init_root;
 use super::scripts::issue_crl::issue_crl;
+use super::scripts::key_backup::key_backup;
+use super::scripts::migrate_disc::migrate_disc;
+use super::scripts::rekey_shares::rekey_shares;
 use super::scripts::revoke_cert::revoke_cert;
 use super::scripts::sign_csr::sign_csr;
+use super::scripts::validate_disc::validate_disc;
 use super::ui;
 
 /// HSM login configuration, captured from profile + fleet state before spawn.
@@ -51,6 +61,8 @@ pub struct CeremonyRun {
     handle: CeremonyHandle,
     prompt: Prompt,
     share_input: Option<ShareInput>,
+    custodian_setup: Option<CustodianSetup>,
+    share_reveal: Option<ShareReveal>,
     text_buf: String,
     spinner: usize,
     finished: bool,
@@ -126,6 +138,41 @@ impl CeremonyRun {
         Self::from_handle(handle, share_input)
     }
 
+    /// Spawn the InitRoot ceremony (no pre-existing SSS or state).
+    pub fn spawn_init_root(
+        env: Env<InitRootPlan>,
+        vault: VaultConfig,
+        archive: ArchiveConfig,
+    ) -> Self {
+        let handle = CeremonyHandle::spawn(move |bridge| {
+            let mut op = ChannelOperator::new(&bridge);
+            let mut hsm = HsmVault::new(
+                vault.backend,
+                vault.token_label,
+                vault.key_label,
+                vault.fleet_ids,
+            );
+            let mut arc = DiscArchive::new(
+                &bridge,
+                archive.dev,
+                archive.prior_sessions,
+                archive.shuttle_mount,
+                archive.staging,
+                archive.profile_bytes,
+                archive.timestamp,
+                archive.sessions_remaining,
+                archive.base_state,
+            );
+            match init_root(&mut op, &mut hsm, &mut arc, &env) {
+                Ok(outcome) => Prompt::Done(outcome),
+                Err(abort) => Prompt::Aborted(abort.0),
+            }
+        });
+
+        // No pre-existing ShareInput — components created lazily from prompts.
+        Self::from_handle(handle, None)
+    }
+
     /// Spawn the SignCsr ceremony.
     pub fn spawn_sign_csr(
         env: Env<SignCsrPlan>,
@@ -162,6 +209,168 @@ impl CeremonyRun {
         Self::from_handle(handle, share_input)
     }
 
+    /// Spawn the RekeyShares ceremony.
+    pub fn spawn_rekey_shares(
+        env: Env<RekeyPlan>,
+        vault: VaultConfig,
+        archive: ArchiveConfig,
+    ) -> Self {
+        let share_input = Some(ShareInput::new(env.sss.clone(), 32));
+
+        let handle = CeremonyHandle::spawn(move |bridge| {
+            let mut op = ChannelOperator::new(&bridge);
+            let mut hsm = HsmVault::new(
+                vault.backend,
+                vault.token_label,
+                vault.key_label,
+                vault.fleet_ids,
+            );
+            let mut arc = DiscArchive::new(
+                &bridge,
+                archive.dev,
+                archive.prior_sessions,
+                archive.shuttle_mount,
+                archive.staging,
+                archive.profile_bytes,
+                archive.timestamp,
+                archive.sessions_remaining,
+                archive.base_state,
+            );
+            match rekey_shares(&env, &mut op, &mut hsm, &mut arc) {
+                Ok(outcome) => Prompt::Done(outcome),
+                Err(abort) => Prompt::Aborted(abort.0),
+            }
+        });
+
+        Self::from_handle(handle, share_input)
+    }
+
+    /// Spawn the KeyBackup ceremony.
+    pub fn spawn_key_backup(
+        env: Env<KeyBackupPlan>,
+        vault: VaultConfig,
+        archive: ArchiveConfig,
+    ) -> Self {
+        let share_input = Some(ShareInput::new(env.sss.clone(), 32));
+
+        let handle = CeremonyHandle::spawn(move |bridge| {
+            let mut op = ChannelOperator::new(&bridge);
+            let mut hsm = HsmVault::new(
+                vault.backend,
+                vault.token_label,
+                vault.key_label,
+                vault.fleet_ids,
+            );
+            let mut arc = DiscArchive::new(
+                &bridge,
+                archive.dev,
+                archive.prior_sessions,
+                archive.shuttle_mount,
+                archive.staging,
+                archive.profile_bytes,
+                archive.timestamp,
+                archive.sessions_remaining,
+                archive.base_state,
+            );
+            match key_backup(&mut op, &mut hsm, &mut arc, &env) {
+                Ok(outcome) => Prompt::Done(outcome),
+                Err(abort) => Prompt::Aborted(abort.0),
+            }
+        });
+
+        Self::from_handle(handle, share_input)
+    }
+
+    /// Spawn the RefreshDisc ceremony (dev-burn only). Writes a seed session.
+    #[cfg(feature = "dev-burn")]
+    pub fn spawn_refresh_disc(
+        env: Env<super::io::RefreshDiscPlan>,
+        archive: ArchiveConfig,
+    ) -> Self {
+        use super::scripts::refresh_disc::refresh_disc;
+        let handle = CeremonyHandle::spawn(move |bridge| {
+            let mut op = ChannelOperator::new(&bridge);
+            let mut arc = DiscArchive::new(
+                &bridge,
+                archive.dev,
+                archive.prior_sessions,
+                archive.shuttle_mount,
+                archive.staging,
+                archive.profile_bytes,
+                archive.timestamp,
+                archive.sessions_remaining,
+                archive.base_state,
+            );
+            match refresh_disc(&mut op, &mut arc, &env) {
+                Ok(outcome) => Prompt::Done(outcome),
+                Err(abort) => Prompt::Aborted(abort.0),
+            }
+        });
+
+        Self::from_handle(handle, None)
+    }
+
+    /// Spawn the MigrateDisc ceremony. No HSM interaction — pure disc copy.
+    pub fn spawn_migrate_disc(env: Env<MigrateDiscPlan>, archive: ArchiveConfig) -> Self {
+        let handle = CeremonyHandle::spawn(move |bridge| {
+            let mut op = ChannelOperator::new(&bridge);
+            let mut arc = DiscArchive::new(
+                &bridge,
+                archive.dev,
+                archive.prior_sessions,
+                archive.shuttle_mount,
+                archive.staging,
+                archive.profile_bytes,
+                archive.timestamp,
+                archive.sessions_remaining,
+                archive.base_state,
+            );
+            match migrate_disc(&mut op, &mut arc, &env) {
+                Ok(outcome) => Prompt::Done(outcome),
+                Err(abort) => Prompt::Aborted(abort.0),
+            }
+        });
+
+        Self::from_handle(handle, None)
+    }
+
+    /// Spawn the ValidateDisc ceremony (read-only audit check, optional HSM
+    /// cross-check with conditional quorum).
+    pub fn spawn_validate_disc(
+        env: Env<ValidateDiscPlan>,
+        vault: VaultConfig,
+        archive: ArchiveConfig,
+    ) -> Self {
+        // No pre-built ShareInput — quorum is conditional on the operator
+        // choosing the HSM cross-check path.
+        let handle = CeremonyHandle::spawn(move |bridge| {
+            let mut op = ChannelOperator::new(&bridge);
+            let mut hsm = HsmVault::new(
+                vault.backend,
+                vault.token_label,
+                vault.key_label,
+                vault.fleet_ids,
+            );
+            let mut arc = DiscArchive::new(
+                &bridge,
+                archive.dev,
+                archive.prior_sessions,
+                archive.shuttle_mount,
+                archive.staging,
+                archive.profile_bytes,
+                archive.timestamp,
+                archive.sessions_remaining,
+                archive.base_state,
+            );
+            match validate_disc(&mut op, &mut hsm, &mut arc, &env) {
+                Ok(outcome) => Prompt::Done(outcome),
+                Err(abort) => Prompt::Aborted(abort.0),
+            }
+        });
+
+        Self::from_handle(handle, None)
+    }
+
     /// Block briefly for the first prompt (the script emits it immediately) and
     /// assemble the run state.
     fn from_handle(handle: CeremonyHandle, share_input: Option<ShareInput>) -> Self {
@@ -174,6 +383,8 @@ impl CeremonyRun {
             handle,
             prompt,
             share_input,
+            custodian_setup: None,
+            share_reveal: None,
             text_buf: String::new(),
             spinner: 0,
             finished,
@@ -191,7 +402,10 @@ impl CeremonyRun {
     pub fn wants_text_input(&self) -> bool {
         matches!(
             self.prompt,
-            Prompt::CollectShares { .. } | Prompt::TextInput { .. }
+            Prompt::CollectShares { .. }
+                | Prompt::TextInput { .. }
+                | Prompt::CustodianSetup { .. }
+                | Prompt::VerifyShares { .. }
         )
     }
 
@@ -201,6 +415,28 @@ impl CeremonyRun {
         while let Some(p) = self.handle.poll() {
             if matches!(p, Prompt::Done(_) | Prompt::Aborted(_)) {
                 self.finished = true;
+            }
+            // Lazily create interactive components from prompt data.
+            match &p {
+                Prompt::CustodianSetup { title } => {
+                    self.custodian_setup = Some(CustodianSetup::new(title));
+                }
+                Prompt::RevealShares {
+                    shares,
+                    names,
+                    generation,
+                } => {
+                    self.share_reveal = Some(ShareReveal::new(shares.clone(), names, *generation));
+                }
+                Prompt::VerifyShares { sss } => {
+                    let mut si = ShareInput::new(sss.clone(), 32);
+                    si.verify_all = true;
+                    self.share_input = Some(si);
+                }
+                Prompt::CollectShares { sss } if self.share_input.is_none() => {
+                    self.share_input = Some(ShareInput::new(sss.clone(), 32));
+                }
+                _ => {}
             }
             self.prompt = p;
             self.text_buf.clear();
@@ -213,9 +449,14 @@ impl CeremonyRun {
         if self.finished {
             return false;
         }
-        if let Some(response) =
-            ui::key_to_response(&self.prompt, key, &mut self.share_input, &mut self.text_buf)
-        {
+        if let Some(response) = ui::key_to_response(
+            &self.prompt,
+            key,
+            &mut self.share_input,
+            &mut self.custodian_setup,
+            &mut self.share_reveal,
+            &mut self.text_buf,
+        ) {
             self.handle.answer(response);
             true
         } else {
@@ -230,6 +471,8 @@ impl CeremonyRun {
             area,
             &self.prompt,
             self.share_input.as_ref(),
+            self.custodian_setup.as_ref(),
+            self.share_reveal.as_ref(),
             &self.text_buf,
             self.spinner,
         );

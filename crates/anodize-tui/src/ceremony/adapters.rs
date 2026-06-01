@@ -19,8 +19,9 @@ use secrecy::SecretString;
 
 use super::harness::Bridge;
 use super::io::{
-    Abort, Archive, CrlPlan, IntentCommitted, IntentEvent, IntermediateReq, Pin, RecordCommitted,
-    RecordSession, Session, SignedCert, SignedCrl, Timestamp, Vault,
+    Abort, Archive, BackupResult, BackupTarget, CrlPlan, DeviceInfo, HsmAuditEntry, HsmAuditLog,
+    IntentCommitted, IntentEvent, IntermediateReq, MigrationFile, Pin, RecordCommitted,
+    RecordSession, RootCertParams, Session, SignedCert, SignedCrl, Timestamp, Vault,
 };
 use super::prompt::Prompt;
 use crate::media::{self, BurnProgress, IsoFile, SessionEntry};
@@ -54,6 +55,38 @@ impl HsmVault {
     }
 }
 
+impl HsmVault {
+    /// Roll back already-changed backup devices to the old PIN.
+    fn rollback_backup_pins(
+        backup: &dyn anodize_hsm::HsmBackup,
+        changed: &[String],
+        current_pin: &SecretString,
+        target_pin: &SecretString,
+    ) {
+        for id in changed {
+            if let Err(e) = backup.change_pin_on_device(id, current_pin, target_pin) {
+                tracing::error!(device = %id, "rollback backup PIN failed: {e}");
+            } else {
+                tracing::info!(device = %id, "rolled back backup PIN");
+            }
+        }
+    }
+
+    /// Roll back the primary HSM to the old PIN.
+    fn rollback_primary_pin(
+        actor: &mut anodize_hsm::HsmActor,
+        current: &SecretString,
+        target: &SecretString,
+    ) {
+        use anodize_hsm::Hsm as _;
+        if let Err(e) = actor.change_pin(current, target) {
+            tracing::error!("rollback primary PIN failed: {e}");
+        } else {
+            tracing::info!("rolled back primary PIN");
+        }
+    }
+}
+
 impl Vault for HsmVault {
     fn login<'a>(&'a mut self, pin: Pin) -> Result<Box<dyn Session + 'a>, Abort> {
         let pin: SecretString = pin;
@@ -78,7 +111,154 @@ impl Vault for HsmVault {
         Ok(Box::new(HsmSession {
             actor: HsmActor::spawn(hsm),
             key_label: self.key_label.clone(),
+            device: None,
         }))
+    }
+
+    fn bootstrap<'a>(&'a mut self, pin: Pin) -> Result<Box<dyn Session + 'a>, Abort> {
+        let pin: SecretString = pin;
+        let backend =
+            create_backend(self.backend).map_err(|e| Abort::new(format!("HSM backend: {e}")))?;
+
+        // Find an uninitialised (or first available) token slot.
+        let tokens = backend
+            .list_tokens()
+            .map_err(|e| Abort::new(format!("HSM enumerate failed: {e}")))?;
+        let target = tokens
+            .first()
+            .ok_or_else(|| Abort::new("No HSM token slots found. Insert an HSM device."))?;
+
+        let hsm = backend
+            .bootstrap(target.slot_id, &pin, &pin, &self.token_label)
+            .map_err(|e| Abort::new(format!("HSM bootstrap failed: {e}")))?;
+
+        let device_id = if target.serial_number.is_empty() {
+            self.token_label.clone()
+        } else {
+            target.serial_number.clone()
+        };
+        let model = if target.model.is_empty() {
+            format!("{:?}", self.backend)
+        } else {
+            target.model.clone()
+        };
+
+        Ok(Box::new(HsmSession {
+            actor: HsmActor::spawn(hsm),
+            key_label: self.key_label.clone(),
+            device: Some(DeviceInfo {
+                device_id,
+                model,
+                backend: self.backend,
+            }),
+        }))
+    }
+
+    fn change_pin_fleet(
+        &self,
+        old_pin: &Pin,
+        new_pin: &Pin,
+        primary_device_id: &str,
+    ) -> Result<Vec<String>, Abort> {
+        let backup_impl = anodize_hsm::create_backup(self.backend)
+            .map_err(|e| Abort::new(format!("Backup backend init: {e}")))?;
+
+        let mut changed: Vec<String> = Vec::new();
+        for device_id in &self.fleet_ids {
+            if device_id == primary_device_id {
+                continue;
+            }
+            tracing::info!(device = %device_id, "RekeyShares: changing PIN on fleet HSM");
+            match backup_impl.change_pin_on_device(device_id, old_pin, new_pin) {
+                Ok(()) => {
+                    changed.push(device_id.clone());
+                    tracing::info!(device = %device_id, "RekeyShares: fleet HSM PIN changed");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        device = %device_id,
+                        "RekeyShares: fleet PIN change failed: {e}, initiating rollback"
+                    );
+                    Self::rollback_backup_pins(&*backup_impl, &changed, new_pin, old_pin);
+                    // Note: primary rollback must be done by the caller who owns the session.
+                    return Err(Abort::new(format!(
+                        "PIN change failed on fleet device {device_id}: {e}. \
+                         All backup HSMs rolled back to old PIN. \
+                         Primary HSM still has the new PIN — caller must roll back."
+                    )));
+                }
+            }
+        }
+        if !changed.is_empty() {
+            tracing::info!(count = changed.len(), devices = ?changed, "fleet PIN propagation complete");
+        }
+        Ok(changed)
+    }
+
+    fn verify_pin_rejected(&self, old_pin: &Pin) -> Result<(), Abort> {
+        if self.fleet_ids.is_empty() {
+            return Ok(());
+        }
+        let backend = create_backend(self.backend)
+            .map_err(|e| Abort::new(format!("HSM backend for old-PIN check: {e}")))?;
+        for device_id in &self.fleet_ids {
+            match backend.open_session_by_id(device_id, old_pin) {
+                Ok(_) => {
+                    tracing::error!(device = %device_id, "old PIN still accepted!");
+                    return Err(Abort::new(format!(
+                        "CRITICAL: old PIN still accepted by fleet device {device_id}. \
+                         The PIN rotation may not have taken effect."
+                    )));
+                }
+                Err(_) => {
+                    tracing::info!(device = %device_id, "old PIN correctly rejected");
+                }
+            }
+        }
+        tracing::info!(
+            count = self.fleet_ids.len(),
+            "old PIN rejected on all fleet devices"
+        );
+        Ok(())
+    }
+
+    fn discover_backup_targets(&self, pin: &Pin) -> Result<Vec<BackupTarget>, Abort> {
+        let backup_impl = anodize_hsm::create_backup(self.backend)
+            .map_err(|e| Abort::new(format!("Backup backend init: {e}")))?;
+        let targets = backup_impl
+            .enumerate_backup_targets(Some(pin))
+            .map_err(|e| Abort::new(format!("Device enumeration failed: {e}")))?;
+        Ok(targets
+            .into_iter()
+            .map(|t| BackupTarget {
+                identifier: t.identifier,
+                description: t.description,
+                has_wrap_key: t.has_wrap_key,
+                has_signing_key: t.has_signing_key,
+                needs_bootstrap: t.needs_bootstrap,
+            })
+            .collect())
+    }
+
+    fn pair_devices(&self, src: &str, dst: &str, pin: &Pin) -> Result<String, Abort> {
+        let backup_impl = anodize_hsm::create_backup(self.backend)
+            .map_err(|e| Abort::new(format!("Backup backend init: {e}")))?;
+        backup_impl
+            .pair_devices(src, dst, pin)
+            .map_err(|e| Abort::new(format!("Pair devices failed: {e}")))
+    }
+
+    fn backup_key(&self, src: &str, dst: &str, pin: &Pin) -> Result<BackupResult, Abort> {
+        let backup_impl = anodize_hsm::create_backup(self.backend)
+            .map_err(|e| Abort::new(format!("Backup backend init: {e}")))?;
+        let result = backup_impl
+            .backup_key(src, dst, pin, "")
+            .map_err(|e| Abort::new(format!("Backup key failed: {e}")))?;
+        Ok(BackupResult {
+            source_id: result.source_id,
+            dest_id: result.dest_id,
+            public_keys_match: result.public_keys_match,
+        })
     }
 }
 
@@ -87,6 +267,7 @@ impl Vault for HsmVault {
 pub struct HsmSession {
     actor: HsmActor,
     key_label: String,
+    device: Option<DeviceInfo>,
 }
 
 impl Session for HsmSession {
@@ -187,6 +368,49 @@ impl Session for HsmSession {
         Ok(SignedCert::new(der))
     }
 
+    fn generate_root_key(&mut self) -> Result<(), Abort> {
+        use anodize_hsm::{Hsm as _, KeySpec};
+        self.actor
+            .generate_keypair(&self.key_label, KeySpec::EcdsaP384)
+            .map_err(|e| Abort::new(format!("Root key generation failed: {e}")))?;
+        Ok(())
+    }
+
+    fn build_root_cert(
+        &mut self,
+        params: &RootCertParams,
+        _when: Timestamp,
+    ) -> Result<SignedCert, Abort> {
+        use anodize_ca::{build_root_cert, P384HsmSigner};
+        use anodize_hsm::Hsm as _;
+        use der::Encode;
+
+        let root_key = self
+            .actor
+            .find_key(&self.key_label)
+            .map_err(|e| Abort::new(format!("Root key not found after keygen: {e}")))?;
+        let signer = P384HsmSigner::new(self.actor.clone(), root_key)
+            .map_err(|e| Abort::new(format!("Signer error: {e}")))?;
+
+        let cert = build_root_cert(
+            &signer,
+            &params.common_name,
+            &params.organization,
+            &params.country,
+            params.validity_days,
+        )
+        .map_err(|e| Abort::new(format!("Root cert build failed: {e}")))?;
+
+        let der = cert
+            .to_der()
+            .map_err(|e| Abort::new(format!("DER encode failed: {e}")))?;
+        Ok(SignedCert::new(der))
+    }
+
+    fn device_info(&self) -> Option<DeviceInfo> {
+        self.device.clone()
+    }
+
     fn record_audit_seq(&mut self) -> Option<u64> {
         use anodize_hsm::Hsm as _;
         match self.actor.get_audit_log() {
@@ -203,6 +427,46 @@ impl Session for HsmSession {
                 None
             }
         }
+    }
+
+    fn change_pin(&mut self, old_pin: &Pin, new_pin: &Pin) -> Result<(), Abort> {
+        use anodize_hsm::Hsm as _;
+        // Drain the audit log first — YubiHSM force-audit mode blocks all
+        // operations once the 62-entry ring buffer is full.
+        if let Ok(snapshot) = self.actor.get_audit_log() {
+            if let Some(last) = snapshot.entries.last() {
+                let _ = self.actor.drain_audit_log(last.item);
+            }
+        }
+        self.actor
+            .change_pin(old_pin, new_pin)
+            .map_err(|e| Abort::new(format!("HSM change_pin failed: {e}")))
+    }
+
+    fn get_hsm_audit_log(&mut self) -> Result<HsmAuditLog, Abort> {
+        use anodize_hsm::Hsm as _;
+        let snapshot = self
+            .actor
+            .get_audit_log()
+            .map_err(|e| Abort::new(format!("HSM audit log fetch failed: {e}")))?;
+        Ok(HsmAuditLog {
+            unlogged_boot_events: snapshot.unlogged_boot_events,
+            unlogged_auth_events: snapshot.unlogged_auth_events,
+            entries: snapshot
+                .entries
+                .iter()
+                .map(|e| HsmAuditEntry {
+                    item: e.item,
+                    command: e.command,
+                    session_key: e.session_key,
+                    target_key: e.target_key,
+                    second_key: e.second_key,
+                    result: e.result,
+                    tick: e.tick,
+                    digest: e.digest,
+                })
+                .collect(),
+        })
     }
 }
 
@@ -350,22 +614,43 @@ fn assemble_record_session(
 
     // Fold the requested STATE.JSON update onto the base state, anchoring it to
     // the just-written audit-chain head.
-    if let (Some(delta), Some(base)) = (record.state.as_ref(), base_state) {
-        let mut state = base.clone();
-        state.last_audit_hash = last_entry_hash(&log_bytes);
-        if let Some(n) = delta.crl_number {
-            state.crl_number = n;
+    if let Some(delta) = record.state.as_ref() {
+        // Fresh state (InitRoot) takes precedence over delta-on-base.
+        let state = if let Some(fresh) = &delta.fresh_state {
+            let mut s = fresh.clone();
+            s.last_audit_hash = last_entry_hash(&log_bytes);
+            if let Some(seq) = delta.hsm_log_seq {
+                s.last_hsm_log_seq = Some(seq);
+            }
+            Some(s)
+        } else {
+            base_state.map(|base| {
+                let mut s = base.clone();
+                s.last_audit_hash = last_entry_hash(&log_bytes);
+                if let Some(n) = delta.crl_number {
+                    s.crl_number = n;
+                }
+                if !delta.revocation_list.is_empty() {
+                    s.revocation_list = delta.revocation_list.clone();
+                }
+                if let Some(seq) = delta.hsm_log_seq {
+                    s.last_hsm_log_seq = Some(seq);
+                }
+                if let Some(ref sss) = delta.sss {
+                    s.sss = sss.clone();
+                }
+                if let Some(ref fleet) = delta.fleet {
+                    s.fleet = fleet.clone();
+                }
+                s
+            })
+        };
+        if let Some(s) = state {
+            files.push(IsoFile {
+                name: STATE_FILENAME.into(),
+                data: s.to_json(),
+            });
         }
-        if !delta.revocation_list.is_empty() {
-            state.revocation_list = delta.revocation_list.clone();
-        }
-        if let Some(seq) = delta.hsm_log_seq {
-            state.last_hsm_log_seq = Some(seq);
-        }
-        files.push(IsoFile {
-            name: STATE_FILENAME.into(),
-            data: state.to_json(),
-        });
     }
 
     Ok(SessionEntry {
@@ -432,6 +717,32 @@ impl Archive for DiscArchive<'_> {
             .map_err(|e| Abort::new(format!("Audit log read failed: {e}")))?;
         media::write_and_sync(&self.shuttle_mount.join("audit.log"), &log_bytes)
             .map_err(|e| Abort::new(format!("Audit log copy to shuttle failed: {e:#}")))?;
+        Ok(())
+    }
+
+    fn write_shuttle_direct(&mut self, files: &[(&str, &[u8])]) -> Result<(), Abort> {
+        media::verify_shuttle_mount(&self.shuttle_mount)
+            .map_err(|e| Abort::new(format!("Shuttle USB not available: {e:#}")))?;
+        for (name, bytes) in files {
+            media::write_and_sync(&self.shuttle_mount.join(name), bytes)
+                .map_err(|e| Abort::new(format!("Shuttle write {name} failed: {e:#}")))?;
+        }
+        Ok(())
+    }
+
+    fn write_migration(&mut self, files: &[MigrationFile]) -> Result<(), Abort> {
+        let session = SessionEntry {
+            dir_name: media::session_dir_name(self.timestamp) + "-migrate",
+            timestamp: self.timestamp,
+            files: files
+                .iter()
+                .map(|f| IsoFile {
+                    name: f.name.clone(),
+                    data: f.data.clone(),
+                })
+                .collect(),
+        };
+        self.burn(session)?;
         Ok(())
     }
 }
@@ -572,6 +883,9 @@ mod tests {
                     crl_number: Some(5),
                     revocation_list: vec![],
                     hsm_log_seq: Some(42),
+                    fresh_state: None,
+                    sss: None,
+                    fleet: None,
                 }),
             },
         )

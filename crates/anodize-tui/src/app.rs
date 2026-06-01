@@ -24,7 +24,6 @@ use crate::modes::ceremony::CeremonyMode;
 use crate::modes::ceremony::CeremonyPhase;
 use crate::modes::setup::{SetupMode, SetupPhase};
 use crate::modes::utilities::UtilitiesMode;
-use crate::ops::{ActiveOperation, OpContext};
 
 /// Maximum elapsed time since the last clock confirmation before a
 /// re-confirm is required.  On a live-boot, air-gapped system the clock
@@ -63,19 +62,8 @@ pub struct App {
     pub profile: Option<Profile>,
     pub profile_toml_bytes: Option<Vec<u8>>,
 
-    // Per-operation context — owns all op-specific state and phase.
-    pub active_op: Option<ActiveOperation>,
-
-    // Temporary PIN buffer — used internally by SSS operations, never displayed
-    pub pin_buf: String,
-
     // Two-key confirmation dialog (modal overlay)
     pub confirm_dialog: Option<ConfirmDialog>,
-
-    // When true, the current ClockReconfirm is gating a disc burn (not a
-    // signing operation).  After re-confirm, proceed directly to
-    // do_start_burn() instead of dispatching crypto.
-    pub pending_burn_reconfirm: bool,
 
     // Content area vertical scroll offset
     pub content_scroll: u16,
@@ -108,18 +96,62 @@ impl App {
             confirmed_time: None,
             profile: None,
             profile_toml_bytes: None,
-            active_op: None,
-            pin_buf: String::new(),
             confirm_dialog: None,
-            pending_burn_reconfirm: false,
             content_scroll: 0,
             ceremony_run: None,
         }
     }
 
-    /// Derive which `Operation` is active from `active_op`.
+    /// Derive which `Operation` is active.
+    ///
+    /// In the new script-engine world, the operation is not tracked here;
+    /// this always returns `None`. Callers that need the operation name should
+    /// check `ceremony_run`.
     pub fn current_op(&self) -> Option<Operation> {
-        self.active_op.as_ref().map(|op| op.operation())
+        None
+    }
+
+    /// Start the InitRoot ceremony on the new script engine. No existing
+    /// STATE.JSON is required — this is the genesis operation.
+    pub fn start_init_root(&mut self) {
+        use crate::ceremony::io::{Env, InitRootPlan, RootCertParams};
+        use crate::ceremony::run::{CeremonyRun, VaultConfig};
+        use anodize_config::state::SssMetadata;
+
+        let Some(profile) = self.profile.as_ref() else {
+            self.set_status("No profile loaded.");
+            return;
+        };
+
+        let env = Env {
+            sss: SssMetadata {
+                generation: 0,
+                threshold: 0,
+                total: 0,
+                custodians: Vec::new(),
+                pin_verify_hash: String::new(),
+                share_commitments: Vec::new(),
+            },
+            plan: InitRootPlan {
+                ca: RootCertParams {
+                    common_name: profile.ca.common_name.clone(),
+                    organization: profile.ca.organization.clone(),
+                    country: profile.ca.country.clone(),
+                    validity_days: 7305,
+                },
+            },
+        };
+        let vault = VaultConfig {
+            backend: profile.hsm.backend,
+            token_label: profile.hsm.token_label.clone(),
+            key_label: profile.hsm.key_label.clone(),
+            fleet_ids: Vec::new(), // no existing fleet
+        };
+        let archive = self.archive_config();
+
+        self.ceremony_run = Some(CeremonyRun::spawn_init_root(env, vault, archive));
+        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.set_status("InitRoot ceremony started (script engine).");
     }
 
     /// Start the IssueCrl ceremony on the new script engine. Builds the
@@ -333,6 +365,341 @@ impl App {
         self.set_status("SignCsr ceremony started (script engine).");
     }
 
+    /// Start the RekeyShares ceremony on the new script engine.
+    pub fn start_rekey_shares(&mut self) {
+        use crate::ceremony::io::{Env, RekeyPlan};
+        use crate::ceremony::run::{CeremonyRun, VaultConfig};
+
+        let Some(profile) = self.profile.as_ref() else {
+            self.set_status("No profile loaded.");
+            return;
+        };
+        let Some(state) = self.disc.session_state.as_ref() else {
+            self.set_status("No STATE.JSON on disc \u{2014} run InitRoot first.");
+            return;
+        };
+
+        let env = Env {
+            sss: state.sss.clone(),
+            plan: RekeyPlan,
+        };
+        let vault = VaultConfig {
+            backend: profile.hsm.backend,
+            token_label: profile.hsm.token_label.clone(),
+            key_label: profile.hsm.key_label.clone(),
+            fleet_ids: state
+                .fleet
+                .active_device_ids()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        };
+        let archive = self.archive_config();
+
+        self.ceremony_run = Some(CeremonyRun::spawn_rekey_shares(env, vault, archive));
+        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.set_status("RekeyShares ceremony started (script engine).");
+    }
+
+    /// Start the KeyBackup ceremony on the new script engine.
+    pub fn start_key_backup(&mut self) {
+        use crate::ceremony::io::{Env, KeyBackupPlan};
+        use crate::ceremony::run::{CeremonyRun, VaultConfig};
+
+        let Some(profile) = self.profile.as_ref() else {
+            self.set_status("No profile loaded.");
+            return;
+        };
+        let Some(state) = self.disc.session_state.as_ref() else {
+            self.set_status("No STATE.JSON \u{2014} run InitRoot first.");
+            return;
+        };
+
+        let env = Env {
+            sss: state.sss.clone(),
+            plan: KeyBackupPlan {
+                backend: profile.hsm.backend,
+                base_fleet: state.fleet.clone(),
+            },
+        };
+        let vault = VaultConfig {
+            backend: profile.hsm.backend,
+            token_label: profile.hsm.token_label.clone(),
+            key_label: profile.hsm.key_label.clone(),
+            fleet_ids: state
+                .fleet
+                .active_device_ids()
+                .into_iter()
+                .map(String::from)
+                .collect(),
+        };
+        let archive = self.archive_config();
+
+        self.ceremony_run = Some(CeremonyRun::spawn_key_backup(env, vault, archive));
+        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.set_status("KeyBackup ceremony started (script engine).");
+    }
+
+    /// Start the RefreshDisc ceremony on the new script engine (dev-burn only).
+    #[cfg(feature = "dev-burn")]
+    pub fn start_refresh_disc(&mut self) {
+        use crate::ceremony::io::{Env, RefreshDiscPlan};
+        use crate::ceremony::run::CeremonyRun;
+        use anodize_config::state::SssMetadata;
+
+        let dir_name = crate::media::session_dir_name(std::time::SystemTime::now());
+
+        let sss = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.clone())
+            .unwrap_or_else(|| SssMetadata {
+                generation: 0,
+                threshold: 0,
+                total: 0,
+                custodians: Vec::new(),
+                pin_verify_hash: String::new(),
+                share_commitments: Vec::new(),
+            });
+
+        let env = Env {
+            sss,
+            plan: RefreshDiscPlan { dir_name },
+        };
+        let archive = self.archive_config();
+
+        self.ceremony_run = Some(CeremonyRun::spawn_refresh_disc(env, archive));
+        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.set_status("RefreshDisc ceremony started (script engine).");
+    }
+
+    /// Start the MigrateDisc ceremony on the new script engine.
+    pub fn start_migrate_disc(&mut self) {
+        use crate::ceremony::io::{Env, MigrateDiscPlan, MigrationFile};
+        use crate::ceremony::run::CeremonyRun;
+        use crate::helpers::verify_audit_chain;
+        use anodize_config::state::SssMetadata;
+
+        let sessions = &self.disc.prior_sessions;
+        if sessions.is_empty() {
+            self.set_status("No sessions on disc to migrate.");
+            return;
+        }
+
+        let chain_ok = verify_audit_chain(sessions);
+        let session_count = sessions.len();
+        let total_bytes: u64 = sessions
+            .last()
+            .map(|s| s.files.iter().map(|f| f.data.len() as u64).sum())
+            .unwrap_or(0);
+        let source_fingerprint = sessions
+            .last()
+            .and_then(|s| s.files.iter().find(|f| f.name == "AUDIT.LOG"))
+            .and_then(|f| {
+                f.data
+                    .split(|&b| b == b'\n')
+                    .rev()
+                    .find(|line| !line.is_empty())
+                    .and_then(|line| serde_json::from_slice::<serde_json::Value>(line).ok())
+                    .and_then(|v| v.get("entry_hash")?.as_str().map(String::from))
+            });
+        let files: Vec<MigrationFile> = sessions
+            .last()
+            .map(|s| {
+                s.files
+                    .iter()
+                    .map(|f| MigrationFile {
+                        name: f.name.clone(),
+                        data: f.data.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let sss = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.clone())
+            .unwrap_or_else(|| SssMetadata {
+                generation: 0,
+                threshold: 0,
+                total: 0,
+                custodians: Vec::new(),
+                pin_verify_hash: String::new(),
+                share_commitments: Vec::new(),
+            });
+
+        let env = Env {
+            sss,
+            plan: MigrateDiscPlan {
+                session_count,
+                chain_ok,
+                source_fingerprint,
+                total_bytes,
+                files,
+            },
+        };
+        let archive = self.archive_config();
+
+        self.ceremony_run = Some(CeremonyRun::spawn_migrate_disc(env, archive));
+        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.set_status("MigrateDisc ceremony started (script engine).");
+    }
+
+    /// Start the ValidateDisc ceremony on the new script engine.
+    pub fn start_validate_disc(&mut self) {
+        use std::collections::BTreeMap;
+
+        use anodize_audit::validate::{
+            format_report, validate_disc_status, validate_session_continuity, DiscStatus, Finding,
+            SessionSnapshot, Severity, StateFields,
+        };
+        use sha2::{Digest, Sha256};
+
+        use crate::ceremony::io::{Env, ValidateDiscPlan};
+        use crate::ceremony::run::{CeremonyRun, VaultConfig};
+
+        let Some(profile) = self.profile.as_ref() else {
+            self.set_status("No profile loaded.");
+            return;
+        };
+
+        // Build session snapshots from prior sessions.
+        let mut snapshots: Vec<SessionSnapshot> = Vec::new();
+        for (i, sess) in self.disc.prior_sessions.iter().enumerate() {
+            let file_hashes: BTreeMap<String, String> = sess
+                .files
+                .iter()
+                .map(|f| {
+                    let hash = format!("{:x}", Sha256::digest(&f.data));
+                    (f.name.clone(), hash)
+                })
+                .collect();
+            let has_migration = file_hashes
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case("MIGRATION.JSON"));
+            let state = if let Some(ref s) = self.disc.session_state {
+                StateFields {
+                    root_cert_sha256: s.root_cert_sha256.clone(),
+                    crl_number: s.crl_number,
+                    last_audit_hash: s.last_audit_hash.clone(),
+                    last_hsm_log_seq: s.last_hsm_log_seq,
+                    is_migration: has_migration,
+                    custodian_names: s.sss.custodians.iter().map(|c| c.name.clone()).collect(),
+                }
+            } else {
+                StateFields {
+                    root_cert_sha256: String::new(),
+                    crl_number: 0,
+                    last_audit_hash: String::new(),
+                    last_hsm_log_seq: None,
+                    is_migration: has_migration,
+                    custodian_names: vec![],
+                }
+            };
+            snapshots.push(SessionSnapshot {
+                index: i,
+                file_hashes,
+                audit_records: Vec::new(),
+                state,
+            });
+        }
+
+        // Run disc-level checks.
+        let mut findings: Vec<Finding> = Vec::new();
+        let disc_status = if self.disc.optical_dev.is_some() {
+            DiscStatus::Incomplete
+        } else {
+            DiscStatus::Blank
+        };
+        findings.extend(validate_disc_status(disc_status));
+        findings.extend(validate_session_continuity(&snapshots));
+
+        // Audit chain check.
+        let staging_log = std::path::PathBuf::from("/run/anodize/staging/audit.log");
+        if staging_log.exists() {
+            match anodize_audit::verify_log(&staging_log) {
+                Ok(_count) => {
+                    findings.push(Finding {
+                        severity: Severity::Pass,
+                        check: "audit_chain".into(),
+                        message: "Audit log hash chain verified".into(),
+                    });
+                }
+                Err(e) => {
+                    findings.push(Finding {
+                        severity: Severity::Error,
+                        check: "audit_chain".into(),
+                        message: format!("Audit log hash chain FAILED: {e}"),
+                    });
+                }
+            }
+        } else {
+            findings.push(Finding {
+                severity: Severity::Warn,
+                check: "audit_chain".into(),
+                message: "No staging audit log found".into(),
+            });
+        }
+
+        let initial_report = format_report(&findings);
+        let has_hsm = self.hw.actor.is_some();
+        let staging_audit_bytes = std::fs::read(&staging_log).ok();
+        let last_hsm_log_seq = self
+            .disc
+            .session_state
+            .as_ref()
+            .and_then(|s| s.last_hsm_log_seq);
+
+        let sss = self
+            .disc
+            .session_state
+            .as_ref()
+            .map(|s| s.sss.clone())
+            .unwrap_or_else(|| anodize_config::state::SssMetadata {
+                generation: 0,
+                threshold: 0,
+                total: 0,
+                custodians: vec![],
+                pin_verify_hash: String::new(),
+                share_commitments: vec![],
+            });
+
+        let env = Env {
+            sss,
+            plan: ValidateDiscPlan {
+                initial_report,
+                has_hsm,
+                staging_audit_bytes,
+                last_hsm_log_seq,
+            },
+        };
+        let vault = VaultConfig {
+            backend: profile.hsm.backend,
+            token_label: profile.hsm.token_label.clone(),
+            key_label: profile.hsm.key_label.clone(),
+            fleet_ids: self
+                .disc
+                .session_state
+                .as_ref()
+                .map(|s| {
+                    s.fleet
+                        .active_device_ids()
+                        .into_iter()
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        let archive = self.archive_config();
+
+        self.ceremony_run = Some(CeremonyRun::spawn_validate_disc(env, vault, archive));
+        self.ceremony.state = CeremonyPhase::ActiveOp;
+        self.set_status("ValidateDisc ceremony started (script engine).");
+    }
+
     /// Build the disc/shuttle archive configuration from live disc state.
     fn archive_config(&self) -> crate::ceremony::run::ArchiveConfig {
         crate::ceremony::run::ArchiveConfig {
@@ -365,24 +732,6 @@ impl App {
         self.content_scroll = 0;
     }
 
-    /// Construct an `OpEnv` borrow-split view for `OpContext` methods.
-    ///
-    /// Caller must ensure `self.active_op` is not simultaneously borrowed mutably.
-    pub fn make_shared(&mut self) -> crate::ops::OpEnv<'_> {
-        crate::ops::OpEnv {
-            hw: &mut self.hw,
-            disc: &mut self.disc,
-            profile: self.profile.as_ref(),
-            shuttle_mount: &self.shuttle_mount,
-
-            confirmed_time: &mut self.confirmed_time,
-            pin_buf: &mut self.pin_buf,
-            status: &mut self.status,
-            log_lines: &mut self.log_lines,
-            content_scroll: &mut self.content_scroll,
-        }
-    }
-
     /// Returns `true` if the operator's clock confirmation is recent enough
     /// for a disc-write operation (within [`CLOCK_DRIFT_THRESHOLD`]).
     pub fn clock_is_fresh(&self) -> bool {
@@ -410,10 +759,6 @@ impl App {
                     // A live script ceremony holds ephemeral state (PIN, HSM
                     // session) until it reaches a terminal prompt.
                     !run.is_finished()
-                } else if self.ceremony.state == CeremonyPhase::ActiveOp {
-                    self.active_op
-                        .as_ref()
-                        .is_some_and(|op| op.holds_ephemeral_state())
                 } else {
                     self.ceremony.holds_ephemeral_state()
                 }
@@ -437,8 +782,6 @@ impl App {
         let in_text_entry = self.mode == Mode::Ceremony
             && if let Some(run) = self.ceremony_run.as_ref() {
                 run.wants_text_input()
-            } else if self.ceremony.state == CeremonyPhase::ActiveOp {
-                self.active_op.as_ref().is_some_and(|op| op.in_text_entry())
             } else {
                 self.ceremony.in_text_entry()
             };
@@ -683,66 +1026,6 @@ impl App {
                     return Action::Noop;
                 }
 
-                // ActiveOp: delegate key handling to the per-operation context.
-                if self.ceremony.state == CeremonyPhase::ActiveOp {
-                    if let Some(mut op) = self.active_op.take() {
-                        let mut shared = self.make_shared();
-                        let result = op.handle_key(key, &mut shared);
-                        self.active_op = Some(op);
-                        match result {
-                            crate::ops::OpAction::Noop => return Action::Noop,
-                            crate::ops::OpAction::Done => {
-                                self.active_op = None;
-                                self.ceremony.state = CeremonyPhase::Done;
-                                return Action::Noop;
-                            }
-                            crate::ops::OpAction::Abort => {
-                                if self
-                                    .active_op
-                                    .as_ref()
-                                    .is_some_and(|op| op.needs_abort_confirmation())
-                                {
-                                    self.show_abort_confirm(Action::CeremonyCancel);
-                                } else {
-                                    self.active_op = None;
-                                    self.ceremony.state = CeremonyPhase::OperationSelect;
-                                }
-                                return Action::Noop;
-                            }
-                            crate::ops::OpAction::SetStatus(msg) => {
-                                return Action::SetStatus(msg);
-                            }
-                            crate::ops::OpAction::StartRecordBurn => {
-                                self.do_start_burn();
-                                return Action::Noop;
-                            }
-                            crate::ops::OpAction::WriteIntent => {
-                                self.do_write_intent();
-                                return Action::Noop;
-                            }
-                            crate::ops::OpAction::ExecuteOp => {
-                                self.do_dispatch_after_clock_reconfirm();
-                                return Action::Noop;
-                            }
-                            crate::ops::OpAction::ShowConfirm {
-                                title,
-                                body,
-                                on_confirm,
-                            } => {
-                                use crate::ops::ConfirmTarget;
-                                let action = match on_confirm {
-                                    ConfirmTarget::WriteIntent => Action::DoWriteIntent,
-                                    ConfirmTarget::StartRecordBurn => Action::DoStartBurn,
-                                    ConfirmTarget::Abort => Action::CeremonyCancel,
-                                };
-                                self.show_confirm(title, body, action);
-                                return Action::Noop;
-                            }
-                        }
-                    }
-                    return Action::Noop;
-                }
-
                 let action = self.ceremony.handle_key_event(key);
                 // Gate full-ceremony-abort actions behind a confirmation
                 // dialog when the current phase warrants it.
@@ -793,28 +1076,6 @@ impl App {
         // Disc scan during WaitDisc
         if self.mode == Mode::Setup && self.setup.phase == SetupPhase::WaitDisc {
             self.tick_wait_disc(false);
-        }
-
-        // Disc scan when active op requests it (e.g. MigrateDisc WaitTarget)
-        if self
-            .active_op
-            .as_ref()
-            .is_some_and(|op| op.wants_disc_scan())
-        {
-            self.tick_wait_disc(true);
-        }
-
-        // Intent burn completion
-        if self.ceremony.is_writing_intent() {
-            tracing::debug!(
-                "background_tick: ceremony is_writing_intent, calling tick_intent_burn"
-            );
-            self.tick_intent_burn();
-        }
-
-        // Record burn completion
-        if self.ceremony.is_burning_disc() {
-            self.tick_record_burn();
         }
 
         // Disc sync burn polling
@@ -877,42 +1138,25 @@ impl App {
 
             // Ceremony operations
             Action::SelectOperation(op) => match op {
+                Operation::InitRoot => self.start_init_root(),
                 Operation::IssueCrl => self.start_issue_crl(),
                 Operation::RevokeCert => self.start_revoke_cert(),
                 Operation::SignCsr => self.start_sign_csr(),
-                _ => self.do_select_operation(op),
+                Operation::RekeyShares => self.start_rekey_shares(),
+                Operation::KeyBackup => self.start_key_backup(),
+                Operation::MigrateDisc => self.start_migrate_disc(),
+                Operation::ValidateDisc => self.start_validate_disc(),
+                #[cfg(feature = "dev-burn")]
+                Operation::RefreshDisc => self.start_refresh_disc(),
             },
             // Clock re-confirm: operator attests clock is correct at signing time
             Action::ReconfirmClock => {
                 self.confirmed_time = Some(SystemTime::now());
-                if self.pending_burn_reconfirm {
-                    // Returning from a stale-clock redirect — proceed
-                    // directly to disc burn (no extra confirmation dialog).
-                    self.pending_burn_reconfirm = false;
-                    self.do_start_burn();
-                } else {
-                    self.do_dispatch_after_clock_reconfirm();
-                }
             }
 
-            // Disc/Shuttle
-            Action::DoWriteIntent => {
-                self.do_write_intent();
-            }
-            Action::DoStartBurn => {
-                if self.clock_is_fresh() {
-                    self.do_start_burn();
-                } else {
-                    self.pending_burn_reconfirm = true;
-                    self.ceremony.state = CeremonyPhase::ClockReconfirm;
-                    self.set_status(
-                        "Clock confirmation expired — please re-confirm before disc write.",
-                    );
-                }
-            }
-            Action::DoWriteShuttle => {
-                self.do_write_shuttle();
-            }
+            // Legacy action variants — no longer reachable but kept for
+            // exhaustive match until the Action enum is trimmed.
+            Action::DoWriteIntent | Action::DoStartBurn | Action::DoWriteShuttle => {}
 
             // Utilities sub-screens
             Action::UtilScreen(idx) => {
@@ -958,8 +1202,6 @@ impl App {
             }
 
             Action::CeremonyCancel => {
-                self.active_op = None;
-                self.pending_burn_reconfirm = false;
                 self.ceremony.state = CeremonyPhase::OperationSelect;
                 self.set_status("Cancelled.");
             }
@@ -1044,11 +1286,7 @@ impl App {
         let phase_steps = match self.mode {
             Mode::Setup => modes::setup_phases(self.setup.phase.index()),
             Mode::Ceremony => {
-                let idx = if self.ceremony.state == CeremonyPhase::ActiveOp {
-                    self.active_op.as_ref().map_or(1, |op| op.phase_index())
-                } else {
-                    self.ceremony.phase_index()
-                };
+                let idx = self.ceremony.phase_index();
                 modes::ceremony_phases(idx)
             }
             Mode::Utilities => modes::utility_phases(&self.utilities.screen),
@@ -1114,11 +1352,7 @@ impl App {
                 ]
             }
             ActiveOp => {
-                use crate::ops::OpContext;
-                self.active_op
-                    .as_ref()
-                    .map(|op| op.abort_confirm_body())
-                    .unwrap_or_else(|| vec!["All ceremony progress will be lost.".into()])
+                vec!["All ceremony progress will be lost.".into()]
             }
             _ => vec!["All ceremony progress will be lost.".into()],
         }

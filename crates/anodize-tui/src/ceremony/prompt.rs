@@ -33,6 +33,20 @@ pub enum Prompt {
     /// A long-running disc burn is in progress. No input expected; the renderer
     /// shows a spinner and the accumulated burn log.
     Burning { what: String, log: Vec<String> },
+    /// Interactive custodian-setup widget; expects [`Response::Custodians`].
+    CustodianSetup { title: String },
+    /// One-at-a-time share reveal; expects [`Response::Ack`] when all done.
+    RevealShares {
+        shares: Vec<anodize_sss::Share>,
+        names: Vec<String>,
+        generation: u64,
+    },
+    /// Verify all shares (each custodian re-enters); expects [`Response::Ack`].
+    VerifyShares { sss: SssMetadata },
+    /// Wait for operator to eject the source disc and insert a blank target.
+    /// Expects [`Response::Ack`] (once the TUI detects a blank disc and the
+    /// operator confirms) or `Abort`.
+    WaitDiscSwap { session_count: usize },
     /// Informational status line. No input expected.
     Note(String),
     /// Terminal: the ceremony finished successfully.
@@ -54,6 +68,8 @@ pub enum Response {
     Text(String),
     /// Acknowledged (clock correct, etc.).
     Ack,
+    /// Custodian names and threshold from setup.
+    Custodians { names: Vec<String>, threshold: u8 },
     /// Aborted / quit.
     Abort,
 }

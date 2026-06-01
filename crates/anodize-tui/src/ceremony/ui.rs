@@ -11,7 +11,9 @@ use ratatui::{
     Frame,
 };
 
+use crate::components::custodian_setup::CustodianSetup;
 use crate::components::share_input::ShareInput;
+use crate::components::share_reveal::ShareReveal;
 
 use super::prompt::{Prompt, Response};
 
@@ -25,6 +27,8 @@ pub fn key_to_response(
     prompt: &Prompt,
     key: KeyEvent,
     share_input: &mut Option<ShareInput>,
+    custodian_setup: &mut Option<CustodianSetup>,
+    share_reveal: &mut Option<ShareReveal>,
     text_buf: &mut String,
 ) -> Option<Response> {
     match prompt {
@@ -78,6 +82,52 @@ pub fn key_to_response(
             }
             _ => None,
         },
+        Prompt::CustodianSetup { .. } => {
+            if key.code == KeyCode::Esc {
+                return Some(Response::Abort);
+            }
+            let cs = custodian_setup.as_mut()?;
+            cs.handle_key(key);
+            if cs.confirmed {
+                Some(Response::Custodians {
+                    names: cs.names.clone(),
+                    threshold: cs.threshold,
+                })
+            } else if cs.aborted {
+                Some(Response::Abort)
+            } else {
+                None
+            }
+        }
+        Prompt::RevealShares { .. } => {
+            if key.code == KeyCode::Esc {
+                return Some(Response::Abort);
+            }
+            let sr = share_reveal.as_mut()?;
+            if sr.handle_key(key) {
+                // handle_key returns true once the "all revealed" screen gets Enter
+                Some(Response::Ack)
+            } else {
+                None
+            }
+        }
+        Prompt::VerifyShares { .. } => {
+            if key.code == KeyCode::Esc {
+                return Some(Response::Abort);
+            }
+            let si = share_input.as_mut()?;
+            si.handle_key(key);
+            if si.is_complete() {
+                Some(Response::Ack)
+            } else {
+                None
+            }
+        }
+        Prompt::WaitDiscSwap { .. } => match key.code {
+            KeyCode::Char('1') | KeyCode::Enter => Some(Response::Ack),
+            KeyCode::Esc => Some(Response::Abort),
+            _ => None,
+        },
         // No operator input expected; the burn is not interruptible mid-write.
         Prompt::Note(_) | Prompt::Burning { .. } => None,
         // Terminal screens: any key returns to the menu (handled by the App).
@@ -92,6 +142,8 @@ pub fn render_prompt(
     area: Rect,
     prompt: &Prompt,
     share_input: Option<&ShareInput>,
+    custodian_setup: Option<&CustodianSetup>,
+    share_reveal: Option<&ShareReveal>,
     text_buf: &str,
     spinner: usize,
 ) {
@@ -191,6 +243,47 @@ pub fn render_prompt(
                 crate::theme::MODAL_BORDER_YELLOW,
             );
         }
+        Prompt::CustodianSetup { .. } => {
+            if let Some(cs) = custodian_setup {
+                cs.render(frame, area);
+            }
+        }
+        Prompt::RevealShares { .. } => {
+            if let Some(sr) = share_reveal {
+                sr.render(frame, area);
+            }
+        }
+        Prompt::VerifyShares { .. } => {
+            if let Some(si) = share_input {
+                si.render(frame, area);
+            }
+        }
+        Prompt::WaitDiscSwap { session_count } => {
+            let lines = vec![
+                Line::from(""),
+                Line::from(format!(
+                    "  Ready to copy {session_count} session(s) to new disc."
+                )),
+                Line::from(""),
+                Line::from(Span::styled(
+                    "  1. Eject the source disc.",
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::from(Span::styled(
+                    "  2. Insert a blank write-once disc.",
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::from(""),
+                hint("[1] Target disc ready \u{2014} proceed    [Esc] Abort"),
+            ];
+            boxed(
+                frame,
+                area,
+                "Disc Migration \u{2014} Swap Disc",
+                lines,
+                crate::theme::MODAL_BORDER_YELLOW,
+            );
+        }
         Prompt::Note(msg) => {
             boxed(
                 frame,
@@ -284,7 +377,7 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_prompt(f, f.area(), prompt, None, "", 0))
+            .draw(|f| render_prompt(f, f.area(), prompt, None, None, None, "", 0))
             .unwrap();
     }
 
@@ -325,5 +418,6 @@ mod tests {
             detail: vec!["Revoked entries: 0".into()],
         }));
         render_one(&Prompt::Aborted("operator declined".into()));
+        render_one(&Prompt::WaitDiscSwap { session_count: 5 });
     }
 }

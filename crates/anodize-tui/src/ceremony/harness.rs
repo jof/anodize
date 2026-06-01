@@ -23,7 +23,7 @@ use secrecy::SecretString;
 
 use anodize_config::state::SssMetadata;
 
-use super::io::{Abort, Choice, Operator, Pin, Timestamp};
+use super::io::{Abort, Choice, CustodianResult, Operator, Pin, Timestamp};
 use super::prompt::{Prompt, Response};
 
 /// The script-side endpoint: send a prompt, block for the response.
@@ -197,6 +197,49 @@ impl Operator for ChannelOperator<'_> {
         }
     }
 
+    fn setup_custodians(&mut self, title: &str) -> Result<CustodianResult, Abort> {
+        match self.bridge.ask(Prompt::CustodianSetup {
+            title: title.into(),
+        })? {
+            Response::Custodians { names, threshold } => Ok(CustodianResult { names, threshold }),
+            Response::Abort => Err(Abort::new("custodian setup aborted")),
+            _ => Err(Abort::new("unexpected response to CustodianSetup")),
+        }
+    }
+
+    fn reveal_shares(
+        &mut self,
+        shares: &[anodize_sss::Share],
+        names: &[String],
+        generation: u64,
+    ) -> Result<(), Abort> {
+        match self.bridge.ask(Prompt::RevealShares {
+            shares: shares.to_vec(),
+            names: names.to_vec(),
+            generation,
+        })? {
+            Response::Ack => Ok(()),
+            Response::Abort => Err(Abort::new("share reveal aborted")),
+            _ => Err(Abort::new("unexpected response to RevealShares")),
+        }
+    }
+
+    fn verify_shares(&mut self, sss: &SssMetadata) -> Result<(), Abort> {
+        match self.bridge.ask(Prompt::VerifyShares { sss: sss.clone() })? {
+            Response::Ack => Ok(()),
+            Response::Abort => Err(Abort::new("share verification aborted")),
+            _ => Err(Abort::new("unexpected response to VerifyShares")),
+        }
+    }
+
+    fn wait_for_disc_swap(&mut self, session_count: usize) -> Result<(), Abort> {
+        match self.bridge.ask(Prompt::WaitDiscSwap { session_count })? {
+            Response::Ack => Ok(()),
+            Response::Abort => Err(Abort::new("disc swap aborted")),
+            _ => Err(Abort::new("unexpected response to WaitDiscSwap")),
+        }
+    }
+
     fn note(&mut self, msg: &str) {
         self.bridge.tell(Prompt::Note(msg.into()));
     }
@@ -302,6 +345,13 @@ mod tests {
                 Prompt::Note(_) | Prompt::Burning { .. } => { /* no response */ }
                 Prompt::Choose { .. } => handle.answer(Response::Choice(0)),
                 Prompt::TextInput { .. } => handle.answer(Response::Text(String::new())),
+                Prompt::CustodianSetup { .. } => handle.answer(Response::Custodians {
+                    names: vec!["Alice".into(), "Bob".into()],
+                    threshold: 2,
+                }),
+                Prompt::RevealShares { .. } => handle.answer(Response::Ack),
+                Prompt::VerifyShares { .. } => handle.answer(Response::Ack),
+                Prompt::WaitDiscSwap { .. } => handle.answer(Response::Ack),
                 Prompt::Done(o) => break o.headline,
                 Prompt::Aborted(e) => panic!("unexpected abort: {e}"),
             }
@@ -330,6 +380,13 @@ mod tests {
                 Prompt::Confirm { .. } => handle.answer(Response::Confirm),
                 Prompt::CollectShares { .. } => handle.answer(Response::Abort),
                 Prompt::Note(_) | Prompt::Burning { .. } => {}
+                Prompt::CustodianSetup { .. } => handle.answer(Response::Custodians {
+                    names: vec!["Alice".into(), "Bob".into()],
+                    threshold: 2,
+                }),
+                Prompt::RevealShares { .. } => handle.answer(Response::Ack),
+                Prompt::VerifyShares { .. } => handle.answer(Response::Ack),
+                Prompt::WaitDiscSwap { .. } => handle.answer(Response::Ack),
                 Prompt::Done(_) => panic!("should have aborted"),
                 Prompt::Aborted(e) => break e,
                 other => panic!("unexpected prompt: {other:?}"),

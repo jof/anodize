@@ -208,6 +208,9 @@ pub fn revoke_cert(
                 crl_number: Some(plan.crl_number),
                 revocation_list: revocation_list.clone(),
                 hsm_log_seq,
+                fresh_state: None,
+                sss: None,
+                fleet: None,
             }),
         },
     )?;

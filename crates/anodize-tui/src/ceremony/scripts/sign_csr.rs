@@ -116,6 +116,9 @@ pub fn sign_csr(
                 crl_number: None,
                 revocation_list: Vec::new(),
                 hsm_log_seq,
+                fresh_state: None,
+                sss: None,
+                fleet: None,
             }),
         },
     )?;
