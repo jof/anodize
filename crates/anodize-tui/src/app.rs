@@ -697,13 +697,14 @@ impl App {
         }
     }
 
-    /// Dismiss a finished ceremony run and return to the operation menu.
+    /// Dismiss a finished ceremony run and replay setup (HSM + disc) checks.
     fn finish_ceremony_run(&mut self) {
         if let Some(run) = self.ceremony_run.take() {
             run.join();
         }
-        self.ceremony.state = CeremonyPhase::OperationSelect;
-        self.set_status("Returned to operation menu.");
+        self.disc = DiscContext::new();
+        self.do_detect_hsm();
+        self.mode = Mode::Setup;
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
