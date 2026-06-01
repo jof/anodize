@@ -140,7 +140,7 @@ pub fn init_root(
         .unwrap_or_else(|| ("(unknown)".into(), format!("{} days", ca.validity_days)));
 
     op.confirm(
-        "Certificate Preview — RECORD FINGERPRINT",
+        "Certificate Preview",
         &[
             String::new(),
             format!("  Subject  : {subject}"),
@@ -151,7 +151,8 @@ pub fn init_root(
             String::new(),
             "  Initial CRL #1 (empty) will be included in this session.".into(),
             String::new(),
-            "  RECORD the fingerprint above — it will NOT be shown again.".into(),
+            "  The fingerprint may optionally be recorded; it is also".into(),
+            "  persisted on disc and can be retrieved later.".into(),
         ],
     )?;
 

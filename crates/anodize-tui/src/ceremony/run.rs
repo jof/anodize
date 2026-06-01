@@ -438,11 +438,20 @@ impl CeremonyRun {
     }
 
     /// Advance the spinner and drain any prompts the worker has produced.
-    pub fn on_tick(&mut self) {
+    /// Returns any informational messages (Note / Burning) that were consumed
+    /// so the caller can forward them to the persistent log buffer.
+    pub fn on_tick(&mut self) -> Vec<String> {
         self.spinner = self.spinner.wrapping_add(1);
+        let mut notes = Vec::new();
         while let Some(p) = self.handle.poll() {
             if matches!(p, Prompt::Done(_) | Prompt::Aborted(_)) {
                 self.finished = true;
+            }
+            // Capture informational prompts for the log buffer.
+            match &p {
+                Prompt::Note(msg) => notes.push(msg.clone()),
+                Prompt::Burning { what, .. } => notes.push(format!("Burning {what}…")),
+                _ => {}
             }
             // Lazily create interactive components from prompt data.
             match &p {
@@ -469,6 +478,7 @@ impl CeremonyRun {
             self.prompt = p;
             self.text_buf.clear();
         }
+        notes
     }
 
     /// Feed a key to the current prompt, answering the worker if it maps to a

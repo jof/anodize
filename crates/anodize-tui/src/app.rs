@@ -1013,7 +1013,10 @@ impl App {
             Mode::Setup => self.setup.handle_tick(),
             Mode::Ceremony => {
                 if let Some(run) = self.ceremony_run.as_mut() {
-                    run.on_tick();
+                    let notes = run.on_tick();
+                    for msg in notes {
+                        self.set_status(msg);
+                    }
                     return Action::Noop;
                 }
                 self.ceremony.handle_tick()

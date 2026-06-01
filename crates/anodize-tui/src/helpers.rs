@@ -30,9 +30,6 @@ pub fn sha256_fingerprint(der: &[u8]) -> String {
     hash.iter()
         .map(|b| format!("{b:02X}"))
         .collect::<Vec<_>>()
-        .chunks(2)
-        .map(|c| c.join(""))
-        .collect::<Vec<_>>()
         .join(":")
 }
 
