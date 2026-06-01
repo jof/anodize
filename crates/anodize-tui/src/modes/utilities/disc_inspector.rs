@@ -13,7 +13,6 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
-use sha2::{Digest, Sha256};
 use x509_cert::certificate::Certificate;
 
 use crate::disc::DiscContext;
@@ -588,15 +587,7 @@ pub fn gather_cert_detail_pub(
     lines.push(String::new());
 
     // Fingerprint
-    let hash = Sha256::digest(der);
-    let fp: String = hash
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect::<Vec<_>>()
-        .chunks(2)
-        .map(|c| c.join(""))
-        .collect::<Vec<_>>()
-        .join(":");
+    let fp = crate::helpers::sha256_fingerprint(der);
     lines.push("  SHA-256 Fingerprint:".to_string());
     lines.push(format!("    {fp}"));
     lines.push(String::new());
@@ -727,12 +718,7 @@ mod tests {
         DiscContext {
             optical_dev: Some("/dev/sr0".into()),
             prior_sessions: sessions,
-            burn_rx: None,
-            burn_log: Vec::new(),
-            burn_started: None,
             sessions_remaining: Some(10),
-            intent_session_dir_name: None,
-            pending_intent_session: None,
             disc_scan_rx: None,
             session_state: Some(SessionState {
                 version: 1,

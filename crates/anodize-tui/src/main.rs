@@ -7,6 +7,7 @@
 
 mod action;
 mod app;
+mod ceremony;
 mod components;
 mod disc;
 mod dispatch;
@@ -15,7 +16,6 @@ mod hardware;
 mod helpers;
 mod media;
 mod modes;
-mod ops;
 mod theme;
 mod tui;
 
