@@ -56,7 +56,7 @@ pub fn validate_disc(
 
     // 1. Show the pre-computed validation report.
     let report_lines: Vec<String> = plan.initial_report.lines().map(String::from).collect();
-    op.confirm("Disc Validation Report", &report_lines)?;
+    op.review("Disc Validation Report", &report_lines);
 
     // 2. Optionally run the HSM audit-log cross-check.
     let mut final_report = plan.initial_report.clone();
@@ -109,7 +109,7 @@ pub fn validate_disc(
             );
 
             let combined_lines: Vec<String> = final_report.lines().map(String::from).collect();
-            op.confirm("Combined Validation Report", &combined_lines)?;
+            op.review("Combined Validation Report", &combined_lines);
         }
     }
 
@@ -217,8 +217,8 @@ mod tests {
         // No vault interaction.
         assert_eq!(vault.login_count, 0);
 
-        // Transcript: confirm (report) then done.
-        assert!(op.transcript.contains(&"confirm".to_string()));
+        // Transcript: review (report) then done.
+        assert!(op.transcript.contains(&"review".to_string()));
     }
 
     #[test]
@@ -235,9 +235,9 @@ mod tests {
         // Should have logged in to the HSM.
         assert_eq!(vault.login_count, 1);
 
-        // Two confirms: initial report + combined report.
-        let confirm_count = op.transcript.iter().filter(|e| *e == "confirm").count();
-        assert_eq!(confirm_count, 2, "expected two confirm prompts");
+        // Two reviews: initial report + combined report.
+        let review_count = op.transcript.iter().filter(|e| *e == "review").count();
+        assert_eq!(review_count, 2, "expected two review prompts");
 
         assert_eq!(arc.shuttle_directs, 1);
     }
@@ -257,23 +257,22 @@ mod tests {
         // No vault login.
         assert_eq!(vault.login_count, 0);
 
-        // Only one confirm (initial report), no second.
-        let confirm_count = op.transcript.iter().filter(|e| *e == "confirm").count();
-        assert_eq!(confirm_count, 1);
+        // Only one review (initial report), no second.
+        let review_count = op.transcript.iter().filter(|e| *e == "review").count();
+        assert_eq!(review_count, 1);
 
         assert_eq!(arc.shuttle_directs, 1);
     }
 
     #[test]
-    fn abort_at_confirm_exports_nothing() {
+    fn review_cannot_abort_so_shuttle_always_written() {
         let env = sample_env(false);
         let mut op = FakeOperator::new();
-        op.abort_at = Some("confirm");
         let mut vault = FakeVault::new();
         let mut arc = FakeArchive::new();
 
         let result = validate_disc(&mut op, &mut vault, &mut arc, &env);
-        assert!(result.is_err());
-        assert_eq!(arc.shuttle_directs, 0, "no export on abort");
+        assert!(result.is_ok());
+        assert_eq!(arc.shuttle_directs, 1, "VALIDATE.LOG always exported");
     }
 }
