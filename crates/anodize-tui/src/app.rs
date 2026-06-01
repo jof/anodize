@@ -62,8 +62,7 @@ pub struct App {
     // Content area vertical scroll offset
     pub content_scroll: u16,
 
-    // New script engine: when `Some`, the Ceremony mode is driving a
-    // coroutine-based ceremony, replacing the active_op/CeremonyPhase machinery.
+    // When `Some`, the Ceremony mode is driving a coroutine-based ceremony.
     pub ceremony_run: Option<crate::ceremony::run::CeremonyRun>,
 }
 
@@ -96,7 +95,7 @@ impl App {
         }
     }
 
-    /// Start the InitRoot ceremony on the new script engine. No existing
+    /// Start the InitRoot ceremony. No existing
     /// STATE.JSON is required — this is the genesis operation.
     pub fn start_init_root(&mut self) {
         use crate::ceremony::io::{Env, InitRootPlan, RootCertParams};
@@ -136,13 +135,12 @@ impl App {
 
         self.ceremony_run = Some(CeremonyRun::spawn_init_root(env, vault, archive));
         self.ceremony.state = CeremonyPhase::OperationSelect;
-        self.set_status("InitRoot ceremony started (script engine).");
+        self.set_status("InitRoot ceremony started.");
     }
 
-    /// Start the IssueCrl ceremony on the new script engine. Builds the
-    /// read-only `Env` plus vault/archive configs from live setup + disc state,
-    /// then spawns the coroutine. (Other operations still use the legacy path
-    /// until they are ported.)
+    /// Start the IssueCrl ceremony. Builds the read-only `Env` plus
+    /// vault/archive configs from live setup + disc state, then spawns the
+    /// coroutine.
     pub fn start_issue_crl(&mut self) {
         use crate::ceremony::io::{CrlPlan, Env};
         use crate::ceremony::run::{CeremonyRun, VaultConfig};
@@ -188,10 +186,10 @@ impl App {
 
         self.ceremony_run = Some(CeremonyRun::spawn_issue_crl(env, vault, archive));
         self.ceremony.state = CeremonyPhase::OperationSelect;
-        self.set_status("IssueCrl ceremony started (script engine).");
+        self.set_status("IssueCrl ceremony started.");
     }
 
-    /// Start the RevokeCert ceremony on the new script engine.
+    /// Start the RevokeCert ceremony.
     pub fn start_revoke_cert(&mut self) {
         use crate::ceremony::io::{Env, RevokePlan};
         use crate::ceremony::run::{CeremonyRun, VaultConfig};
@@ -240,10 +238,10 @@ impl App {
 
         self.ceremony_run = Some(CeremonyRun::spawn_revoke_cert(env, vault, archive));
         self.ceremony.state = CeremonyPhase::OperationSelect;
-        self.set_status("RevokeCert ceremony started (script engine).");
+        self.set_status("RevokeCert ceremony started.");
     }
 
-    /// Start the SignCsr ceremony on the new script engine. Reads + validates
+    /// Start the SignCsr ceremony. Reads + validates
     /// csr.der from the shuttle and pre-renders each profile's preview.
     pub fn start_sign_csr(&mut self) {
         use crate::ceremony::io::{CsrProfileChoice, Env, SignCsrPlan};
@@ -347,10 +345,10 @@ impl App {
 
         self.ceremony_run = Some(CeremonyRun::spawn_sign_csr(env, vault, archive));
         self.ceremony.state = CeremonyPhase::OperationSelect;
-        self.set_status("SignCsr ceremony started (script engine).");
+        self.set_status("SignCsr ceremony started.");
     }
 
-    /// Start the RekeyShares ceremony on the new script engine.
+    /// Start the RekeyShares ceremony.
     pub fn start_rekey_shares(&mut self) {
         use crate::ceremony::io::{Env, RekeyPlan};
         use crate::ceremony::run::{CeremonyRun, VaultConfig};
@@ -383,10 +381,10 @@ impl App {
 
         self.ceremony_run = Some(CeremonyRun::spawn_rekey_shares(env, vault, archive));
         self.ceremony.state = CeremonyPhase::OperationSelect;
-        self.set_status("RekeyShares ceremony started (script engine).");
+        self.set_status("RekeyShares ceremony started.");
     }
 
-    /// Start the KeyBackup ceremony on the new script engine.
+    /// Start the KeyBackup ceremony.
     pub fn start_key_backup(&mut self) {
         use crate::ceremony::io::{Env, KeyBackupPlan};
         use crate::ceremony::run::{CeremonyRun, VaultConfig};
@@ -422,10 +420,10 @@ impl App {
 
         self.ceremony_run = Some(CeremonyRun::spawn_key_backup(env, vault, archive));
         self.ceremony.state = CeremonyPhase::OperationSelect;
-        self.set_status("KeyBackup ceremony started (script engine).");
+        self.set_status("KeyBackup ceremony started.");
     }
 
-    /// Start the RefreshDisc ceremony on the new script engine (dev-burn only).
+    /// Start the RefreshDisc ceremony (dev-burn only).
     #[cfg(feature = "dev-burn")]
     pub fn start_refresh_disc(&mut self) {
         use crate::ceremony::io::{Env, RefreshDiscPlan};
@@ -456,10 +454,10 @@ impl App {
 
         self.ceremony_run = Some(CeremonyRun::spawn_refresh_disc(env, archive));
         self.ceremony.state = CeremonyPhase::OperationSelect;
-        self.set_status("RefreshDisc ceremony started (script engine).");
+        self.set_status("RefreshDisc ceremony started.");
     }
 
-    /// Start the MigrateDisc ceremony on the new script engine.
+    /// Start the MigrateDisc ceremony.
     pub fn start_migrate_disc(&mut self) {
         use crate::ceremony::io::{Env, MigrateDiscPlan, MigrationFile};
         use crate::ceremony::run::CeremonyRun;
@@ -530,10 +528,10 @@ impl App {
 
         self.ceremony_run = Some(CeremonyRun::spawn_migrate_disc(env, archive));
         self.ceremony.state = CeremonyPhase::OperationSelect;
-        self.set_status("MigrateDisc ceremony started (script engine).");
+        self.set_status("MigrateDisc ceremony started.");
     }
 
-    /// Start the ValidateDisc ceremony on the new script engine.
+    /// Start the ValidateDisc ceremony.
     pub fn start_validate_disc(&mut self) {
         use std::collections::BTreeMap;
 
@@ -682,7 +680,7 @@ impl App {
 
         self.ceremony_run = Some(CeremonyRun::spawn_validate_disc(env, vault, archive));
         self.ceremony.state = CeremonyPhase::OperationSelect;
-        self.set_status("ValidateDisc ceremony started (script engine).");
+        self.set_status("ValidateDisc ceremony started.");
     }
 
     /// Build the disc/shuttle archive configuration from live disc state.
@@ -979,8 +977,8 @@ impl App {
         match self.mode {
             Mode::Setup => self.setup.handle_key_event(key),
             Mode::Ceremony => {
-                // New script engine takes over the Ceremony mode when a run is
-                // active: keys go to the coroutine, or dismiss a finished run.
+                // When a ceremony run is active, keys go to the coroutine
+                // or dismiss a finished run.
                 if self.ceremony_run.is_some() {
                     let finished = self
                         .ceremony_run
