@@ -62,21 +62,40 @@ pub fn key_backup(
     let source_idx = op.choose("Select SOURCE device", &source_lines, &source_options)?;
 
     // 4. Select destination device (skip the source)
-    let dest_lines: Vec<String> = targets
-        .iter()
-        .enumerate()
-        .map(|(i, t)| format_target(i, t, Some(source_idx)))
-        .collect();
-    let dest_options: Vec<Choice> = targets
+    let dest_candidates: Vec<(usize, &BackupTarget)> = targets
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != source_idx)
-        .map(|(i, _)| Choice {
-            key: char::from_digit((i + 1) as u32, 10).unwrap_or('?'),
-            label: format!("Device {}", i + 1),
+        .collect();
+    let dest_lines: Vec<String> = dest_candidates
+        .iter()
+        .enumerate()
+        .map(|(seq, &(orig, t))| {
+            let marker = format!("  [{}]  ", seq + 1);
+            let flags = format!(
+                "{}{}{}",
+                if t.needs_bootstrap { " [factory]" } else { "" },
+                if t.has_wrap_key { " [wrap]" } else { "" },
+                if t.has_signing_key { " [key]" } else { "" },
+            );
+            format!(
+                "{marker}{} — {}{flags}  (was Device {})",
+                t.identifier,
+                t.description,
+                orig + 1
+            )
         })
         .collect();
-    let dest_idx = op.choose("Select DESTINATION device", &dest_lines, &dest_options)?;
+    let dest_options: Vec<Choice> = dest_candidates
+        .iter()
+        .enumerate()
+        .map(|(seq, _)| Choice {
+            key: char::from_digit((seq + 1) as u32, 10).unwrap_or('?'),
+            label: format!("Device {}", seq + 1),
+        })
+        .collect();
+    let dest_choice = op.choose("Select DESTINATION device", &dest_lines, &dest_options)?;
+    let dest_idx = dest_candidates[dest_choice].0;
 
     let src = &targets[source_idx];
     let dst = &targets[dest_idx];
