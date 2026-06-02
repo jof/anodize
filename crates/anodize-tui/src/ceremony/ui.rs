@@ -52,10 +52,9 @@ pub fn key_to_response(
             _ => None,
         },
         Prompt::Choose { options, .. } => match key.code {
-            KeyCode::Char(c) if c.is_ascii_digit() => {
-                let idx = c.to_digit(10).unwrap_or(0) as usize;
-                if idx >= 1 && idx <= options.len() {
-                    Some(Response::Choice(idx - 1))
+            KeyCode::Char(c) => {
+                if let Some(i) = options.iter().position(|o| o.key == c) {
+                    Some(Response::Choice(i))
                 } else {
                     None
                 }
@@ -208,8 +207,8 @@ pub fn render_prompt(
         } => {
             let mut lines = body_lines(body);
             lines.push(Line::from(""));
-            for (i, opt) in options.iter().enumerate() {
-                lines.push(Line::from(format!("  [{}]  {}", i + 1, opt.label)));
+            for opt in options {
+                lines.push(Line::from(format!("  [{}]  {}", opt.key, opt.label)));
             }
             lines.push(Line::from(""));
             lines.push(hint("[n] Select    [Esc] Cancel"));
