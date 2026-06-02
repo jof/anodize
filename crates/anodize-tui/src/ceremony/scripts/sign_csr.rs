@@ -31,8 +31,9 @@ pub fn sign_csr(
     let options: Vec<Choice> = plan
         .profiles
         .iter()
-        .map(|p| Choice {
-            key: ' ',
+        .enumerate()
+        .map(|(i, p)| Choice {
+            key: char::from_digit((i + 1) as u32, 10).unwrap_or('?'),
             label: p.label.clone(),
         })
         .collect();

@@ -58,7 +58,8 @@ fn select_target(
         let mut options: Vec<Choice> = plan
             .cert_list
             .iter()
-            .map(|c| {
+            .enumerate()
+            .map(|(i, c)| {
                 let status = if c.already_revoked {
                     "revoked"
                 } else if c.is_root {
@@ -68,7 +69,7 @@ fn select_target(
                 };
                 let subject = c.subject.split(", ").next().unwrap_or(&c.subject);
                 Choice {
-                    key: ' ',
+                    key: char::from_digit((i + 1) as u32, 10).unwrap_or('?'),
                     label: format!("{} [{}]  {}", c.serial, status, subject),
                 }
             })
