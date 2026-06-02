@@ -234,6 +234,7 @@ pub fn init_root(
     )?;
 
     // 13. Export to shuttle.
+    op.note("Exporting root cert and CRL to shuttle\u{2026}");
     arc.export_shuttle(
         &record,
         &[("root.crt", cert.der()), ("root.crl", crl.der())],

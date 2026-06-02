@@ -189,6 +189,7 @@ pub fn rekey_shares(
     )?;
 
     // 14. Export audit log to shuttle
+    op.note("Exporting audit log to shuttle\u{2026}");
     arc.export_shuttle(&record, &[])?;
 
     Ok(Outcome {

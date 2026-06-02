@@ -51,6 +51,7 @@ pub fn migrate_disc(
     op.wait_for_disc_swap(plan.session_count)?;
 
     // 3. Write session files to new disc.
+    op.note("Writing session files to target disc\u{2026}");
     arc.write_migration(&plan.files)?;
 
     Ok(Outcome {

@@ -66,6 +66,7 @@ pub fn issue_crl(
 
     // The signing key is unlocked only for the duration of this block; the
     // session logs out + zeroizes when `sess` drops, including on early return.
+    op.note("Signing CRL\u{2026}");
     let (crl, hsm_log_seq) = {
         let mut sess = vault.login(pin)?;
         let crl = sess.issue_crl(plan, when)?;
@@ -100,6 +101,7 @@ pub fn issue_crl(
         },
     )?;
 
+    op.note("Exporting CRL to shuttle\u{2026}");
     arc.export_shuttle(&record, &[("root.crl", crl.der())])?;
 
     Ok(Outcome {

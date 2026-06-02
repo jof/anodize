@@ -163,6 +163,7 @@ pub fn revoke_cert(
     let when = op.reconfirm_clock()?;
 
     // Sign a CRL over the updated revocation list, reusing the CRL plan shape.
+    op.note("Signing updated CRL\u{2026}");
     let crl_plan = CrlPlan {
         crl_number: plan.crl_number,
         revocation_list: revocation_list.clone(),
@@ -215,6 +216,7 @@ pub fn revoke_cert(
         },
     )?;
 
+    op.note("Exporting to shuttle\u{2026}");
     arc.export_shuttle(
         &record,
         &[("revoked.toml", &revoked_toml), ("root.crl", crl.der())],

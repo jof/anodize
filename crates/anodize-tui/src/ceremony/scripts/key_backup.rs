@@ -196,6 +196,7 @@ pub fn key_backup(
     )?;
 
     // 11. Export audit log to shuttle
+    op.note("Exporting audit log to shuttle\u{2026}");
     arc.export_shuttle(&record, &[])?;
 
     let headline = if is_pair {

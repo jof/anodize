@@ -61,6 +61,7 @@ pub fn sign_csr(
     let when = op.reconfirm_clock()?;
 
     // 6. Sign the intermediate certificate.
+    op.note("Signing intermediate certificate\u{2026}");
     let req = IntermediateReq {
         csr_der: plan.csr_der.clone(),
         root_cert_der: plan.root_cert_der.clone(),
@@ -124,6 +125,7 @@ pub fn sign_csr(
     )?;
 
     // 9. Export to shuttle.
+    op.note("Exporting certificate to shuttle\u{2026}");
     arc.export_shuttle(&record, &[("intermediate.crt", cert.der())])?;
 
     Ok(Outcome {

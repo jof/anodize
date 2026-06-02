@@ -81,6 +81,7 @@ pub fn validate_disc(
         if idx == 0 {
             let pin = op.collect_quorum(&env.sss)?;
 
+            op.note("Fetching HSM audit log\u{2026}");
             let hsm_log = {
                 let mut sess = vault.login(pin)?;
                 sess.get_hsm_audit_log()?
@@ -114,6 +115,7 @@ pub fn validate_disc(
     }
 
     // 3. Export VALIDATE.LOG to shuttle.
+    op.note("Writing VALIDATE.LOG to shuttle\u{2026}");
     arc.write_shuttle_direct(&[("VALIDATE.LOG", final_report.as_bytes())])?;
 
     let has_errors = final_report.contains("*** VALIDATION FAILED ***");
