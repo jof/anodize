@@ -29,6 +29,7 @@ use crossterm::{
     terminal::{self, disable_raw_mode, enable_raw_mode},
 };
 use nix::fcntl::{fcntl, FcntlArg, FdFlag, Flock, FlockArg};
+#[cfg(target_os = "linux")]
 use nix::sys::reboot::{reboot, RebootMode};
 use nix::unistd::{close, sync};
 
@@ -223,6 +224,7 @@ fn confirm_shutdown() -> bool {
 }
 
 /// Sync filesystems and power off. Does not return on success.
+#[cfg(target_os = "linux")]
 fn poweroff() {
     // Flush all pending writes before pulling power.
     sync();
@@ -232,6 +234,15 @@ fn poweroff() {
     let Err(e) = reboot(RebootMode::RB_POWER_OFF);
     disable_raw_mode().ok();
     eprintln!("\r\n  poweroff failed: {e}\r");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+}
+
+/// Stub for non-Linux: just prints an error.
+#[cfg(not(target_os = "linux"))]
+fn poweroff() {
+    sync();
+    disable_raw_mode().ok();
+    eprintln!("\r\n  poweroff not supported on this platform\r");
     let _ = std::io::Write::flush(&mut std::io::stderr());
 }
 

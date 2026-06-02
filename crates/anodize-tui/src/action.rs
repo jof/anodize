@@ -19,7 +19,6 @@ pub enum Operation {
 pub enum Action {
     Noop,
     Quit,
-    Render,
     // Navigation
     SwitchMode(Mode),
     // Setup flow

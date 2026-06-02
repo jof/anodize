@@ -750,7 +750,7 @@ impl App {
         if key.code == KeyCode::F(12) {
             self.log_view = !self.log_view;
             if self.log_view {
-                self.log_scroll = self.log_lines.len().saturating_sub(1) as u16;
+                self.log_scroll = u16::MAX;
             }
             return Action::Noop;
         }
@@ -1046,7 +1046,7 @@ impl App {
     /// Process an action, updating app state.
     pub fn update(&mut self, action: Action) {
         match action {
-            Action::Noop | Action::Render => {}
+            Action::Noop => {}
             Action::Quit => self.running = false,
             Action::SwitchMode(mode) => {
                 self.mode = mode;
@@ -1156,10 +1156,13 @@ impl App {
                 .style(crate::theme::BLOCK)
                 .border_style(crate::theme::BORDER)
                 .title_style(crate::theme::TITLE);
+            let inner_height = frame.area().height.saturating_sub(2) as u16;
+            let max_scroll = (self.log_lines.len() as u16).saturating_sub(inner_height);
+            let scroll = self.log_scroll.min(max_scroll);
             let para = ratatui::widgets::Paragraph::new(content.as_str())
                 .block(block)
                 .wrap(ratatui::widgets::Wrap { trim: false })
-                .scroll((self.log_scroll, 0));
+                .scroll((scroll, 0));
             frame.render_widget(para, frame.area());
             return;
         }

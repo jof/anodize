@@ -79,9 +79,6 @@ fn main() -> Result<()> {
         match events.next()? {
             event::Event::Key(key) => {
                 let action = app.handle_key_event(key);
-                if matches!(action, action::Action::Render) {
-                    tui.terminal.clear()?;
-                }
                 app.update(action);
             }
             event::Event::Tick => {
