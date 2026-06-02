@@ -192,6 +192,7 @@ fn format_device(device: &str, volume_label: &str) -> Result<()> {
         if !status.success() {
             bail!("diskutil eraseDisk failed (exit {})", status);
         }
+        verify_partition_layout_macos(device, volume_label)?;
     } else {
         // Linux: unmount + mkfs.vfat
         eprintln!("Formatting {device} as FAT32 ({volume_label})...");
@@ -227,6 +228,69 @@ fn format_device(device: &str, volume_label: &str) -> Result<()> {
         }
     };
 
+    Ok(())
+}
+
+/// Verify the partition layout after formatting.
+///
+/// macOS `diskutil eraseDisk` occasionally creates a spurious EFI System
+/// Partition alongside the FAT32 data partition.  Linux's `blkid` may then
+/// fail to assign `ID_FS_LABEL` on the correct partition, which prevents
+/// the ceremony ISO's udev rule from creating the `/dev/anodize-shuttle`
+/// symlink and the systemd mount service from firing.
+///
+/// This check reads `diskutil list -plist <device>` and ensures:
+///   1. Exactly one partition exists.
+///   2. That partition is FAT32 with the expected volume label.
+#[cfg(target_os = "macos")]
+fn verify_partition_layout_macos(device: &str, expected_label: &str) -> Result<()> {
+    // Give macOS a moment to settle the partition table.
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    let output = Command::new("diskutil")
+        .args(["list", device])
+        .output()
+        .context("diskutil list (post-format verification)")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Count partition lines (lines starting with a number after the header).
+    // diskutil list output looks like:
+    //   0:  FDisk_partition_scheme  *30.8 GB  disk4
+    //   1:  DOS_FAT_32 SHUTTLE      30.8 GB  disk4s1
+    let partitions: Vec<&str> = stdout
+        .lines()
+        .filter(|l| {
+            let t = l.trim();
+            t.starts_with("1:") || t.starts_with("2:") || t.starts_with("3:")
+        })
+        .collect();
+
+    if partitions.len() != 1 {
+        bail!(
+            "Post-format check failed: expected 1 partition, found {}.\n\
+             diskutil output:\n{stdout}\n\n\
+             This is a known macOS quirk where `diskutil eraseDisk` injects a\n\
+             spurious EFI partition.  Re-run the init command — it usually\n\
+             succeeds on retry.",
+            partitions.len()
+        );
+    }
+
+    let part_line = partitions[0];
+    if !part_line.contains("DOS_FAT_32") && !part_line.contains("MS-DOS (FAT32)") {
+        bail!(
+            "Post-format check failed: partition is not FAT32.\n\
+             Got: {part_line}"
+        );
+    }
+    if !part_line.contains(expected_label) {
+        bail!(
+            "Post-format check failed: volume label {expected_label:?} not found.\n\
+             Got: {part_line}"
+        );
+    }
+
+    eprintln!("  Partition layout verified: single FAT32 ({expected_label})");
     Ok(())
 }
 
