@@ -17,7 +17,7 @@
 //! the thread exits.
 
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use secrecy::SecretString;
@@ -34,7 +34,7 @@ use super::prompt::{Prompt, Response};
 pub struct Bridge {
     prompt_tx: SyncSender<Prompt>,
     response_rx: Receiver<Response>,
-    ceremony_log: Mutex<Vec<String>>,
+    ceremony_log: Arc<Mutex<Vec<String>>>,
 }
 
 impl Bridge {
@@ -74,6 +74,7 @@ pub struct CeremonyHandle {
     prompt_rx: Receiver<Prompt>,
     response_tx: Sender<Response>,
     join: Option<JoinHandle<()>>,
+    ceremony_log: Arc<Mutex<Vec<String>>>,
 }
 
 impl CeremonyHandle {
@@ -87,10 +88,11 @@ impl CeremonyHandle {
     {
         let (prompt_tx, prompt_rx) = sync_channel::<Prompt>(0);
         let (response_tx, response_rx) = channel::<Response>();
+        let ceremony_log = Arc::new(Mutex::new(Vec::new()));
         let bridge = Bridge {
             prompt_tx: prompt_tx.clone(),
             response_rx,
-            ceremony_log: Mutex::new(Vec::new()),
+            ceremony_log: Arc::clone(&ceremony_log),
         };
         let join = thread::spawn(move || {
             let terminal = body(bridge);
@@ -100,6 +102,7 @@ impl CeremonyHandle {
             prompt_rx,
             response_tx,
             join: Some(join),
+            ceremony_log,
         }
     }
 
@@ -116,6 +119,14 @@ impl CeremonyHandle {
     /// Answer the outstanding prompt.
     pub fn answer(&self, response: Response) {
         let _ = self.response_tx.send(response);
+    }
+
+    /// Drain and return all accumulated ceremony log lines (main-thread side).
+    pub fn drain_log(&self) -> Vec<String> {
+        self.ceremony_log
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
     }
 
     /// Join the ceremony thread (call after a terminal prompt).

@@ -474,7 +474,7 @@ impl CeremonyRun {
     /// so the caller can forward them to the persistent log buffer.
     pub fn on_tick(&mut self) -> Vec<String> {
         self.spinner = self.spinner.wrapping_add(1);
-        let mut notes = Vec::new();
+        let mut notes = self.handle.drain_log();
         while let Some(p) = self.handle.poll() {
             if matches!(p, Prompt::Done(_) | Prompt::Aborted(_)) {
                 self.finished = true;
