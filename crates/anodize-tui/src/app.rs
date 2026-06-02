@@ -936,8 +936,9 @@ impl App {
             }
         }
 
-        // Content scrolling (arrow keys when not in text entry)
-        if !in_text_entry {
+        // Content scrolling (arrow keys when not in text entry).
+        // Skip when a ceremony run is active — it handles its own scroll.
+        if !in_text_entry && self.ceremony_run.is_none() {
             match key.code {
                 KeyCode::Up => {
                     self.content_scroll = self.content_scroll.saturating_sub(1);
