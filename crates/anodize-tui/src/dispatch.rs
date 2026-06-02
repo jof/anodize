@@ -66,7 +66,16 @@ impl App {
                     return;
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    return; // scan still running — TUI stays responsive
+                    // scan still running — animate spinner so operator sees activity
+                    const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                    let idx = (std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis()
+                        / 100) as usize
+                        % FRAMES.len();
+                    self.status = format!("{} Scanning optical drive…", FRAMES[idx]);
+                    return;
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                     tracing::error!("disc scan thread panicked or dropped sender");
