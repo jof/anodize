@@ -20,10 +20,10 @@ use crate::components::share_reveal::ShareReveal;
 use crate::media::SessionEntry;
 
 use super::adapters::{DiscArchive, HsmVault};
-use super::harness::{CeremonyHandle, ChannelOperator};
+use super::harness::{Bridge, CeremonyHandle, ChannelOperator};
 use super::io::{
-    CrlPlan, Env, InitRootPlan, KeyBackupPlan, MigrateDiscPlan, RekeyPlan, RevokePlan, SignCsrPlan,
-    ValidateDiscPlan,
+    Archive, CrlPlan, Env, InitRootPlan, KeyBackupPlan, MigrateDiscPlan, RekeyPlan, RevokePlan,
+    SignCsrPlan, ValidateDiscPlan,
 };
 use super::prompt::Prompt;
 use super::scripts::init_root::init_root;
@@ -54,6 +54,18 @@ pub struct ArchiveConfig {
     pub timestamp: SystemTime,
     pub sessions_remaining: Option<u16>,
     pub base_state: Option<SessionState>,
+}
+
+/// Drain the ceremony log from the bridge and write it to the shuttle as
+/// `CEREMONY.LOG`. Best-effort: failures are silently ignored because the
+/// ceremony outcome has already been determined.
+fn write_ceremony_log(bridge: &Bridge, arc: &mut DiscArchive<'_>) {
+    let lines = bridge.drain_log();
+    if lines.is_empty() {
+        return;
+    }
+    let text = lines.join("\n") + "\n";
+    let _ = arc.write_shuttle_direct(&[("CEREMONY.LOG", text.as_bytes())]);
 }
 
 /// A live ceremony, driven by the App's event loop.
@@ -94,7 +106,9 @@ impl CeremonyRun {
                 archive.sessions_remaining,
                 archive.base_state,
             );
-            match issue_crl(&mut op, &mut hsm, &mut arc, &env) {
+            let result = issue_crl(&mut op, &mut hsm, &mut arc, &env);
+            write_ceremony_log(&bridge, &mut arc);
+            match result {
                 Ok(outcome) => Prompt::Done(outcome),
                 Err(abort) => Prompt::Aborted(abort.0),
             }
@@ -130,7 +144,9 @@ impl CeremonyRun {
                 archive.sessions_remaining,
                 archive.base_state,
             );
-            match revoke_cert(&mut op, &mut hsm, &mut arc, &env) {
+            let result = revoke_cert(&mut op, &mut hsm, &mut arc, &env);
+            write_ceremony_log(&bridge, &mut arc);
+            match result {
                 Ok(outcome) => Prompt::Done(outcome),
                 Err(abort) => Prompt::Aborted(abort.0),
             }
@@ -164,7 +180,9 @@ impl CeremonyRun {
                 archive.sessions_remaining,
                 archive.base_state,
             );
-            match init_root(&mut op, &mut hsm, &mut arc, &env) {
+            let result = init_root(&mut op, &mut hsm, &mut arc, &env);
+            write_ceremony_log(&bridge, &mut arc);
+            match result {
                 Ok(outcome) => Prompt::Done(outcome),
                 Err(abort) => Prompt::Aborted(abort.0),
             }
@@ -201,7 +219,9 @@ impl CeremonyRun {
                 archive.sessions_remaining,
                 archive.base_state,
             );
-            match sign_csr(&mut op, &mut hsm, &mut arc, &env) {
+            let result = sign_csr(&mut op, &mut hsm, &mut arc, &env);
+            write_ceremony_log(&bridge, &mut arc);
+            match result {
                 Ok(outcome) => Prompt::Done(outcome),
                 Err(abort) => Prompt::Aborted(abort.0),
             }
@@ -237,7 +257,9 @@ impl CeremonyRun {
                 archive.sessions_remaining,
                 archive.base_state,
             );
-            match rekey_shares(&env, &mut op, &mut hsm, &mut arc) {
+            let result = rekey_shares(&env, &mut op, &mut hsm, &mut arc);
+            write_ceremony_log(&bridge, &mut arc);
+            match result {
                 Ok(outcome) => Prompt::Done(outcome),
                 Err(abort) => Prompt::Aborted(abort.0),
             }
@@ -273,7 +295,9 @@ impl CeremonyRun {
                 archive.sessions_remaining,
                 archive.base_state,
             );
-            match key_backup(&mut op, &mut hsm, &mut arc, &env) {
+            let result = key_backup(&mut op, &mut hsm, &mut arc, &env);
+            write_ceremony_log(&bridge, &mut arc);
+            match result {
                 Ok(outcome) => Prompt::Done(outcome),
                 Err(abort) => Prompt::Aborted(abort.0),
             }
@@ -302,7 +326,9 @@ impl CeremonyRun {
                 archive.sessions_remaining,
                 archive.base_state,
             );
-            match refresh_disc(&mut op, &mut arc, &env) {
+            let result = refresh_disc(&mut op, &mut arc, &env);
+            write_ceremony_log(&bridge, &mut arc);
+            match result {
                 Ok(outcome) => Prompt::Done(outcome),
                 Err(abort) => Prompt::Aborted(abort.0),
             }
@@ -326,7 +352,9 @@ impl CeremonyRun {
                 archive.sessions_remaining,
                 archive.base_state,
             );
-            match migrate_disc(&mut op, &mut arc, &env) {
+            let result = migrate_disc(&mut op, &mut arc, &env);
+            write_ceremony_log(&bridge, &mut arc);
+            match result {
                 Ok(outcome) => Prompt::Done(outcome),
                 Err(abort) => Prompt::Aborted(abort.0),
             }
@@ -363,7 +391,9 @@ impl CeremonyRun {
                 archive.sessions_remaining,
                 archive.base_state,
             );
-            match validate_disc(&mut op, &mut hsm, &mut arc, &env) {
+            let result = validate_disc(&mut op, &mut hsm, &mut arc, &env);
+            write_ceremony_log(&bridge, &mut arc);
+            match result {
                 Ok(outcome) => Prompt::Done(outcome),
                 Err(abort) => Prompt::Aborted(abort.0),
             }

@@ -17,6 +17,7 @@
 //! the thread exits.
 
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
+use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 
 use secrecy::SecretString;
@@ -33,6 +34,7 @@ use super::prompt::{Prompt, Response};
 pub struct Bridge {
     prompt_tx: SyncSender<Prompt>,
     response_rx: Receiver<Response>,
+    ceremony_log: Mutex<Vec<String>>,
 }
 
 impl Bridge {
@@ -49,6 +51,21 @@ impl Bridge {
     /// Send an informational prompt that expects no response.
     pub fn tell(&self, prompt: Prompt) {
         let _ = self.prompt_tx.send(prompt);
+    }
+
+    /// Append a line to the ceremony log buffer.
+    pub fn log(&self, msg: impl Into<String>) {
+        if let Ok(mut v) = self.ceremony_log.lock() {
+            v.push(msg.into());
+        }
+    }
+
+    /// Drain and return all accumulated ceremony log lines.
+    pub fn drain_log(&self) -> Vec<String> {
+        self.ceremony_log
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
     }
 }
 
@@ -73,6 +90,7 @@ impl CeremonyHandle {
         let bridge = Bridge {
             prompt_tx: prompt_tx.clone(),
             response_rx,
+            ceremony_log: Mutex::new(Vec::new()),
         };
         let join = thread::spawn(move || {
             let terminal = body(bridge);
@@ -249,6 +267,7 @@ impl Operator for ChannelOperator<'_> {
     }
 
     fn note(&mut self, msg: &str) {
+        self.bridge.log(msg);
         self.bridge.tell(Prompt::Note(msg.into()));
     }
 }

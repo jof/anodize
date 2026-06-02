@@ -540,6 +540,7 @@ impl<'a> DiscArchive<'a> {
             match rx.recv() {
                 Ok(BurnProgress::Step(s)) => {
                     tracing::info!(step = %s, "disc burn");
+                    self.bridge.log(format!("[burn {dir}] {s}"));
                     burn_log.push(s);
                     self.bridge.tell(Prompt::Burning {
                         what: dir.clone(),
@@ -689,9 +690,12 @@ impl Archive for DiscArchive<'_> {
                 "Disc full \u{2014} cannot write intent session. Insert a new disc.",
             ));
         }
+        self.bridge
+            .log(format!("Committing intent: {}", event.name));
         let session =
             assemble_intent_session(&self.staging, &self.profile_bytes, self.timestamp, &event)?;
         let dir = self.burn(session)?;
+        self.bridge.log(format!("Intent committed: {dir}"));
         Ok(IntentCommitted::new(dir))
     }
 
@@ -700,6 +704,7 @@ impl Archive for DiscArchive<'_> {
         _intent: IntentCommitted,
         record: RecordSession,
     ) -> Result<RecordCommitted, Abort> {
+        self.bridge.log("Committing record session…");
         let session = assemble_record_session(
             &self.staging,
             self.timestamp,
@@ -707,6 +712,7 @@ impl Archive for DiscArchive<'_> {
             &record,
         )?;
         let dir = self.burn(session)?;
+        self.bridge.log(format!("Record committed: {dir}"));
         Ok(RecordCommitted::new(dir))
     }
 
@@ -715,16 +721,20 @@ impl Archive for DiscArchive<'_> {
         _record: &RecordCommitted,
         files: &[(&str, &[u8])],
     ) -> Result<(), Abort> {
+        self.bridge.log("Exporting artifacts to shuttle…");
         media::verify_shuttle_mount(&self.shuttle_mount)
             .map_err(|e| Abort::new(format!("Shuttle USB not available: {e:#}")))?;
         for (name, bytes) in files {
+            self.bridge.log(format!("  shuttle: {name}"));
             media::write_and_sync(&self.shuttle_mount.join(name), bytes)
                 .map_err(|e| Abort::new(format!("Shuttle write {name} failed: {e:#}")))?;
         }
         let log_bytes = std::fs::read(self.staging.join("audit.log"))
             .map_err(|e| Abort::new(format!("Audit log read failed: {e}")))?;
+        self.bridge.log("  shuttle: audit.log");
         media::write_and_sync(&self.shuttle_mount.join("audit.log"), &log_bytes)
             .map_err(|e| Abort::new(format!("Audit log copy to shuttle failed: {e:#}")))?;
+        self.bridge.log("Shuttle export complete.");
         Ok(())
     }
 
