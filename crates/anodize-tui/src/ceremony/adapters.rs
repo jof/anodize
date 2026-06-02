@@ -528,16 +528,24 @@ impl<'a> DiscArchive<'a> {
             .clone()
             .ok_or_else(|| Abort::new("No optical device \u{2014} cannot burn"))?;
         let dir = session.dir_name.clone();
+        let mut burn_log: Vec<String> = Vec::new();
         self.bridge.tell(Prompt::Burning {
             what: dir.clone(),
-            log: Vec::new(),
+            log: burn_log.clone(),
         });
 
         let (tx, rx) = mpsc::channel();
         media::write_session(&dev, &self.prior_sessions, session.clone(), false, tx);
         loop {
             match rx.recv() {
-                Ok(BurnProgress::Step(s)) => tracing::info!(step = %s, "disc burn"),
+                Ok(BurnProgress::Step(s)) => {
+                    tracing::info!(step = %s, "disc burn");
+                    burn_log.push(s);
+                    self.bridge.tell(Prompt::Burning {
+                        what: dir.clone(),
+                        log: burn_log.clone(),
+                    });
+                }
                 Ok(BurnProgress::Done(Ok(()))) => break,
                 Ok(BurnProgress::Done(Err(e))) => {
                     return Err(Abort::new(format!("Disc burn failed: {e:#}")))

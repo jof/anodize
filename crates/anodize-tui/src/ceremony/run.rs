@@ -452,7 +452,13 @@ impl CeremonyRun {
             // Capture informational prompts for the log buffer.
             match &p {
                 Prompt::Note(msg) => notes.push(msg.clone()),
-                Prompt::Burning { what, .. } => notes.push(format!("Burning {what}…")),
+                Prompt::Burning { what, log } => {
+                    if let Some(last) = log.last() {
+                        notes.push(format!("[burn {what}] {last}"));
+                    } else {
+                        notes.push(format!("Burning {what}…"));
+                    }
+                }
                 _ => {}
             }
             // Lazily create interactive components from prompt data.
