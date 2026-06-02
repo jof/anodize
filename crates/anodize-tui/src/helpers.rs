@@ -33,6 +33,15 @@ pub fn sha256_fingerprint(der: &[u8]) -> String {
         .join(":")
 }
 
+/// SHA-256 fingerprint of the SubjectPublicKeyInfo from a DER-encoded CSR.
+/// Returns `None` if the CSR cannot be parsed or encoded.
+pub fn csr_spki_fingerprint(csr_der: &[u8]) -> Option<String> {
+    use der::Encode;
+    let csr = CertReq::from_der(csr_der).ok()?;
+    let spki_bytes = csr.info.public_key.to_der().ok()?;
+    Some(sha256_fingerprint(&spki_bytes))
+}
+
 // ── Disc session helpers ──────────────────────────────────────────────────────
 
 /// Load the most recent STATE.JSON from disc sessions (latest session first).
@@ -459,6 +468,23 @@ mod tests {
         )];
         let result = gather_cert_list_from_sessions(&sessions, &[]);
         assert!(result.is_empty());
+    }
+
+    // ── SPKI fingerprint tests ────────────────────────────────────────────
+
+    #[test]
+    fn csr_spki_fingerprint_returns_stable_value() {
+        let csr_der = build_test_csr_der("CN=Test,O=Acme,C=US");
+        let fp = csr_spki_fingerprint(&csr_der).expect("should parse CSR");
+        // Colon-separated hex, 64 hex chars + 31 colons = 95 chars
+        assert_eq!(fp.len(), 95, "unexpected fingerprint length: {fp}");
+        // Same CSR → same fingerprint
+        assert_eq!(fp, csr_spki_fingerprint(&csr_der).unwrap());
+    }
+
+    #[test]
+    fn csr_spki_fingerprint_invalid_der() {
+        assert!(csr_spki_fingerprint(b"not a CSR").is_none());
     }
 
     // ── Certificate preview tests ────────────────────────────────────────────
