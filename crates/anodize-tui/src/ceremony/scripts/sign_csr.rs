@@ -9,7 +9,7 @@
 //! 4. the quorum reconstructs the PIN,
 //! 5. the clock is re-confirmed,
 //! 6. the HSM signs the intermediate certificate,
-//! 7. the operator verifies the fingerprint against their paper checklist,
+//! 7. the operator verifies the public key fingerprint and records the cert fingerprint,
 //! 8. the record session (INTERMEDIATE.CRT + STATE.JSON) is burned,
 //! 9. the certificate is exported to the shuttle.
 
@@ -78,20 +78,30 @@ pub fn sign_csr(
         (cert, seq)
     };
 
-    // 7. Operator verifies the fingerprint before anything touches the disc.
-    let fingerprint = crate::helpers::sha256_fingerprint(cert.der());
+    // 7. Operator verifies the public key fingerprint (known from the CSR
+    //    requester) and records the certificate fingerprint (new).
+    let cert_fingerprint = crate::helpers::sha256_fingerprint(cert.der());
+    let spki_fingerprint = crate::helpers::csr_spki_fingerprint(&plan.csr_der)
+        .unwrap_or_else(|| "(CSR decode error)".into());
     let (subject, validity_days) = crate::helpers::cert_subject_and_validity_days(cert.der())
         .unwrap_or_else(|| ("(unknown)".into(), 0));
     op.confirm(
-        "Verify fingerprint before writing",
+        "Verify public key & record certificate fingerprint",
         &[
             format!("Subject  : {subject}"),
             format!("Validity : {validity_days} days"),
             String::new(),
-            "SHA-256 fingerprint:".into(),
-            format!("  {fingerprint}"),
+            "Public key fingerprint (SHA-256 of SPKI from CSR):".into(),
+            format!("  {spki_fingerprint}"),
+            "↑ Verify against the CSR requester's key fingerprint.".into(),
+            "  To compute beforehand:".into(),
+            "  openssl req -in csr.der -inform DER -noout -pubkey \\".into(),
+            "    | openssl pkey -pubin -outform DER \\".into(),
+            "    | openssl dgst -sha256 -c | tr 'a-f' 'A-F'".into(),
             String::new(),
-            "Compare against your paper checklist.".into(),
+            "Certificate fingerprint (SHA-256 of signed cert):".into(),
+            format!("  {cert_fingerprint}"),
+            "↑ Record this on your checklist — it is new.".into(),
         ],
     )?;
 
@@ -104,7 +114,7 @@ pub fn sign_csr(
             audit_events: vec![(
                 "cert.intermediate.issue".into(),
                 serde_json::json!({
-                    "fingerprint": fingerprint,
+                    "fingerprint": cert_fingerprint,
                     "profile": profile.name,
                 }),
             )],
@@ -131,7 +141,7 @@ pub fn sign_csr(
 
     Ok(Outcome {
         headline: format!("Intermediate certificate written ({})", profile.name),
-        detail: vec![format!("Fingerprint: {fingerprint}")],
+        detail: vec![format!("Fingerprint: {cert_fingerprint}")],
     })
 }
 
