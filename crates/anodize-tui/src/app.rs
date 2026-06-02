@@ -746,30 +746,13 @@ impl App {
             return Action::Noop;
         }
 
-        // Ctrl+L clears the screen
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('l') {
-            return Action::Render;
-        }
-
-        // Log view toggle (except during text entry)
-        let in_text_entry = self.mode == Mode::Ceremony
-            && if let Some(run) = self.ceremony_run.as_ref() {
-                run.wants_text_input()
-            } else {
-                self.ceremony.in_text_entry()
-            };
-
-        if !in_text_entry {
-            match key.code {
-                KeyCode::Char('l') | KeyCode::Char('L') => {
-                    self.log_view = !self.log_view;
-                    if self.log_view {
-                        self.log_scroll = self.log_lines.len().saturating_sub(1) as u16;
-                    }
-                    return Action::Noop;
-                }
-                _ => {}
+        // F12: toggle log view (always available, even during text entry)
+        if key.code == KeyCode::F(12) {
+            self.log_view = !self.log_view;
+            if self.log_view {
+                self.log_scroll = self.log_lines.len().saturating_sub(1) as u16;
             }
+            return Action::Noop;
         }
 
         // Log view scrolling
@@ -938,6 +921,12 @@ impl App {
 
         // Content scrolling (arrow keys when not in text entry).
         // Skip when a ceremony run is active — it handles its own scroll.
+        let in_text_entry = self.mode == Mode::Ceremony
+            && if let Some(run) = self.ceremony_run.as_ref() {
+                run.wants_text_input()
+            } else {
+                self.ceremony.in_text_entry()
+            };
         if !in_text_entry && self.ceremony_run.is_none() {
             match key.code {
                 KeyCode::Up => {
@@ -1163,7 +1152,7 @@ impl App {
             let content = self.log_lines.join("\n");
             let block = Block::default()
                 .borders(Borders::ALL)
-                .title("Status Log  [L/Esc] close  [\u{2191}/\u{2193}/PgUp/PgDn] scroll")
+                .title("Status Log  [F12/Esc] close  [\u{2191}/\u{2193}/PgUp/PgDn] scroll")
                 .style(crate::theme::BLOCK)
                 .border_style(crate::theme::BORDER)
                 .title_style(crate::theme::TITLE);

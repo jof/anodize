@@ -59,7 +59,7 @@ impl Widget for StatusBar<'_> {
 
         // If we have a second line, put the log key hint there
         if area.height >= 2 {
-            let hint = " [L] log view ";
+            let hint = " [F12] log view ";
             let hint_x = area.right().saturating_sub(hint.len() as u16 + 1);
             buf.set_string(
                 hint_x,
