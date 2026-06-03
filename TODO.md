@@ -179,12 +179,3 @@ them if the TOC ever does expose all 4 tracks.
 4. **Log drain race**: drain bridge log into `app.log_lines` before
    `write_ceremony_log()` consumes it, or clone the entries.
 
-## Share Input title counter doesn't update after accepting a share
-
-The `Share Input (Gen 1) — 1/2 shares` title stays at "1/2" after the first
-share is accepted and the input moves on to the next custodian.  It should
-update to "2/2" (or more generally, increment the counter) so operators can
-see progress.  The body correctly shows `✓ #1 Alice Robertson` and prompts
-for the next share, but the title is stale.
-
-

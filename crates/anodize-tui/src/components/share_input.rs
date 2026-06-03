@@ -342,17 +342,18 @@ impl ShareInput {
         } else {
             crate::theme::MODAL_TITLE_CYAN
         };
+        let required = if self.verify_all {
+            self.sss_meta.total as usize
+        } else {
+            self.threshold as usize
+        };
         let block = Block::default()
             .borders(Borders::ALL)
             .title(format!(
                 "Share Input (Gen {}) — {}/{} shares",
                 self.sss_meta.generation,
-                self.collected.len(),
-                if self.verify_all {
-                    self.sss_meta.total
-                } else {
-                    self.threshold
-                }
+                (self.collected.len() + 1).min(required),
+                required,
             ))
             .style(crate::theme::BLOCK)
             .border_style(border_style)
@@ -380,11 +381,6 @@ impl ShareInput {
             ]));
         }
 
-        let required = if self.verify_all {
-            self.sss_meta.total as usize
-        } else {
-            self.threshold as usize
-        };
         let remaining = required - self.collected.len().min(required);
         if remaining > 0 {
             // Word progress
