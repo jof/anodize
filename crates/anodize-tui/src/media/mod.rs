@@ -292,24 +292,24 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
 // ── Session superset invariant ─────────────────────────────────────────────────
 
 /// Carry forward files from `prior` that are missing in `new`.
-/// AUDIT.LOG and STATE.JSON are expected to change between sessions and are
-/// never overwritten if already present.  Any other missing file is copied
-/// verbatim and logged at warn level.
+/// AUDIT.LOG is always produced fresh by both intent and record sessions, so
+/// it is never backfilled.  All other files (including STATE.JSON) are carried
+/// forward when absent from the new session, preserving the superset invariant.
 fn backfill_session(prior: &SessionEntry, new: &mut SessionEntry) {
-    const MUTABLE_FILES: &[&str] = &["AUDIT.LOG", "STATE.JSON"];
+    const ALWAYS_FRESH: &[&str] = &["AUDIT.LOG"];
     for prev_file in &prior.files {
         let already = new
             .files
             .iter()
             .any(|f| f.name.eq_ignore_ascii_case(&prev_file.name));
         if !already {
-            let is_mutable = MUTABLE_FILES
+            let is_fresh = ALWAYS_FRESH
                 .iter()
                 .any(|m| prev_file.name.eq_ignore_ascii_case(m));
-            if is_mutable {
+            if is_fresh {
                 tracing::debug!(
                     file = %prev_file.name,
-                    "backfill_session: skipping mutable file not present in new session"
+                    "backfill_session: skipping always-fresh file not present in new session"
                 );
             } else {
                 tracing::warn!(
@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn backfill_skips_mutable_files_not_in_new() {
+    fn backfill_skips_audit_log_but_carries_state_json() {
         let prior = make_session(
             "s1",
             vec![
@@ -723,9 +723,16 @@ mod tests {
 
         backfill_session(&prior, &mut new);
 
-        // ROOT.CRT already present, AUDIT.LOG and STATE.JSON are mutable — not backfilled
-        assert_eq!(new.files.len(), 1);
-        assert_eq!(new.files[0].name, "ROOT.CRT");
+        // ROOT.CRT already present, AUDIT.LOG is mutable — not backfilled.
+        // STATE.JSON should be carried forward (superset invariant).
+        assert_eq!(new.files.len(), 2);
+        assert!(new.files.iter().any(|f| f.name == "ROOT.CRT"));
+        assert!(
+            new.files
+                .iter()
+                .any(|f| f.name == "STATE.JSON" && f.data == b"state1"),
+            "STATE.JSON should be carried forward from prior session"
+        );
     }
 
     #[test]
