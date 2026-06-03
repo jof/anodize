@@ -187,11 +187,4 @@ update to "2/2" (or more generally, increment the counter) so operators can
 see progress.  The body correctly shows `✓ #1 Alice Robertson` and prompts
 for the next share, but the title is stale.
 
-## SignCsr: display CSR public-key fingerprint before signing
-
-The Certificate Preview screen currently shows the SHA-256 fingerprint of the
-*resulting* certificate DER.  For the SignCsr flow, the operator should also see
-a fingerprint derived from the CSR's public key so they can independently verify
-(e.g. via `openssl req -in req.pem -noout -pubkey | openssl sha256`) that the
-key about to be signed matches what they expect.
 

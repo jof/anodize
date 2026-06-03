@@ -330,6 +330,13 @@ pub fn build_cert_preview(
     lines.push("  Serial      : (random — assigned at signing time)".to_string());
     lines.push(String::new());
     lines.push(format!("  Public Key  : {pub_key_alg}"));
+    let spki_fp = csr_spki_fingerprint(csr_der).unwrap_or_else(|| "(error)".into());
+    lines.push(format!("  SPKI SHA-256: {spki_fp}"));
+    lines.push("  ↑ Verify: openssl req -in csr.der -inform DER -noout -pubkey \\".into());
+    lines.push(
+        "      | openssl pkey -pubin -outform DER | openssl dgst -sha256 -c | tr 'a-f' 'A-F'"
+            .into(),
+    );
     lines.push("  Signature   : ecdsa-with-SHA384 (P-384)".into());
     lines.push(String::new());
     lines.push("  ── Extensions ──".into());
@@ -559,6 +566,7 @@ mod tests {
         assert!(text.contains("sub-ca"));
         assert!(text.contains("1825 days"));
         assert!(text.contains("EC Public Key"));
+        assert!(text.contains("SPKI SHA-256:"));
         assert!(text.contains("ecdsa-with-SHA384"));
         assert!(text.contains("CA:TRUE"));
         assert!(text.contains("pathLenConstraint=0"));
