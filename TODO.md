@@ -111,71 +111,16 @@ Possible fixes:
   bootstrap, STATE.JSON only in record sessions).  The validator should
   understand the ceremony phase model.
 
-## CRITICAL: SignCSR ceremony completes without burning sessions to disc
+## BD-R SRM session management investigation
 
-Observed during e2e test on 2026-06-02. After InitRoot completes (2 sessions
-burned: seed + record), SignCSR runs to completion — signs the intermediate on
-the HSM, exports intermediate.crt + audit.log to shuttle, and shows the
-"Ceremony Complete" screen with the correct fingerprint. However, the disc
-still has only 2 sessions; the intent and record sessions for SignCSR were
-never burned. The validator confirms only 2 sessions with a passing report.
+BUFFALO USB BD-R drive (profile 0x0041, BD-R SRM) accepted CLOSE SESSION
+but did not update its Disc Management Area / track descriptors for sessions
+3 and 4 during an e2e test on 2026-06-02.  Data was physically written and
+readable, but the SCSI TOC only reported 2 tracks.  Post-burn verification
+now catches this at runtime (`write_session_inner` re-reads disc info after
+CLOSE SESSION and logs a warning if the session count didn't increment).
 
-**Evidence:**
-- SCSI TOC: 2 tracks, last session = 02, lead-out at LBA 0x123C
-- Shuttle audit.log has seq:0 (intent) and seq:1 (record) for SignCSR
-- F12 log buffer shows no burn entries after InitRoot's record commit — only
-  the disc scan poll spam ("Scanning optical drive… 2 prior session(s)")
-- No "Committing intent" or "Committing record session" log entries for SignCSR
-
-**Root cause — BD-R TOC not updated after CLOSE SESSION:**
-`/run/anodize/ceremony.log` proves all 4 burns completed successfully:
-  1. 22:54:03 — InitRoot intent (NWA=0, sessions_before=0)
-  2. 22:55:39 — InitRoot record (NWA=320, sessions_before=1)
-  3. 22:57:46 — SignCSR intent  (NWA=640, sessions_before=2)
-  4. 23:00:42 — SignCSR record  (NWA=960, sessions_before=3)
-All WRITE(10), SYNCHRONIZE CACHE, CLOSE TRACK, and CLOSE SESSION SCSI
-commands returned success. Physical verification confirms **all 4 PVDs are
-readable** at LBA 16, 336, 656, and 976 (all contain valid "CD001"/"ANODIZE"
-ISO headers). The data IS on the disc.
-
-However, the SCSI TOC (READ TOC, format 02) only reports 2 tracks (first=01,
-last=02). Sessions 3 and 4 are invisible to the TOC. The `scan_disc` function
-reads tracks from the TOC, so it only finds 2 sessions. The validator sees 2.
-
-The BUFFALO USB BD-R drive (profile 0x0041, BD-R SRM) accepted CLOSE SESSION
-but did not update its Disc Management Area (DMA) / track descriptors for
-sessions 3 and 4. This may be a drive firmware bug, or BD-R SRM may require
-additional commands (e.g. an explicit RESERVE TRACK before each new session,
-or a specific CLOSE function code for BD-R) that the current write path
-does not issue.
-
-**Secondary issue — F12 log missing SignCSR entries:**
-The F12 status log shows no burn messages for SignCSR (despite the ceremony
-completing). This is because `bridge.log()` entries from the ceremony thread
-are drained by `write_ceremony_log()` (which writes CEREMONY.LOG to shuttle)
-before `on_tick()` has a chance to forward them to `app.log_lines`. The
-`Prompt::Burning` entries sent via the rendezvous channel ARE received by the
-main thread, but only the most recent progress line is forwarded per tick;
-if the burn completes between ticks, only the final "Session committed" line
-makes it through, and it may be deduplicated by `set_status()`.
-
-**Tertiary issue — timestamp collision:**
-`archive_config()` uses `self.confirmed_time` which is set once during Setup
-and never reset between ceremonies. Both InitRoot and SignCSR produce the
-same session dir_name prefix (`20260602T225138_048981931Z`). This doesn't
-cause the burn to fail (each ceremony gets a fresh DiscArchive with prior
-sessions from disc scan), but means directory names collide. The `scan_disc`
-dedup (`sessions.dedup_by(|a, b| a.dir_name == b.dir_name)`) would merge
-them if the TOC ever does expose all 4 tracks.
-
-**Fixes needed:**
-1. **BD-R session management**: investigate proper BD-R SRM session
-   boundaries. May need RESERVE TRACK or a different CLOSE function code.
-   Test with other BD-R drives to determine if this is BUFFALO-specific.
-2. **Post-burn verification**: after CLOSE SESSION, re-read the TOC/disc
-   info and verify the session count incremented. Fail loudly if not.
-3. **Fresh timestamp per ceremony**: use `SystemTime::now()` instead of the
-   stale `confirmed_time` when spawning each ceremony.
-4. **Log drain race**: drain bridge log into `app.log_lines` before
-   `write_ceremony_log()` consumes it, or clone the entries.
-
+Needs investigation: test with other BD-R drives to determine if this is
+BUFFALO-specific or if BD-R SRM requires additional commands (e.g. a
+different CLOSE function code, explicit RESERVE TRACK before each new
+session, or a firmware-specific DMA flush sequence).
