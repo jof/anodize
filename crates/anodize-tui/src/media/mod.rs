@@ -555,6 +555,41 @@ fn write_session_inner(
     close_track_session(&sg, close).context("CLOSE SESSION/DISC")?;
     tracing::info!("write_session_inner: close done");
 
+    // Post-burn verification: wait for the drive to finish any background
+    // lead-out / DMA updates, then re-read disc info and verify the session
+    // count incremented.  BD-R SRM drives (e.g. BUFFALO USB) may accept
+    // CLOSE SESSION without actually committing the session boundary into the
+    // Disc Management Area — catch that here instead of silently succeeding.
+    step(
+        progress,
+        "Post-burn verification — waiting for drive ready…",
+    );
+    tracing::info!("write_session_inner: post-burn TUR poll");
+    wait_drive_ready(&sg, std::time::Duration::from_secs(120))
+        .context("drive not ready after CLOSE SESSION")?;
+
+    let post_info = read_disc_info(&sg).context("post-burn READ DISC INFORMATION")?;
+    let expected_sessions = info.sessions + 1;
+    tracing::info!(
+        before = info.sessions,
+        after = post_info.sessions,
+        expected = expected_sessions,
+        "write_session_inner: post-burn session count"
+    );
+    if post_info.sessions < expected_sessions {
+        let msg = format!(
+            "WARNING: drive reports {} session(s) after burn, expected {}. \
+             The data was written successfully (WRITE + SYNCHRONIZE CACHE + \
+             CLOSE SESSION all returned OK) but the drive's TOC/DMA may not \
+             reflect the new session.  This is a known issue with some BD-R \
+             USB drives (e.g. BUFFALO).  The data IS on disc — verify with \
+             a manual sector read if needed.",
+            post_info.sessions, expected_sessions
+        );
+        tracing::error!("{msg}");
+        step(progress, &msg);
+    }
+
     step(progress, "Session committed successfully.");
     tracing::info!("write_session_inner: session write complete");
     Ok(())
