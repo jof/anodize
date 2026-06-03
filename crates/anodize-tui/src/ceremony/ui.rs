@@ -253,7 +253,9 @@ pub fn render_prompt(
                 )),
                 Line::from(format!("  {what}")),
             ];
-            for l in log.iter().rev().take(6).rev() {
+            // Fill available height: subtract borders (2) + 3 fixed lines above
+            let max_log = (area.height as usize).saturating_sub(5);
+            for l in log.iter().rev().take(max_log).rev() {
                 lines.push(Line::from(Span::styled(
                     format!("    {l}"),
                     Style::default().fg(Color::DarkGray),
