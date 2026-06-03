@@ -56,11 +56,12 @@ pub struct ArchiveConfig {
     pub base_state: Option<SessionState>,
 }
 
-/// Drain the ceremony log from the bridge and write it to the shuttle as
-/// `CEREMONY.LOG`. Best-effort: failures are silently ignored because the
-/// ceremony outcome has already been determined.
+/// Write the complete ceremony log to the shuttle as `CEREMONY.LOG`.
+/// Uses the append-only `full_log` snapshot so the main thread's `drain_log`
+/// (which feeds the F12 UI log) is not starved.  Best-effort: failures are
+/// silently ignored because the ceremony outcome has already been determined.
 fn write_ceremony_log(bridge: &Bridge, arc: &mut DiscArchive<'_>) {
-    let lines = bridge.drain_log();
+    let lines = bridge.full_log();
     if lines.is_empty() {
         return;
     }

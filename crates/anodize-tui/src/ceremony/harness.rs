@@ -35,6 +35,11 @@ pub struct Bridge {
     prompt_tx: SyncSender<Prompt>,
     response_rx: Receiver<Response>,
     ceremony_log: Arc<Mutex<Vec<String>>>,
+    /// Append-only accumulator of all log lines produced during the ceremony.
+    /// Unlike `ceremony_log` (which is drained by the main thread's `on_tick`),
+    /// this buffer is never cleared — `write_ceremony_log` reads it to produce
+    /// the complete CEREMONY.LOG without racing the main-thread drain.
+    full_log: Arc<Mutex<Vec<String>>>,
 }
 
 impl Bridge {
@@ -55,9 +60,20 @@ impl Bridge {
 
     /// Append a line to the ceremony log buffer.
     pub fn log(&self, msg: impl Into<String>) {
+        let s = msg.into();
         if let Ok(mut v) = self.ceremony_log.lock() {
-            v.push(msg.into());
+            v.push(s.clone());
         }
+        if let Ok(mut v) = self.full_log.lock() {
+            v.push(s);
+        }
+    }
+
+    /// Return a snapshot of the complete ceremony log (all entries, never
+    /// cleared). Used by `write_ceremony_log` to produce CEREMONY.LOG
+    /// without racing the main thread's `drain_log`.
+    pub fn full_log(&self) -> Vec<String> {
+        self.full_log.lock().map(|v| v.clone()).unwrap_or_default()
     }
 
     /// Drain and return all accumulated ceremony log lines.
@@ -89,10 +105,12 @@ impl CeremonyHandle {
         let (prompt_tx, prompt_rx) = sync_channel::<Prompt>(0);
         let (response_tx, response_rx) = channel::<Response>();
         let ceremony_log = Arc::new(Mutex::new(Vec::new()));
+        let full_log = Arc::new(Mutex::new(Vec::new()));
         let bridge = Bridge {
             prompt_tx: prompt_tx.clone(),
             response_rx,
             ceremony_log: Arc::clone(&ceremony_log),
+            full_log,
         };
         let join = thread::spawn(move || {
             let terminal = body(bridge);
