@@ -691,7 +691,7 @@ impl App {
             shuttle_mount: self.shuttle_mount.clone(),
             staging: PathBuf::from("/run/anodize/staging"),
             profile_bytes: self.profile_toml_bytes.clone().unwrap_or_default(),
-            timestamp: self.confirmed_time.unwrap_or_else(SystemTime::now),
+            timestamp: SystemTime::now(),
             sessions_remaining: self.disc.sessions_remaining,
             base_state: self.disc.session_state.clone(),
         }
