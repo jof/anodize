@@ -85,7 +85,7 @@ appears to complete the rekey on the HSM and/or state.json.  The ceremony should
 When pairing two HSMs together, we shouldn't gather share inputs from the operators and the HSM PIN is not needed for this operation.
 
 
-## Subsequent amounts of the shuttle.
+## Subsequent mounts of the shuttle.
 Subsequent mounts of the shuttle do not appear to be working consistently with the auto mount.
 
 ## Validation: session continuity errors on normal ceremony flow
@@ -124,3 +124,7 @@ Needs investigation: test with other BD-R drives to determine if this is
 BUFFALO-specific or if BD-R SRM requires additional commands (e.g. a
 different CLOSE function code, explicit RESERVE TRACK before each new
 session, or a firmware-specific DMA flush sequence).
+
+## Input CSRs: flexibility
+Allow the input CSR to be in either PEM or DSR format.
+Add a simple file browser to select the CSR file from the contents of the shuttle filesystem.
