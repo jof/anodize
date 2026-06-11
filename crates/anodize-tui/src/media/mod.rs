@@ -219,60 +219,68 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
         return Err("disc is finalized — insert a blank or appendable write-once disc".into());
     }
 
-    // Read sessions from tracks.  Probe tracks 1..255 instead of
-    // relying on the disc-info session count, which can under-report
-    // on cdemu writable-load discs.
+    // Read sessions from tracks.  Always probe tracks 1..255 regardless of
+    // disc_status — the DMA may not have been updated after a CLOSE SESSION
+    // (BUG-3), causing read_disc_info to report Blank even when data is
+    // present.  On a truly blank disc, read_track_info will fail or tracks
+    // will be marked blank, breaking the loop naturally.
     let is_cd = profile_is_cd(profile);
+    let is_reported_blank = info.status == DiscStatus::Blank;
     let mut sessions: Vec<SessionEntry> = Vec::new();
-    if info.status != DiscStatus::Blank {
-        for track_num in 1..=255u8 {
-            let track = match read_track_info(&sg, track_num) {
-                Ok(t) => t,
-                Err(_) => break, // no more tracks
-            };
-            if track.blank {
-                break; // reached the blank/invisible track — no more data
+    for track_num in 1..=255u8 {
+        let track = match read_track_info(&sg, track_num) {
+            Ok(t) => t,
+            Err(_) => break, // no more tracks
+        };
+        if track.blank {
+            break; // reached the blank/invisible track — no more data
+        }
+        // CD-R tracks may have a 150-sector (2-second) Red Book pregap
+        // before the data area.  DVD and BD do not have pregaps.  Only
+        // attempt the pregap-skip probe on CD profiles to avoid issuing
+        // a wasteful (and potentially confusing) extra READ on BD/DVD.
+        let data_sectors = track.size_sectors.max(1) as usize;
+        let candidates: &[(u32, usize)] = if track.start_lba >= 0x8000_0000 {
+            // Negative LBA (e.g. -150): data starts at absolute LBA 0
+            let gap = 0u32.wrapping_sub(track.start_lba);
+            &[(0u32, data_sectors.saturating_sub(gap as usize).max(1))]
+        } else if is_cd && data_sectors > 150 {
+            // CD: try with 150-sector pregap skip, then without
+            &[
+                (track.start_lba + 150, data_sectors - 150),
+                (track.start_lba, data_sectors),
+            ]
+        } else {
+            // BD-R / DVD-R / small CD tracks: read from track start directly
+            &[(track.start_lba, data_sectors)]
+        };
+        let mut parsed = false;
+        for &(read_lba, read_n) in candidates {
+            let mut image = vec![0u8; read_n * iso9660::SECTOR];
+            if read_sectors(&sg, read_lba, &mut image).is_err() {
+                continue;
             }
-            // CD-R tracks may have a 150-sector (2-second) Red Book pregap
-            // before the data area.  DVD and BD do not have pregaps.  Only
-            // attempt the pregap-skip probe on CD profiles to avoid issuing
-            // a wasteful (and potentially confusing) extra READ on BD/DVD.
-            let data_sectors = track.size_sectors.max(1) as usize;
-            let candidates: &[(u32, usize)] = if track.start_lba >= 0x8000_0000 {
-                // Negative LBA (e.g. -150): data starts at absolute LBA 0
-                let gap = 0u32.wrapping_sub(track.start_lba);
-                &[(0u32, data_sectors.saturating_sub(gap as usize).max(1))]
-            } else if is_cd && data_sectors > 150 {
-                // CD: try with 150-sector pregap skip, then without
-                &[
-                    (track.start_lba + 150, data_sectors - 150),
-                    (track.start_lba, data_sectors),
-                ]
-            } else {
-                // BD-R / DVD-R / small CD tracks: read from track start directly
-                &[(track.start_lba, data_sectors)]
-            };
-            let mut parsed = false;
-            for &(read_lba, read_n) in candidates {
-                let mut image = vec![0u8; read_n * iso9660::SECTOR];
-                if read_sectors(&sg, read_lba, &mut image).is_err() {
-                    continue;
+            match iso9660::parse_iso(&image, read_lba) {
+                Ok(entries) => {
+                    sessions.extend(entries);
+                    parsed = true;
+                    break;
                 }
-                match iso9660::parse_iso(&image, read_lba) {
-                    Ok(entries) => {
-                        sessions.extend(entries);
-                        parsed = true;
-                        break;
-                    }
-                    Err(_) => continue,
-                }
-            }
-            if !parsed {
-                tracing::warn!("cannot parse ISO for track {track_num}");
+                Err(_) => continue,
             }
         }
-        sessions.sort_by(|a, b| a.dir_name.cmp(&b.dir_name));
-        sessions.dedup_by(|a, b| a.dir_name == b.dir_name);
+        if !parsed {
+            tracing::warn!("cannot parse ISO for track {track_num}");
+        }
+    }
+    sessions.sort_by(|a, b| a.dir_name.cmp(&b.dir_name));
+    sessions.dedup_by(|a, b| a.dir_name == b.dir_name);
+    if is_reported_blank && !sessions.is_empty() {
+        tracing::warn!(
+            "disc reports Blank but found {} parseable track(s) — \
+             DMA may not reflect actual disc state",
+            sessions.len()
+        );
     }
 
     // Capacity — derive used count from actually-parsed sessions
@@ -568,26 +576,51 @@ fn write_session_inner(
     wait_drive_ready(&sg, std::time::Duration::from_secs(120))
         .context("drive not ready after CLOSE SESSION")?;
 
-    let post_info = read_disc_info(&sg).context("post-burn READ DISC INFORMATION")?;
     let expected_sessions = info.sessions + 1;
-    tracing::info!(
-        before = info.sessions,
-        after = post_info.sessions,
-        expected = expected_sessions,
-        "write_session_inner: post-burn session count"
-    );
-    if post_info.sessions < expected_sessions {
-        let msg = format!(
-            "WARNING: drive reports {} session(s) after burn, expected {}. \
-             The data was written successfully (WRITE + SYNCHRONIZE CACHE + \
-             CLOSE SESSION all returned OK) but the drive's TOC/DMA may not \
-             reflect the new session.  This is a known issue with some BD-R \
-             USB drives (e.g. BUFFALO).  The data IS on disc — verify with \
-             a manual sector read if needed.",
-            post_info.sessions, expected_sessions
+
+    // Some drives (especially USB bridges) take significant time to update
+    // the DMA after CLOSE SESSION.  Retry up to 3 times with increasing
+    // delays before declaring failure.
+    const VERIFY_DELAYS: &[u64] = &[5, 15, 30];
+    let mut verified = false;
+    for (attempt, &delay_secs) in std::iter::once(&0u64)
+        .chain(VERIFY_DELAYS.iter())
+        .enumerate()
+    {
+        if delay_secs > 0 {
+            step(
+                progress,
+                format!("Session count mismatch — retrying in {delay_secs}s (attempt {attempt})…"),
+            );
+            tracing::warn!(
+                attempt,
+                delay_secs,
+                "post-burn verify: session count mismatch, retrying"
+            );
+            std::thread::sleep(std::time::Duration::from_secs(delay_secs));
+            wait_drive_ready(&sg, std::time::Duration::from_secs(60))
+                .context("drive not ready during post-burn retry")?;
+        }
+        let post_info = read_disc_info(&sg).context("post-burn READ DISC INFORMATION")?;
+        tracing::info!(
+            attempt,
+            before = info.sessions,
+            after = post_info.sessions,
+            expected = expected_sessions,
+            "write_session_inner: post-burn session count"
         );
-        tracing::error!("{msg}");
-        step(progress, &msg);
+        if post_info.sessions >= expected_sessions {
+            verified = true;
+            break;
+        }
+    }
+    if !verified {
+        anyhow::bail!(
+            "post-burn verification FAILED: drive reports fewer sessions than expected \
+             (expected {expected_sessions}).  WRITE + SYNCHRONIZE CACHE + CLOSE SESSION \
+             all returned OK but the drive's TOC/DMA was not updated.  The disc may be \
+             in an inconsistent state — eject and inspect manually."
+        );
     }
 
     step(progress, "Session committed successfully.");
