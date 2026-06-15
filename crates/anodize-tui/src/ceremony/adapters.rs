@@ -527,6 +527,15 @@ impl<'a> DiscArchive<'a> {
             .dev
             .clone()
             .ok_or_else(|| Abort::new("No optical device \u{2014} cannot burn"))?;
+        // Apply the superset backfill up front so the bytes we burn and the
+        // session we retain as a prior are one and the same. `write_session`
+        // backfills a private clone on its writer thread; if we retained the
+        // un-backfilled `session` here, the next burn in this ceremony would
+        // carry forward from an impoverished prior (an AUDIT.LOG-only intent
+        // session) and silently drop earlier artifacts — violating the
+        // superset invariant. Backfill is idempotent, so the writer
+        // re-applying it against the same prior is a no-op.
+        let session = superset_session(&self.prior_sessions, session);
         let dir = session.dir_name.clone();
         let mut burn_log: Vec<String> = Vec::new();
         self.bridge.tell(Prompt::Burning {
@@ -557,6 +566,17 @@ impl<'a> DiscArchive<'a> {
         self.prior_sessions.push(session);
         Ok(dir)
     }
+}
+
+/// Return `session` as it will be persisted to disc: the immediately preceding
+/// session's files carried forward (the superset invariant). The burned image
+/// and the prior retained for the next burn MUST both derive from this value —
+/// see [`DiscArchive::burn`].
+fn superset_session(prior_sessions: &[SessionEntry], mut session: SessionEntry) -> SessionEntry {
+    if let Some(prev) = prior_sessions.last() {
+        media::backfill_session(prev, &mut session);
+    }
+    session
 }
 
 /// Assemble the intent session: create the audit-log chain anchored to the
@@ -923,5 +943,79 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&staging).ok();
+    }
+
+    /// Regression: a record burn that follows an intent burn within one
+    /// ceremony must still carry forward artifacts written by a *prior*
+    /// ceremony. The earlier bug had `burn()` retain the un-backfilled session,
+    /// so after the AUDIT.LOG-only intent burn the in-memory prior was
+    /// impoverished, and the record burn backfilled from it and dropped
+    /// ROOT.CRT/ROOT.CRL. `superset_session` (used by `burn` for both the
+    /// burned image and the retained prior) must keep the chain a true
+    /// superset across the intent → record boundary.
+    #[test]
+    fn retained_prior_stays_superset_across_intent_then_record() {
+        let file = |n: &str, d: &[u8]| IsoFile {
+            name: n.into(),
+            data: d.to_vec(),
+        };
+        let ts = SystemTime::now();
+        let mut prior: Vec<SessionEntry> = Vec::new();
+
+        // A prior ceremony (InitRoot) already burned the root artifacts.
+        prior.push(superset_session(
+            &prior,
+            SessionEntry {
+                dir_name: "t0-record".into(),
+                timestamp: ts,
+                files: vec![
+                    file("AUDIT.LOG", b"log0"),
+                    file("ROOT.CRT", b"rootcert"),
+                    file("ROOT.CRL", b"rootcrl"),
+                    file("STATE.JSON", b"state0"),
+                ],
+            },
+        ));
+
+        // This ceremony's intent session carries only a fresh AUDIT.LOG.
+        prior.push(superset_session(
+            &prior,
+            SessionEntry {
+                dir_name: "t1-intent".into(),
+                timestamp: ts,
+                files: vec![file("AUDIT.LOG", b"log1")],
+            },
+        ));
+
+        // This ceremony's record session adds a new artifact + fresh STATE.JSON.
+        let record = superset_session(
+            &prior,
+            SessionEntry {
+                dir_name: "t1-record".into(),
+                timestamp: ts,
+                files: vec![
+                    file("AUDIT.LOG", b"log2"),
+                    file("INTERMEDIATE.CRT", b"inter"),
+                    file("STATE.JSON", b"state1"),
+                ],
+            },
+        );
+
+        let names: Vec<&str> = record.files.iter().map(|f| f.name.as_str()).collect();
+        for required in [
+            "ROOT.CRT",
+            "ROOT.CRL",
+            "INTERMEDIATE.CRT",
+            "STATE.JSON",
+            "AUDIT.LOG",
+        ] {
+            assert!(
+                names.contains(&required),
+                "record session must retain {required}; got {names:?}"
+            );
+        }
+        // The carried-forward artifacts must keep the prior session's bytes.
+        let root = record.files.iter().find(|f| f.name == "ROOT.CRT").unwrap();
+        assert_eq!(root.data, b"rootcert");
     }
 }
