@@ -303,7 +303,14 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
 /// AUDIT.LOG is always produced fresh by both intent and record sessions, so
 /// it is never backfilled.  All other files (including STATE.JSON) are carried
 /// forward when absent from the new session, preserving the superset invariant.
-fn backfill_session(prior: &SessionEntry, new: &mut SessionEntry) {
+///
+/// This is the single definition of the superset rule.  `write_session` applies
+/// it to the image it burns; callers that retain a burned session as a future
+/// prior (see `DiscArchive::burn`) must apply the *same* transform to what they
+/// retain, or the next burn would carry forward from an impoverished prior.
+/// The operation is idempotent, so applying it twice against the same prior is
+/// a harmless no-op.
+pub(crate) fn backfill_session(prior: &SessionEntry, new: &mut SessionEntry) {
     const ALWAYS_FRESH: &[&str] = &["AUDIT.LOG"];
     for prev_file in &prior.files {
         let already = new
