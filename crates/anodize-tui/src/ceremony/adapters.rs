@@ -960,11 +960,9 @@ mod tests {
             data: d.to_vec(),
         };
         let ts = SystemTime::now();
-        let mut prior: Vec<SessionEntry> = Vec::new();
-
         // A prior ceremony (InitRoot) already burned the root artifacts.
-        prior.push(superset_session(
-            &prior,
+        let first = superset_session(
+            &[],
             SessionEntry {
                 dir_name: "t0-record".into(),
                 timestamp: ts,
@@ -975,17 +973,19 @@ mod tests {
                     file("STATE.JSON", b"state0"),
                 ],
             },
-        ));
+        );
 
         // This ceremony's intent session carries only a fresh AUDIT.LOG.
-        prior.push(superset_session(
-            &prior,
+        let second = superset_session(
+            std::slice::from_ref(&first),
             SessionEntry {
                 dir_name: "t1-intent".into(),
                 timestamp: ts,
                 files: vec![file("AUDIT.LOG", b"log1")],
             },
-        ));
+        );
+
+        let prior: Vec<SessionEntry> = vec![first, second];
 
         // This ceremony's record session adds a new artifact + fresh STATE.JSON.
         let record = superset_session(
