@@ -772,7 +772,7 @@ mod tests {
             1_000_000,
             &[("ROOT.CRT", b"root-cert-s1"), ("AUDIT.LOG", b"log-s1\n")],
         );
-        let img1 = build_iso(&[s1.clone()], 0);
+        let img1 = build_iso(std::slice::from_ref(&s1), 0);
 
         // Session 2 at LBA=nwa — contains both sessions (superset invariant)
         let s2 = make_session(
@@ -844,7 +844,7 @@ mod tests {
             1_000_000,
             &[("ROOT.CRT", b"cert"), ("AUDIT.LOG", b"log")],
         );
-        let img = build_iso(&[s.clone()], offset);
+        let img = build_iso(std::slice::from_ref(&s), offset);
         let pvd = &img[16 * SECTOR..17 * SECTOR];
 
         // PVD root dir extent
@@ -871,7 +871,7 @@ mod tests {
         );
 
         // Root directory: session subdir LBA should also be absolute
-        let root_secs = sectors_for(root_dir_size(&[s.clone()])) as usize;
+        let root_secs = sectors_for(root_dir_size(std::slice::from_ref(&s)));
         let root_dir = &img[20 * SECTOR..(20 + root_secs) * SECTOR];
         // Skip "." and ".." (34 bytes each), then read the first real entry
         let entry_start = 34 + 34; // dot + dotdot
