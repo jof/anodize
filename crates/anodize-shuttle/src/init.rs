@@ -242,7 +242,10 @@ fn format_device(device: &str, volume_label: &str) -> Result<()> {
 /// This check reads `diskutil list -plist <device>` and ensures:
 ///   1. Exactly one partition exists.
 ///   2. That partition is FAT32 with the expected volume label.
-#[cfg(target_os = "macos")]
+///
+/// Defined unconditionally (not `#[cfg(target_os = "macos")]`) so the
+/// `cfg!(target_os = "macos")` call site in `format_device` compiles on Linux;
+/// the body is cross-platform and is simply never reached off macOS.
 fn verify_partition_layout_macos(device: &str, expected_label: &str) -> Result<()> {
     // Give macOS a moment to settle the partition table.
     std::thread::sleep(std::time::Duration::from_secs(1));
