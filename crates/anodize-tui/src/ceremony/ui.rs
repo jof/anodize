@@ -52,13 +52,10 @@ pub fn key_to_response(
             _ => None,
         },
         Prompt::Choose { options, .. } => match key.code {
-            KeyCode::Char(c) => {
-                if let Some(i) = options.iter().position(|o| o.key == c) {
-                    Some(Response::Choice(i))
-                } else {
-                    None
-                }
-            }
+            KeyCode::Char(c) => options
+                .iter()
+                .position(|o| o.key == c)
+                .map(Response::Choice),
             KeyCode::Esc => Some(Response::Abort),
             _ => None,
         },
@@ -143,6 +140,7 @@ pub fn key_to_response(
 
 /// Render the content area for the current prompt. `spinner` is a frame counter
 /// the App advances on each tick so the burn animation moves.
+#[allow(clippy::too_many_arguments)]
 pub fn render_prompt(
     frame: &mut Frame,
     area: Rect,

@@ -734,7 +734,7 @@ impl App {
                 // session) until it reaches a terminal prompt.
                 self.ceremony_run
                     .as_ref()
-                    .map_or(false, |run| !run.is_finished())
+                    .is_some_and(|run| !run.is_finished())
             } else {
                 false
             };
@@ -1156,7 +1156,7 @@ impl App {
                 .style(crate::theme::BLOCK)
                 .border_style(crate::theme::BORDER)
                 .title_style(crate::theme::TITLE);
-            let inner_height = frame.area().height.saturating_sub(2) as u16;
+            let inner_height = frame.area().height.saturating_sub(2);
             let max_scroll = (self.log_lines.len() as u16).saturating_sub(inner_height);
             let scroll = self.log_scroll.min(max_scroll);
             let para = ratatui::widgets::Paragraph::new(content.as_str())
