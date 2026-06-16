@@ -382,9 +382,14 @@ pub fn read_sectors(dev: &SgDev, lba: u32, buf: &mut [u8]) -> Result<()> {
 
 /// SYNCHRONIZE CACHE (0x35) — flush the drive's write buffer to disc.
 /// Must be called after the last write before closing the track.
+///
+/// BD-R drives can take several minutes for SYNCHRONIZE CACHE, especially on
+/// back-to-back sessions where the Defect Management Area (DMA) update from
+/// the previous session close may still be running internally.  The 300 s
+/// timeout is generous but necessary for USB-attached BD-R writers.
 pub fn synchronize_cache(dev: &SgDev) -> Result<()> {
     let cdb: [u8; 10] = [0x35, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-    dev.cdb_none(&cdb, 120_000).context("SYNCHRONIZE CACHE")?;
+    dev.cdb_none(&cdb, 300_000).context("SYNCHRONIZE CACHE")?;
     Ok(())
 }
 

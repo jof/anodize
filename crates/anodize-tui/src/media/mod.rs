@@ -534,7 +534,39 @@ fn write_session_inner(
 
     step(progress, "SYNCHRONIZE CACHE — flushing to media…");
     tracing::info!("write_session_inner: SYNCHRONIZE CACHE");
-    synchronize_cache(&sg).context("SYNCHRONIZE CACHE")?;
+    match synchronize_cache(&sg) {
+        Ok(()) => {}
+        Err(first_err) => {
+            let msg = format!("{first_err:#}");
+            if msg.contains("transport error") || msg.contains("host=") {
+                // USB bridge chips (ASMedia, Realtek, etc.) impose their own
+                // command timeout (~30-60 s) independent of SG_IO.  On BD-R
+                // back-to-back sessions the DMA update from the previous
+                // CLOSE SESSION may still be running, causing the bridge to
+                // reset.  The data is already on the disc surface — wait for
+                // the drive to re-enumerate and retry.
+                tracing::warn!(
+                    "SYNCHRONIZE CACHE transport error (likely USB bridge timeout), \
+                     waiting for drive recovery: {first_err:#}"
+                );
+                step(
+                    progress,
+                    "SYNCHRONIZE CACHE — USB transport error, waiting for drive recovery…",
+                );
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                step(
+                    progress,
+                    "SYNCHRONIZE CACHE — polling drive readiness (this may take a minute)…",
+                );
+                wait_drive_ready(&sg, std::time::Duration::from_secs(120))
+                    .context("drive not ready after SYNCHRONIZE CACHE transport error")?;
+                step(progress, "SYNCHRONIZE CACHE — drive recovered, retrying…");
+                synchronize_cache(&sg).context("SYNCHRONIZE CACHE (retry after USB recovery)")?;
+            } else {
+                return Err(first_err).context("SYNCHRONIZE CACHE");
+            }
+        }
+    }
     tracing::info!("write_session_inner: SYNCHRONIZE CACHE done");
 
     // Always close track + session so the drive commits a proper session
