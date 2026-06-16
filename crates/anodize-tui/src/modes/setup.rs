@@ -174,13 +174,26 @@ impl SetupMode {
                     }
                     None => "  No appendable disc detected. Insert write-once disc.".into(),
                 };
-                vec![
-                    String::new(),
-                    disc_info,
-                    String::new(),
-                    "  [1]  Confirm disc and select operation".into(),
-                    "  [q]  Abort".into(),
-                ]
+                let mut lines = vec![String::new(), disc_info];
+                if let Some(ref err) = app.disc.disc_error {
+                    lines.push(String::new());
+                    lines.push("  ╔══════════════════════════════════════════════════════╗".into());
+                    lines.push("  ║  ERROR: UNRECOGNIZED DISC                            ║".into());
+                    lines.push("  ╚══════════════════════════════════════════════════════╝".into());
+                    lines.push(String::new());
+                    lines.push(format!("  {err}"));
+                    lines.push(String::new());
+                    lines.push(
+                        "  Remove this disc and insert a blank or anodize-initialized disc.".into(),
+                    );
+                    lines.push(String::new());
+                    lines.push("  [q]  Abort".into());
+                } else {
+                    lines.push(String::new());
+                    lines.push("  [1]  Confirm disc and select operation".into());
+                    lines.push("  [q]  Abort".into());
+                }
+                lines
             }
         };
 

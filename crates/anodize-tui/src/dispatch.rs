@@ -140,6 +140,28 @@ impl App {
                             );
                         }
                     }
+                    // Proactively detect non-anodize discs so the error is
+                    // visible in the main panel, not just the status bar.
+                    if !need_blank
+                        && n > 0
+                        && !crate::helpers::disc_has_landing_pad(&self.disc.prior_sessions)
+                    {
+                        self.disc.disc_error = Some(
+                            "Not a recognized anodize disc — no Track 1 landing pad found. \
+                             This disc has data but was not initialized by anodize. \
+                             Insert a blank disc to start a new ceremony, \
+                             or use Migrate to transfer from an existing anodize disc."
+                                .into(),
+                        );
+                        tracing::warn!(
+                            dev = %dev.display(),
+                            sessions = n,
+                            "disc rejected: no landing pad marker in {} session(s)",
+                            n
+                        );
+                    } else {
+                        self.disc.disc_error = None;
+                    }
                     self.set_status(if need_blank {
                         format!(
                             "Blank disc in {} ({cap_summary}). Press [1] to write.",
@@ -149,6 +171,11 @@ impl App {
                         format!(
                             "Blank disc in {} ({cap_summary}). \
                              Press [1] to initialize as an anodize audit disc (writes Track 1).",
+                            dev.display()
+                        )
+                    } else if self.disc.disc_error.is_some() {
+                        format!(
+                            "Disc in {} has {n} session(s) but is NOT a recognized anodize disc.",
                             dev.display()
                         )
                     } else {

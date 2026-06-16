@@ -1162,9 +1162,13 @@ impl App {
                         self.update(Action::SetupComplete);
                     } else {
                         // Strict: refuse a disc that has sessions but no landing pad.
+                        let msg = "Not a recognized anodize disc — no Track 1 landing pad found. \
+                             This disc has data but was not initialized by anodize. \
+                             Insert a blank disc to start a new ceremony, \
+                             or use Migrate to transfer from an existing anodize disc.";
+                        self.disc.disc_error = Some(msg.into());
                         self.set_status(
-                            "Not a recognized anodize disc (no Track 1 landing pad). \
-                             Insert a blank disc or migrate to a fresh disc.",
+                            "Disc rejected: not a recognized anodize disc. See details above.",
                         );
                     }
                 }

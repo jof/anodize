@@ -720,6 +720,7 @@ mod tests {
             prior_sessions: sessions,
             sessions_remaining: Some(10),
             disc_scan_rx: None,
+            disc_error: None,
             session_state: Some(SessionState {
                 version: 1,
                 root_cert_sha256: "abcdef".into(),

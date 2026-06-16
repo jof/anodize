@@ -16,6 +16,10 @@ pub struct DiscContext {
     /// Background disc scan result channel.  `Some` while a scan thread is
     /// running; the tick handler polls `try_recv` so the TUI stays responsive.
     pub disc_scan_rx: Option<Receiver<DiscScanBatch>>,
+    /// Persistent error about the inserted disc (e.g. missing landing pad).
+    /// Displayed prominently in the WaitDisc panel so the operator doesn't
+    /// miss it.  Cleared when a valid disc is detected or the disc changes.
+    pub disc_error: Option<String>,
 }
 
 /// Result bundle from a background disc-scan thread.
@@ -32,6 +36,7 @@ impl DiscContext {
             sessions_remaining: None,
             session_state: None,
             disc_scan_rx: None,
+            disc_error: None,
         }
     }
 }
