@@ -18,7 +18,8 @@
 # Disc-before-USB invariant is enforced in the anodize-ceremony binary itself;
 # this module only provides the environment in which it runs.
 
-{ config, pkgs, lib, anodize-ceremony, serialPort ? "ttyS0", ... }:
+{ config, pkgs, lib, anodize-ceremony, serialPort ? "ttyS0"
+, anodizeSource ? null, anodizeRev ? "unknown", ... }:
 
 let
   # The ceremony user's login shell: exec the sentinel via its capability
@@ -190,6 +191,20 @@ in
     token_label  = "anodize-root-2026"
     key_label    = "root-key"
     key_spec     = "ecdsa-p384"
+  '';
+
+  # Track 1 landing-pad payload. The ceremony writes these onto a blank disc's
+  # first session (and the superset invariant carries them into every later
+  # session), so an anodize audit disc is self-describing and rebuildable from
+  # the disc alone. The ceremony reads them from /etc/anodize at write time;
+  # an absent source archive degrades gracefully.
+  environment.etc."anodize/source.tar.gz" =
+    lib.mkIf (anodizeSource != null) { source = anodizeSource; };
+
+  environment.etc."anodize/build-info.txt".text = ''
+    anodize ceremony — build provenance
+    git-commit: ${anodizeRev}
+    source-archive: SOURCE.TGZ (a copy of the source is written to this disc's Track 1)
   '';
 
 

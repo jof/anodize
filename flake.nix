@@ -53,6 +53,21 @@
       # pname suppresses crane's warning about missing name in a virtual workspace root.
       mkCargoArtifacts = system:
         (mkCraneLib system).buildDepsOnly ((mkCommonArgs system) // { pname = "anodize-deps"; version = "0.1.0"; });
+
+      # Reproducible tarball of the source that built this ISO, placed on every
+      # disc's Track 1 landing pad as SOURCE.TGZ (provenance / rebuildability).
+      # Excludes committed binary cruft (a core dump and a prebuilt enum binary)
+      # and any built ISO so the archive is ~source-only.
+      mkSourceArchive = system:
+        let pkgs = mkPkgs system;
+        in pkgs.runCommand "anodize-src.tar.gz" { } ''
+          mkdir -p stage/anodize
+          cp -r ${self}/. stage/anodize/
+          chmod -R u+w stage
+          rm -f stage/anodize/core stage/anodize/yubihsm_enum.linux stage/anodize/*.iso
+          tar -c --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+            -C stage anodize | gzip -n > $out
+        '';
     in
 
     # ---------------------------------------------------------------------------
@@ -135,6 +150,8 @@
         specialArgs = {
           anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony;
           serialPort = "ttyS0";
+          anodizeSource = mkSourceArchive "x86_64-linux";
+          anodizeRev = self.rev or "dirty-tree";
         };
 
         modules = [
@@ -153,6 +170,8 @@
         specialArgs = {
           anodize-ceremony = self.packages.aarch64-linux.anodize-ceremony;
           serialPort = "ttyAMA0";
+          anodizeSource = mkSourceArchive "aarch64-linux";
+          anodizeRev = self.rev or "dirty-tree";
         };
 
         modules = [
@@ -180,6 +199,8 @@
           anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony-dev;
           serialPort = "ttyS0";
           inherit cdemu-src;
+          anodizeSource = mkSourceArchive "x86_64-linux";
+          anodizeRev = self.rev or "dirty-tree";
         };
 
         modules = [
@@ -205,6 +226,8 @@
           anodize-ceremony = self.packages.aarch64-linux.anodize-ceremony-dev;
           serialPort = "ttyAMA0";
           inherit cdemu-src;
+          anodizeSource = mkSourceArchive "aarch64-linux";
+          anodizeRev = self.rev or "dirty-tree";
         };
 
         modules = [
@@ -233,6 +256,8 @@
         specialArgs = {
           anodize-ceremony = self.packages.x86_64-linux.anodize-ceremony-dev-burn;
           serialPort = "ttyS0";
+          anodizeSource = mkSourceArchive "x86_64-linux";
+          anodizeRev = self.rev or "dirty-tree";
         };
 
         modules = [
