@@ -784,6 +784,22 @@ impl Archive for DiscArchive<'_> {
         self.burn(session)?;
         Ok(())
     }
+
+    fn write_landing_pad(&mut self, files: &[MigrationFile]) -> Result<(), Abort> {
+        let session = SessionEntry {
+            dir_name: media::session_dir_name(self.timestamp) + "-landing",
+            timestamp: self.timestamp,
+            files: files
+                .iter()
+                .map(|f| IsoFile {
+                    name: f.name.clone(),
+                    data: f.data.clone(),
+                })
+                .collect(),
+        };
+        self.burn(session)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

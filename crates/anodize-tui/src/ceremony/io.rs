@@ -209,6 +209,21 @@ pub struct RefreshDiscPlan {
     pub dir_name: String,
 }
 
+/// Plan for LandingPad: initialize a blank disc as a known anodize audit disc
+/// by writing a self-describing Track 1 session (marker + README + helper
+/// script + bundled source). Assembled before the script thread is spawned so
+/// the bundled source/provenance (read from `/etc/anodize`) is resolved on the
+/// main thread; absent bundles degrade gracefully.
+#[derive(Debug, Clone)]
+pub struct LandingPadPlan {
+    /// Session directory name (without the `-landing` suffix the adapter adds).
+    pub dir_name: String,
+    /// Bytes of the bundled source archive (`/etc/anodize/source.tar.gz`), if present.
+    pub source_archive: Option<Vec<u8>>,
+    /// Provenance text (`/etc/anodize/build-info.txt`), if present.
+    pub build_info: Option<String>,
+}
+
 /// Read-only environment handed to a script, generic over the operation's plan.
 /// Built from disc/profile state before the ceremony thread is spawned.
 #[derive(Debug, Clone)]
@@ -581,6 +596,14 @@ pub trait Archive {
     /// is a disc copy, not a state mutation.
     fn write_migration(&mut self, _files: &[MigrationFile]) -> Result<(), Abort> {
         Err(Abort::new("write_migration not supported"))
+    }
+
+    /// Write the Track 1 "landing pad" session to a blank disc. Like
+    /// [`Self::write_migration`] it bypasses intent/record typestate (it is a
+    /// self-describing seed, not a state mutation), but uses a distinct
+    /// `-landing` session-directory suffix.
+    fn write_landing_pad(&mut self, _files: &[MigrationFile]) -> Result<(), Abort> {
+        Err(Abort::new("write_landing_pad not supported"))
     }
 
     /// Write files directly to the shuttle USB without requiring a disc commit.

@@ -6,6 +6,7 @@
 pub mod init_root;
 pub mod issue_crl;
 pub mod key_backup;
+pub mod landing_pad;
 pub mod migrate_disc;
 #[cfg(feature = "dev-burn")]
 pub mod refresh_disc;

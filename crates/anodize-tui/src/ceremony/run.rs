@@ -338,6 +338,34 @@ impl CeremonyRun {
         Self::from_handle(handle, None)
     }
 
+    /// Spawn the LandingPad ceremony. No HSM interaction — writes a single
+    /// self-describing Track 1 session to a blank disc.
+    pub fn spawn_landing_pad(env: Env<super::io::LandingPadPlan>, archive: ArchiveConfig) -> Self {
+        use super::scripts::landing_pad::landing_pad;
+        let handle = CeremonyHandle::spawn(move |bridge| {
+            let mut op = ChannelOperator::new(&bridge);
+            let mut arc = DiscArchive::new(
+                &bridge,
+                archive.dev,
+                archive.prior_sessions,
+                archive.shuttle_mount,
+                archive.staging,
+                archive.profile_bytes,
+                archive.timestamp,
+                archive.sessions_remaining,
+                archive.base_state,
+            );
+            let result = landing_pad(&mut op, &mut arc, &env);
+            write_ceremony_log(&bridge, &mut arc);
+            match result {
+                Ok(outcome) => Prompt::Done(outcome),
+                Err(abort) => Prompt::Aborted(abort.0),
+            }
+        });
+
+        Self::from_handle(handle, None)
+    }
+
     /// Spawn the MigrateDisc ceremony. No HSM interaction — pure disc copy.
     pub fn spawn_migrate_disc(env: Env<MigrateDiscPlan>, archive: ArchiveConfig) -> Self {
         let handle = CeremonyHandle::spawn(move |bridge| {

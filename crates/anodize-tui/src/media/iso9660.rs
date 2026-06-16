@@ -707,6 +707,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_roundtrip_landing_pad_filenames() {
+        // The Track 1 landing pad introduces new ISO filenames (underscores,
+        // mixed lengths) and a `-landing` dir suffix; verify they roundtrip.
+        let big = vec![0xABu8; 4096]; // multi-sector "source tarball"
+        let sessions = vec![make_session(
+            "20260616T120000_000000000Z-landing",
+            1_000_000,
+            &[
+                ("ANODIZE.ID", b"ANODIZE-AUDIT-DISC\n"),
+                ("README.TXT", b"hello"),
+                ("MOUNT_MAC.SH", b"#!/bin/sh\n"),
+                ("BUILD_INFO.TXT", b"git-commit: abc\n"),
+                ("SOURCE.TGZ", &big),
+            ],
+        )];
+        let img = build_iso(&sessions, 0);
+        let parsed = parse_iso(&img, 0).expect("parse_iso failed");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].dir_name, "20260616T120000_000000000Z-landing");
+        for name in [
+            "ANODIZE.ID",
+            "README.TXT",
+            "MOUNT_MAC.SH",
+            "BUILD_INFO.TXT",
+            "SOURCE.TGZ",
+        ] {
+            assert!(
+                parsed[0].files.iter().any(|f| f.name == name),
+                "missing {name} after roundtrip; got {:?}",
+                parsed[0].files.iter().map(|f| &f.name).collect::<Vec<_>>()
+            );
+        }
+        let src = parsed[0]
+            .files
+            .iter()
+            .find(|f| f.name == "SOURCE.TGZ")
+            .unwrap();
+        assert_eq!(src.data, big, "SOURCE.TGZ data must roundtrip exactly");
+    }
+
+    #[test]
     fn parse_roundtrip_with_lba_offset() {
         let offset: u32 = 5504; // realistic BD-R NWA for session 20
         let sessions = vec![

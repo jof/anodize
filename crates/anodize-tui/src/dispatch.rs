@@ -147,7 +147,8 @@ impl App {
                         )
                     } else if n == 0 {
                         format!(
-                            "Blank disc in {} ({cap_summary}). Press [1] to continue.",
+                            "Blank disc in {} ({cap_summary}). \
+                             Press [1] to initialize as an anodize audit disc (writes Track 1).",
                             dev.display()
                         )
                     } else {

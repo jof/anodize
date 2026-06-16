@@ -75,6 +75,18 @@ pub fn load_session_state_from_sessions(
     None
 }
 
+/// True if any session on the disc carries the Track 1 landing-pad marker,
+/// identifying it as a known anodize audit disc. The superset invariant carries
+/// the marker forward into every session, so any session having it suffices.
+pub fn disc_has_landing_pad(sessions: &[SessionEntry]) -> bool {
+    sessions.iter().any(|s| {
+        s.files.iter().any(|f| {
+            f.name
+                .eq_ignore_ascii_case(anodize_audit::LANDING_PAD_MARKER)
+        })
+    })
+}
+
 /// Load ROOT.CRT DER bytes from the first session on disc that contains it.
 pub fn load_root_cert_der_from_sessions(sessions: &[SessionEntry]) -> Option<Vec<u8>> {
     sessions.iter().find_map(|s| {
@@ -480,6 +492,30 @@ mod tests {
         )];
         let result = gather_cert_list_from_sessions(&sessions, &[]);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn disc_has_landing_pad_detects_marker() {
+        let blank: Vec<SessionEntry> = vec![];
+        assert!(!disc_has_landing_pad(&blank));
+
+        let legacy = vec![make_session(
+            "20260508T120000-record",
+            vec![IsoFile {
+                name: "ROOT.CRT".into(),
+                data: b"cert".to_vec(),
+            }],
+        )];
+        assert!(!disc_has_landing_pad(&legacy));
+
+        let anodize = vec![make_session(
+            "20260508T120000-landing",
+            vec![IsoFile {
+                name: anodize_audit::LANDING_PAD_MARKER.to_string(),
+                data: b"ANODIZE-AUDIT-DISC\n".to_vec(),
+            }],
+        )];
+        assert!(disc_has_landing_pad(&anodize));
     }
 
     // ── SPKI fingerprint tests ────────────────────────────────────────────

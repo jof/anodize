@@ -16,8 +16,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 
 use anodize_audit::validate::{
-    format_report, validate_audit_chain, validate_disc_status, validate_session_continuity,
-    validate_state_consistency, DiscStatus, Finding, SessionSnapshot, Severity, StateFields,
+    format_report, validate_audit_chain, validate_disc_status, validate_landing_pad,
+    validate_session_continuity, validate_state_consistency, DiscStatus, Finding, SessionSnapshot,
+    Severity, StateFields,
 };
 use anodize_ca::{
     extract_crl_number, verify_cert_issued_by, verify_crl_issued_by, verify_root_cert_self_signed,
@@ -175,6 +176,9 @@ fn main() -> Result<()> {
     } else {
         findings.extend(validate_disc_status(DiscStatus::Incomplete));
     }
+
+    // Strict Track 1 landing-pad requirement.
+    findings.extend(validate_landing_pad(&snapshots));
 
     // Session continuity.
     findings.extend(validate_session_continuity(&snapshots));

@@ -64,6 +64,11 @@ pub struct App {
 
     // When `Some`, the Ceremony mode is driving a coroutine-based ceremony.
     pub ceremony_run: Option<crate::ceremony::run::CeremonyRun>,
+
+    // Set when the active run is a Track 1 landing-pad write; on dismissal the
+    // TUI does a full setup restart so prerequisites re-run and the disc is
+    // re-scanned (now recognized as an anodize disc).
+    pub pending_setup_restart: bool,
 }
 
 impl App {
@@ -92,6 +97,7 @@ impl App {
             confirm_dialog: None,
             content_scroll: 0,
             ceremony_run: None,
+            pending_setup_restart: false,
         }
     }
 
@@ -533,13 +539,70 @@ impl App {
         self.set_status("MigrateDisc ceremony started.");
     }
 
+    /// Start the LandingPad ceremony: initialize a blank disc as a known
+    /// anodize audit disc by writing the self-describing Track 1 session. The
+    /// bundled source/provenance is read from `/etc/anodize` here (main thread)
+    /// so an absent bundle degrades gracefully rather than failing mid-burn.
+    pub fn start_landing_pad(&mut self) {
+        use crate::ceremony::io::{Env, LandingPadPlan};
+        use crate::ceremony::run::CeremonyRun;
+        use anodize_config::state::SssMetadata;
+
+        let dir_name = crate::media::session_dir_name(std::time::SystemTime::now());
+        let source_archive = std::fs::read("/etc/anodize/source.tar.gz").ok();
+        let build_info = std::fs::read_to_string("/etc/anodize/build-info.txt").ok();
+
+        let env = Env {
+            sss: SssMetadata {
+                generation: 0,
+                threshold: 0,
+                total: 0,
+                custodians: Vec::new(),
+                pin_verify_hash: String::new(),
+                share_commitments: Vec::new(),
+            },
+            plan: LandingPadPlan {
+                dir_name,
+                source_archive,
+                build_info,
+            },
+        };
+        let archive = self.archive_config();
+
+        self.ceremony_run = Some(CeremonyRun::spawn_landing_pad(env, archive));
+        self.ceremony.state = CeremonyPhase::OperationSelect;
+        self.mode = Mode::Ceremony;
+        self.pending_setup_restart = true;
+        self.set_status("Initializing disc — writing Track 1 landing pad…");
+    }
+
+    /// Full setup restart after a landing-pad write: reset to a fresh setup
+    /// state so the operator re-runs every prerequisite (clock → shuttle → HSM
+    /// → disc). The disc re-scan then finds the new landing pad and recognizes
+    /// the disc. In-process (not a re-exec) so the ceremony log is continuous.
+    fn restart_setup(&mut self) {
+        if let Some(run) = self.ceremony_run.take() {
+            run.join();
+        }
+        self.pending_setup_restart = false;
+        self.disc = DiscContext::new();
+        self.profile = None;
+        self.profile_toml_bytes = None;
+        self.confirmed_time = None;
+        self.setup_complete = false;
+        self.hw = HardwareManager::new();
+        self.setup = SetupMode::new();
+        self.mode = Mode::Setup;
+        self.set_status("Disc initialized. Restarting ceremony — re-verify prerequisites.");
+    }
+
     /// Start the ValidateDisc ceremony.
     pub fn start_validate_disc(&mut self) {
         use std::collections::BTreeMap;
 
         use anodize_audit::validate::{
-            format_report, validate_disc_status, validate_session_continuity, DiscStatus, Finding,
-            SessionSnapshot, Severity, StateFields,
+            format_report, validate_disc_status, validate_landing_pad, validate_session_continuity,
+            DiscStatus, Finding, SessionSnapshot, Severity, StateFields,
         };
         use sha2::{Digest, Sha256};
 
@@ -600,6 +663,7 @@ impl App {
             DiscStatus::Blank
         };
         findings.extend(validate_disc_status(disc_status));
+        findings.extend(validate_landing_pad(&snapshots));
         findings.extend(validate_session_continuity(&snapshots));
 
         // Audit chain check.
@@ -983,7 +1047,11 @@ impl App {
                             key.code,
                             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('Q')
                         ) {
-                            self.finish_ceremony_run();
+                            if self.pending_setup_restart {
+                                self.restart_setup();
+                            } else {
+                                self.finish_ceremony_run();
+                            }
                         }
                     } else if let Some(run) = self.ceremony_run.as_mut() {
                         run.on_key(key);
@@ -1085,7 +1153,20 @@ impl App {
                         .map(|r| r >= 2)
                         .unwrap_or(false);
                 if ready {
-                    self.update(Action::SetupComplete);
+                    if self.disc.prior_sessions.is_empty() {
+                        // Blank disc → initialize it as an anodize audit disc by
+                        // writing the Track 1 landing pad, then restart setup.
+                        self.start_landing_pad();
+                    } else if crate::helpers::disc_has_landing_pad(&self.disc.prior_sessions) {
+                        // Recognized anodize disc → proceed into the operation menu.
+                        self.update(Action::SetupComplete);
+                    } else {
+                        // Strict: refuse a disc that has sessions but no landing pad.
+                        self.set_status(
+                            "Not a recognized anodize disc (no Track 1 landing pad). \
+                             Insert a blank disc or migrate to a fresh disc.",
+                        );
+                    }
                 }
             }
 
