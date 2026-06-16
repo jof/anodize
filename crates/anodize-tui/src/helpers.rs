@@ -260,12 +260,14 @@ pub fn cert_subject_and_validity_days(der: &[u8]) -> Option<(String, u32)> {
 /// certificate document — not the raw CSR inputs — so that custodians can
 /// verify extensions, validity, issuer chain, and profile-injected fields
 /// before authorizing the signature.
+#[allow(clippy::too_many_arguments)]
 pub fn build_cert_preview(
     csr_der: &[u8],
     profile: &CertProfile,
     issuer_cn: &str,
     issuer_org: &str,
     issuer_country: &str,
+    issuer_state: Option<&str>,
     cdp_url: Option<&str>,
     root_cert_der: Option<&[u8]>,
 ) -> Vec<String> {
@@ -275,7 +277,10 @@ pub fn build_cert_preview(
     };
 
     let subject = csr.info.subject.to_string();
-    let issuer_dn = format!("CN={issuer_cn}, O={issuer_org}, C={issuer_country}");
+    let issuer_dn = match issuer_state {
+        Some(st) => format!("CN={issuer_cn}, O={issuer_org}, ST={st}, C={issuer_country}"),
+        None => format!("CN={issuer_cn}, O={issuer_org}, C={issuer_country}"),
+    };
 
     // Issuer from actual root cert on disc (authoritative) or config fallback
     let issuer_display = if let Some(der) = root_cert_der {
@@ -556,6 +561,7 @@ mod tests {
             "Root CA",
             "Acme",
             "US",
+            None,
             Some("http://crl.example.com/root.crl"),
             None,
         );
@@ -580,7 +586,7 @@ mod tests {
     fn cert_preview_no_cdp() {
         let csr_der = build_test_csr_der("CN=Test Sub,O=Org,C=US");
         let prof = test_profile("no-cdp", 365, None);
-        let lines = build_cert_preview(&csr_der, &prof, "Root", "Org", "US", None, None);
+        let lines = build_cert_preview(&csr_der, &prof, "Root", "Org", "US", None, None, None);
         let text = lines.join("\n");
 
         assert!(text.contains("no pathLenConstraint"));
@@ -591,7 +597,7 @@ mod tests {
     #[test]
     fn cert_preview_invalid_csr() {
         let prof = test_profile("x", 365, None);
-        let lines = build_cert_preview(b"not a csr", &prof, "R", "O", "US", None, None);
+        let lines = build_cert_preview(b"not a csr", &prof, "R", "O", "US", None, None, None);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("CSR decode error"));
     }
@@ -655,6 +661,7 @@ mod tests {
             "ConfigOrg",
             "US",
             None,
+            None,
             Some(&root_der),
         );
         let text = lines.join("\n");
@@ -677,6 +684,7 @@ mod tests {
             "FallbackCN",
             "FallbackOrg",
             "US",
+            None,
             None,
             Some(b"not valid DER"),
         );

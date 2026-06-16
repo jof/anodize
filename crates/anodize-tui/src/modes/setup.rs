@@ -89,17 +89,25 @@ impl SetupMode {
             ],
             SetupPhase::ProfileLoaded => {
                 if let Some(p) = &app.profile {
-                    vec![
-                        String::new(),
-                        format!("  CA Subject  : {}", p.ca.common_name),
-                        format!("  Org         : {}", p.ca.organization),
-                        format!("  Country     : {}", p.ca.country),
-                        format!("  HSM token   : {}", p.hsm.token_label),
-                        format!("  Shuttle     : {}", app.shuttle_mount.display()),
-                        String::new(),
-                        "  [1]  Detect HSM and continue".into(),
-                        "  [Ctrl+C]  Quit".into(),
-                    ]
+                    {
+                        let mut lines = vec![
+                            String::new(),
+                            format!("  CA Subject  : {}", p.ca.common_name),
+                            format!("  Org         : {}", p.ca.organization),
+                            format!("  Country     : {}", p.ca.country),
+                        ];
+                        if let Some(st) = &p.ca.state {
+                            lines.push(format!("  State       : {st}"));
+                        }
+                        lines.extend([
+                            format!("  HSM token   : {}", p.hsm.token_label),
+                            format!("  Shuttle     : {}", app.shuttle_mount.display()),
+                            String::new(),
+                            "  [1]  Detect HSM and continue".into(),
+                            "  [Ctrl+C]  Quit".into(),
+                        ]);
+                        lines
+                    }
                 } else {
                     vec![
                         String::new(),

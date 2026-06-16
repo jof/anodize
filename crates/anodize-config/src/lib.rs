@@ -87,6 +87,7 @@ pub struct CaConfig {
     pub common_name: String,
     pub organization: String,
     pub country: String,
+    pub state: Option<String>,
     pub cdp_url: Option<String>,
 }
 
@@ -159,6 +160,7 @@ mod tests {
 common_name  = "Example Root CA"
 organization = "Example Corp"
 country      = "US"
+state        = "California"
 cdp_url      = "http://crl.example.com/root.crl"
 
 [hsm]
@@ -174,6 +176,7 @@ key_spec     = "ecdsa-p384"
         assert_eq!(p.ca.common_name, "Example Root CA");
         assert_eq!(p.ca.organization, "Example Corp");
         assert_eq!(p.ca.country, "US");
+        assert_eq!(p.ca.state.as_deref(), Some("California"));
         assert_eq!(
             p.ca.cdp_url.as_deref(),
             Some("http://crl.example.com/root.crl")
@@ -212,6 +215,7 @@ key_spec     = "ecdsa-p384"
                     [hsm]\nbackend=\"softhsm\"\ntoken_label=\"t\"\nkey_label=\"k\"\n";
         let p: Profile = toml::from_str(toml).expect("parse");
         assert!(p.ca.cdp_url.is_none());
+        assert!(p.ca.state.is_none());
     }
 
     #[test]

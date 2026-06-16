@@ -70,7 +70,7 @@ fn build_root_cert_roundtrip() {
         .expect("generate root keypair");
 
     let signer = P384HsmSigner::new(hsm, key).expect("create signer");
-    let cert = match build_root_cert(&signer, "Test Root CA", "Test Org", "US", 7305) {
+    let cert = match build_root_cert(&signer, "Test Root CA", "Test Org", "US", None, 7305) {
         Ok(c) => c,
         Err(e) => panic!("build root cert: {e}"),
     };
@@ -121,10 +121,11 @@ fn sign_csr_happy_path() {
     let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
     let int_signer = P384HsmSigner::new(int_actor, int_key).expect("int signer");
 
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     use x509_cert::builder::{Builder, RequestBuilder};
     let subject =
@@ -188,10 +189,11 @@ fn csr_with_extra_extension_rejected() {
     let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
     let int_signer = P384HsmSigner::new(int_actor, int_key).expect("int signer");
 
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     use x509_cert::builder::{Builder, RequestBuilder};
     use x509_cert::ext::pkix::name::GeneralName;
@@ -238,10 +240,11 @@ fn issue_crl_encodes_revoked_serials() {
         .generate_keypair("root-key", KeySpec::EcdsaP384)
         .expect("generate root keypair");
     let root_signer = P384HsmSigner::new(hsm, root_key).expect("root signer");
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     let now = SystemTime::now();
     let next_update = now + std::time::Duration::from_secs(30 * 24 * 3600);
@@ -308,10 +311,11 @@ fn issue_crl_extensions_present() {
         .generate_keypair("root-key", KeySpec::EcdsaP384)
         .expect("generate root keypair");
     let root_signer = P384HsmSigner::new(hsm, root_key).expect("root signer");
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     let next_update = SystemTime::now() + std::time::Duration::from_secs(30 * 24 * 3600);
     let crl_der = issue_crl(&root_signer, &root_cert, &[], next_update, 1).expect("issue CRL");
@@ -366,10 +370,11 @@ fn sign_csr_p256_sha256_accepted() {
         .generate_keypair("root-key", KeySpec::EcdsaP384)
         .expect("generate root keypair");
     let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     // Build a P-256/SHA-256 CSR using a software key.
     // x509-cert's RequestBuilder requires DynSignatureAlgorithmIdentifier which
@@ -455,10 +460,11 @@ fn sign_csr_p384_sha256_accepted() {
         .generate_keypair("root-key", KeySpec::EcdsaP384)
         .expect("generate root keypair");
     let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     let csr_der = build_p384_sha256_csr_der("CN=P384-SHA256 Intermediate,O=Test Org,C=US");
 
@@ -543,10 +549,11 @@ fn sign_csr_p256_sha384_accepted() {
         .generate_keypair("root-key", KeySpec::EcdsaP384)
         .expect("generate root keypair");
     let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     let csr_der = build_p256_sha384_csr_der("CN=P256-SHA384 Intermediate,O=Test Org,C=US");
 
@@ -589,10 +596,11 @@ fn sign_csr_p384_sha512_accepted() {
         .generate_keypair("root-key", KeySpec::EcdsaP384)
         .expect("generate root keypair");
     let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     let csr_der = build_p384_sha512_csr_der("CN=P384-SHA512 Intermediate,O=Test Org,C=US");
 
@@ -635,10 +643,11 @@ fn sign_csr_unsupported_algorithm_rejected() {
         .generate_keypair("root-key", KeySpec::EcdsaP384)
         .expect("generate root keypair");
     let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     let csr_der = build_csr_with_bogus_alg("CN=Bogus,O=Test Org,C=US");
 
@@ -798,10 +807,11 @@ fn sign_csr_rsa_sha256_accepted() {
         .generate_keypair("root-key", KeySpec::EcdsaP384)
         .expect("generate root keypair");
     let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     let csr_der = build_rsa_sha256_csr_der("CN=RSA-SHA256 Intermediate,O=Test Org,C=US");
 
@@ -841,10 +851,11 @@ fn sign_csr_rsa_sha384_accepted() {
         .generate_keypair("root-key", KeySpec::EcdsaP384)
         .expect("generate root keypair");
     let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     let csr_der = build_rsa_sha384_csr_der("CN=RSA-SHA384 Intermediate,O=Test Org,C=US");
 
@@ -884,10 +895,11 @@ fn sign_csr_rsa_sha512_accepted() {
         .generate_keypair("root-key", KeySpec::EcdsaP384)
         .expect("generate root keypair");
     let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     let csr_der = build_rsa_sha512_csr_der("CN=RSA-SHA512 Intermediate,O=Test Org,C=US");
 
@@ -927,10 +939,11 @@ fn sign_csr_ed25519_accepted() {
         .generate_keypair("root-key", KeySpec::EcdsaP384)
         .expect("generate root keypair");
     let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
-    let root_cert = match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", 7305) {
-        Ok(c) => c,
-        Err(e) => panic!("root cert: {e}"),
-    };
+    let root_cert =
+        match build_root_cert(&root_signer, "Test Root CA", "Test Org", "US", None, 7305) {
+            Ok(c) => c,
+            Err(e) => panic!("root cert: {e}"),
+        };
 
     let csr_der = build_ed25519_csr_der("CN=Ed25519 Intermediate,O=Test Org,C=US");
 
@@ -1152,7 +1165,7 @@ fn verify_root_self_signed_pass() {
         .expect("keygen");
     let signer = P384HsmSigner::new(actor, key).expect("signer");
 
-    let cert = build_root_cert(&signer, "Verify Root CA", "Test Org", "US", 365).unwrap();
+    let cert = build_root_cert(&signer, "Verify Root CA", "Test Org", "US", None, 365).unwrap();
     anodize_ca::verify_root_cert_self_signed(&cert).expect("root self-sig should verify");
 }
 
@@ -1183,7 +1196,7 @@ fn verify_intermediate_chains_to_root() {
     let root_signer = P384HsmSigner::new(actor, root_key).expect("root signer");
     let int_signer = P384HsmSigner::new(int_actor, int_key).expect("int signer");
 
-    let root_cert = build_root_cert(&root_signer, "Root CA", "Test Org", "US", 365).unwrap();
+    let root_cert = build_root_cert(&root_signer, "Root CA", "Test Org", "US", None, 365).unwrap();
 
     use x509_cert::builder::{Builder, RequestBuilder};
     let subject = x509_cert::name::Name::from_str("CN=Int CA,O=Test Org,C=US").unwrap();
@@ -1227,7 +1240,7 @@ fn verify_crl_signature_and_number() {
         .expect("keygen");
     let signer = P384HsmSigner::new(actor, key).expect("signer");
 
-    let root_cert = build_root_cert(&signer, "CRL Root CA", "Test Org", "US", 365).unwrap();
+    let root_cert = build_root_cert(&signer, "CRL Root CA", "Test Org", "US", None, 365).unwrap();
 
     let next_update = SystemTime::now() + std::time::Duration::from_secs(86400 * 365);
     let crl_der = issue_crl(&signer, &root_cert, &[], next_update, 42).expect("issue CRL");

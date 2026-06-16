@@ -106,6 +106,7 @@ pub struct RootCertParams {
     pub common_name: String,
     pub organization: String,
     pub country: String,
+    pub state: Option<String>,
     pub validity_days: u32,
 }
 

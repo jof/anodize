@@ -228,11 +228,12 @@ pub fn build_root_cert<H: Hsm>(
     common_name: &str,
     organization: &str,
     country: &str,
+    state: Option<&str>,
     validity_days: u32,
 ) -> Result<Certificate, CaError> {
     use std::time::Duration;
 
-    let subject = parse_dn(common_name, organization, country)?;
+    let subject = parse_dn(common_name, organization, country, state)?;
     let spki = spki::SubjectPublicKeyInfoOwned::from_key(signer.verifying_key())
         .map_err(|e| CaError::X509Build(e.to_string()))?;
 
@@ -580,10 +581,18 @@ fn generate_serial(existing: &[SerialNumber]) -> Result<SerialNumber, CaError> {
     Err(CaError::SerialCollision(MAX_ATTEMPTS))
 }
 
-fn parse_dn(cn: &str, org: &str, country: &str) -> Result<x509_cert::name::Name, CaError> {
+fn parse_dn(
+    cn: &str,
+    org: &str,
+    country: &str,
+    state: Option<&str>,
+) -> Result<x509_cert::name::Name, CaError> {
     use std::str::FromStr;
-    x509_cert::name::Name::from_str(&format!("CN={cn},O={org},C={country}"))
-        .map_err(|e| CaError::Der(e.to_string()))
+    let dn = match state {
+        Some(st) => format!("CN={cn},O={org},ST={st},C={country}"),
+        None => format!("CN={cn},O={org},C={country}"),
+    };
+    x509_cert::name::Name::from_str(&dn).map_err(|e| CaError::Der(e.to_string()))
 }
 
 // ── Offline verification helpers (used by anodize-validate) ─────────────

@@ -397,6 +397,7 @@ impl Session for HsmSession {
             &params.common_name,
             &params.organization,
             &params.country,
+            params.state.as_deref(),
             params.validity_days,
         )
         .map_err(|e| Abort::new(format!("Root cert build failed: {e}")))?;

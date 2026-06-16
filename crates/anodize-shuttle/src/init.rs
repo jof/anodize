@@ -36,6 +36,11 @@ pub struct InitArgs {
     #[arg(long)]
     country: String,
 
+    /// CA state or province (e.g. "California"). Optional; included in the
+    /// certificate's distinguished name as ST= when set.
+    #[arg(long)]
+    state: Option<String>,
+
     /// CRL distribution point URL (optional).
     #[arg(long)]
     cdp_url: Option<String>,
@@ -83,6 +88,9 @@ pub fn run(args: InitArgs) -> Result<()> {
         eprintln!("  Common name  : {}", args.common_name);
         eprintln!("  Organization : {}", args.organization);
         eprintln!("  Country      : {}", args.country);
+        if let Some(ref st) = args.state {
+            eprintln!("  State        : {st}");
+        }
         eprintln!("  Token label  : {}", args.token_label);
         eprintln!();
         eprint!("Type 'yes' to continue: ");
@@ -150,6 +158,10 @@ fn build_profile_toml(args: &InitArgs) -> String {
         HsmMode::Yubihsm => "yubihsm",
     };
 
+    let state_line = match &args.state {
+        Some(st) => format!("state        = {:?}\n", st),
+        None => String::new(),
+    };
     let cdp_line = match &args.cdp_url {
         Some(url) => format!("cdp_url      = {:?}\n", url),
         None => String::new(),
@@ -160,7 +172,7 @@ fn build_profile_toml(args: &InitArgs) -> String {
 common_name  = {:?}
 organization = {:?}
 country      = {:?}
-{cdp_line}
+{state_line}{cdp_line}
 [hsm]
 backend      = {:?}
 token_label  = {:?}

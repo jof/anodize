@@ -110,13 +110,24 @@ pub fn run(args: LintArgs) -> Result<()> {
     } else {
         match anodize_config::load(&profile_path) {
             Ok(profile) => {
-                info.push(format!(
-                    "profile.toml: OK — CN={:?}, O={:?}, C={:?}, token={:?}",
-                    profile.ca.common_name,
-                    profile.ca.organization,
-                    profile.ca.country,
-                    profile.hsm.token_label,
-                ));
+                if let Some(ref st) = profile.ca.state {
+                    info.push(format!(
+                        "profile.toml: OK — CN={:?}, O={:?}, ST={:?}, C={:?}, token={:?}",
+                        profile.ca.common_name,
+                        profile.ca.organization,
+                        st,
+                        profile.ca.country,
+                        profile.hsm.token_label,
+                    ));
+                } else {
+                    info.push(format!(
+                        "profile.toml: OK — CN={:?}, O={:?}, C={:?}, token={:?}",
+                        profile.ca.common_name,
+                        profile.ca.organization,
+                        profile.ca.country,
+                        profile.hsm.token_label,
+                    ));
+                }
                 // pin_source removed — all backends use SSS-derived PIN now.
                 if profile.ca.cdp_url.is_none() {
                     warnings.push(
