@@ -11,6 +11,15 @@ use thiserror::Error;
 
 pub mod validate;
 
+/// Filename of the Track 1 "landing pad" marker that identifies a disc as a
+/// known anodize audit disc. Present in the first session and carried forward
+/// into every later session by the superset invariant.
+pub const LANDING_PAD_MARKER: &str = "ANODIZE.ID";
+
+/// First line of [`LANDING_PAD_MARKER`] — the magic signature a reader can
+/// match to recognize the disc format (akin to a file(1) magic).
+pub const LANDING_PAD_MAGIC: &str = "ANODIZE-AUDIT-DISC";
+
 #[derive(Debug, Error)]
 pub enum AuditError {
     #[error("I/O error on {path}: {source}")]

@@ -71,6 +71,18 @@ pub struct StateFields {
     pub custodian_names: Vec<String>,
 }
 
+impl SessionSnapshot {
+    /// True if this session is the Track 1 landing pad — it carries the
+    /// [`crate::LANDING_PAD_MARKER`] file. Derived from `file_hashes` so it
+    /// needs no separate plumbing through the snapshot builders. The landing
+    /// pad predates the audit-chain genesis and has no `AUDIT.LOG`.
+    pub fn is_landing_pad(&self) -> bool {
+        self.file_hashes
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case(crate::LANDING_PAD_MARKER))
+    }
+}
+
 /// Disc-level status, mirroring `media::DiscStatus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiscStatus {
@@ -440,16 +452,50 @@ pub fn validate_session_continuity(sessions: &[SessionSnapshot]) -> Vec<Finding>
         }
     }
 
-    // Handle migration: session 0 may be a migration from a prior disc.
-    if sessions[0].state.is_migration {
-        findings.push(Finding {
-            severity: Severity::Pass,
-            check: "session.migration".into(),
-            message: "Session 0 is a migration from a prior disc".into(),
-        });
+    // Handle migration: the first non-landing-pad session may be a migration
+    // from a prior disc. (With a landing pad at session 0, the migration marker
+    // lands on session 1.)
+    if let Some(first_op) = sessions.iter().find(|s| !s.is_landing_pad()) {
+        if first_op.state.is_migration {
+            findings.push(Finding {
+                severity: Severity::Pass,
+                check: "session.migration".into(),
+                message: format!(
+                    "Session {} is a migration from a prior disc",
+                    first_op.index
+                ),
+            });
+        }
     }
 
     findings
+}
+
+/// Strict landing-pad requirement: every anodize disc must begin with a Track 1
+/// landing pad (session 0 carrying [`crate::LANDING_PAD_MARKER`]). Kept separate
+/// from [`validate_session_continuity`] so it can be wired into the validator
+/// driver explicitly.
+pub fn validate_landing_pad(sessions: &[SessionSnapshot]) -> Vec<Finding> {
+    let Some(first) = sessions.first() else {
+        return Vec::new();
+    };
+    if first.is_landing_pad() {
+        vec![Finding {
+            severity: Severity::Pass,
+            check: "session.landing_pad".into(),
+            message: "Session 0 is a Track 1 landing pad".into(),
+        }]
+    } else {
+        vec![Finding {
+            severity: Severity::Error,
+            check: "session.landing_pad".into(),
+            message: format!(
+                "Disc does not begin with a Track 1 landing pad \
+                 (no {} marker in session 0)",
+                crate::LANDING_PAD_MARKER
+            ),
+        }]
+    }
 }
 
 /// Verify the audit log hash chain across all sessions.
@@ -463,6 +509,17 @@ pub fn validate_audit_chain(sessions: &[SessionSnapshot]) -> Vec<Finding> {
     // Check each session's audit log individually.
     for session in sessions {
         let check = format!("audit.chain[session {}]", session.index);
+
+        // The Track 1 landing pad has no AUDIT.LOG — it predates the audit-chain
+        // genesis (which is anchored to profile.toml). Exempt it.
+        if session.is_landing_pad() {
+            findings.push(Finding {
+                severity: Severity::Pass,
+                check,
+                message: "Landing pad session — no audit chain".into(),
+            });
+            continue;
+        }
 
         if session.audit_records.is_empty() {
             findings.push(Finding {
@@ -542,6 +599,10 @@ pub fn validate_audit_chain(sessions: &[SessionSnapshot]) -> Vec<Finding> {
     for i in 1..sessions.len() {
         let prev = &sessions[i - 1];
         let curr = &sessions[i];
+        // The landing pad has no audit chain; skip comparisons on either side.
+        if prev.is_landing_pad() || curr.is_landing_pad() {
+            continue;
+        }
         let check = format!("audit.superset[{}→{}]", i - 1, i);
 
         if curr.audit_records.len() < prev.audit_records.len() {
@@ -1543,5 +1604,85 @@ mod tests {
         assert!(findings
             .iter()
             .any(|f| f.severity == Severity::Error && f.check.contains("hsm_log_seq")));
+    }
+
+    // ── landing pad tests ────────────────────────────────────────────────
+
+    /// A session carrying the marker is recognized as the landing pad.
+    #[test]
+    fn landing_pad_detected_from_marker() {
+        let lp = make_session(
+            0,
+            &[crate::LANDING_PAD_MARKER, "README.TXT", "SOURCE.TGZ"],
+            &[],
+            0,
+        );
+        assert!(lp.is_landing_pad());
+        let op = make_session_with_files(1, &[("AUDIT.LOG", "log")], &["key.generate"], 0);
+        assert!(!op.is_landing_pad());
+    }
+
+    /// Strict: a disc whose session 0 is a landing pad passes; otherwise errors.
+    #[test]
+    fn landing_pad_strict_requirement() {
+        let lp = make_session(0, &[crate::LANDING_PAD_MARKER, "README.TXT"], &[], 0);
+        let pass = validate_landing_pad(&[lp]);
+        assert_eq!(pass.len(), 1);
+        assert_eq!(pass[0].severity, Severity::Pass);
+
+        let legacy = make_session_with_files(0, &[("AUDIT.LOG", "log")], &["cert.root.intent"], 0);
+        let err = validate_landing_pad(&[legacy]);
+        assert_eq!(err.len(), 1);
+        assert_eq!(err[0].severity, Severity::Error);
+        assert!(err[0].message.contains(crate::LANDING_PAD_MARKER));
+
+        // No sessions → no finding (blank disc is handled elsewhere).
+        assert!(validate_landing_pad(&[]).is_empty());
+    }
+
+    /// The landing pad has no AUDIT.LOG; the audit-chain check must exempt it
+    /// (PASS, not the "Audit log is empty" error) and the genesis chain on the
+    /// following session must still verify.
+    #[test]
+    fn landing_pad_exempt_from_audit_chain() {
+        let lp = make_session(0, &[crate::LANDING_PAD_MARKER, "README.TXT"], &[], 0);
+        let s1 = make_session_with_files(1, &[("AUDIT.LOG", "log")], &["cert.root.intent"], 0);
+        let findings = validate_audit_chain(&[lp, s1]);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.message.contains("Audit log is empty")),
+            "landing pad must not trigger empty-audit-log error: {findings:?}"
+        );
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Pass && f.message.contains("Landing pad session")));
+    }
+
+    /// Continuity still applies to the landing pad: the next session must carry
+    /// its files forward (README/source immutable across the disc).
+    #[test]
+    fn landing_pad_files_must_carry_forward() {
+        let lp = make_session(
+            0,
+            &[crate::LANDING_PAD_MARKER, "README.TXT", "SOURCE.TGZ"],
+            &[],
+            0,
+        );
+        // Session 1 drops SOURCE.TGZ → continuity error.
+        let s1 = make_session_with_files(
+            1,
+            &[
+                (crate::LANDING_PAD_MARKER, crate::LANDING_PAD_MARKER),
+                ("README.TXT", "README.TXT"),
+                ("AUDIT.LOG", "log"),
+            ],
+            &["cert.root.intent"],
+            0,
+        );
+        let findings = validate_session_continuity(&[lp, s1]);
+        assert!(findings
+            .iter()
+            .any(|f| f.severity == Severity::Error && f.message.contains("missing")));
     }
 }
