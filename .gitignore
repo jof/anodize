@@ -17,3 +17,9 @@ dev-disc/
 # Editor swap files
 *.swp
 *.swo
+# Core dumps (e.g. from crashed qemu/nix during emulated builds)
+core
+core.*
+vgcore.*
+# Compiled example binaries (e.g. yubihsm_enum built for a target)
+*.linux
