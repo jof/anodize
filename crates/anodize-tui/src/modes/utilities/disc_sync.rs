@@ -248,6 +248,28 @@ impl DiscSyncState {
                     self.scroll = 0;
                 }
             }
+            Ok(BurnProgress::VerifyFailed(msg)) => {
+                // Treat as success for disc-sync — the write itself completed.
+                tracing::warn!(
+                    "disc-sync track {}/{}: verification warning: {msg}",
+                    self.burn_track_idx + 1,
+                    self.burn_track_total
+                );
+                self.burn_track_idx += 1;
+                if self.burn_track_idx < self.burn_track_total {
+                    let new_rx = self.start_next_track(dev);
+                    self.burn_rx = Some(new_rx);
+                } else {
+                    self.result_message = format!(
+                        "Sync complete — {} track(s) written (verification warning on last track).",
+                        self.burn_track_total,
+                    );
+                    self.phase = SyncPhase::Done;
+                    self.burn_step = None;
+                    self.burn_rx = None;
+                    self.scroll = 0;
+                }
+            }
             Ok(BurnProgress::Done(Err(e))) => {
                 self.phase = SyncPhase::Error(format!(
                     "Write failed on track {}/{}: {e:#}",

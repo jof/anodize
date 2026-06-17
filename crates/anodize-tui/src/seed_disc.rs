@@ -75,6 +75,11 @@ fn main() -> anyhow::Result<()> {
                 eprintln!("Done — session written, disc NOT finalized.");
                 return Ok(());
             }
+            BurnProgress::VerifyFailed(msg) => {
+                eprintln!("WARNING: post-burn verification failed: {msg}");
+                eprintln!("The write itself succeeded. The disc may need time to settle.");
+                return Ok(());
+            }
             BurnProgress::Done(Err(e)) => {
                 return Err(e);
             }

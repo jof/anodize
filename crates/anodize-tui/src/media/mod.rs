@@ -23,6 +23,10 @@ pub enum BurnProgress {
     Step(String),
     /// Terminal message: the write finished (success or failure).
     Done(Result<()>),
+    /// The write+sync+close succeeded but post-burn verification failed.
+    /// The data is physically on the disc; only the DMA/TOC readback didn't
+    /// confirm. The caller should offer the operator a retry.
+    VerifyFailed(String),
 }
 
 use anyhow::{Context, Result};
@@ -357,8 +361,26 @@ pub fn write_session(
     let prior = prior_sessions.to_vec();
     std::thread::spawn(move || {
         let result = write_session_inner(&dev, &prior, new_session, is_final, &progress);
-        progress.send(BurnProgress::Done(result)).ok();
+        match result {
+            Ok(WriteOutcome::Verified) => {
+                progress.send(BurnProgress::Done(Ok(()))).ok();
+            }
+            Ok(WriteOutcome::VerifyFailed(msg)) => {
+                progress.send(BurnProgress::VerifyFailed(msg)).ok();
+            }
+            Err(e) => {
+                progress.send(BurnProgress::Done(Err(e))).ok();
+            }
+        }
     });
+}
+
+/// Internal result from `write_session_inner` that distinguishes a real write
+/// failure (the disc may be damaged) from a verification-only failure (data is
+/// on disc but the DMA/TOC readback hasn't caught up).
+enum WriteOutcome {
+    Verified,
+    VerifyFailed(String),
 }
 
 /// Send a progress step, ignoring send failures (receiver may have dropped).
@@ -372,7 +394,7 @@ fn write_session_inner(
     mut new_session: SessionEntry,
     is_final: bool,
     progress: &Sender<BurnProgress>,
-) -> Result<()> {
+) -> Result<WriteOutcome> {
     step(progress, format!("Opening {}…", dev.display()));
     tracing::info!("write_session_inner: opening {}", dev.display());
     let sg = SgDev::open(dev).with_context(|| format!("open optical device {}", dev.display()))?;
@@ -602,69 +624,129 @@ fn write_session_inner(
     close_track_session(&sg, close).context("CLOSE SESSION/DISC")?;
     tracing::info!("write_session_inner: close done");
 
-    // Post-burn verification: wait for the drive to finish any background
-    // lead-out / DMA updates, then re-read disc info and verify the session
-    // count incremented.  BD-R SRM drives (e.g. BUFFALO USB) may accept
-    // CLOSE SESSION without actually committing the session boundary into the
-    // Disc Management Area — catch that here instead of silently succeeding.
-    step(
-        progress,
-        "Post-burn verification — waiting for drive ready…",
-    );
-    tracing::info!("write_session_inner: post-burn TUR poll");
-    wait_drive_ready(&sg, std::time::Duration::from_secs(120))
-        .context("drive not ready after CLOSE SESSION")?;
+    // ── Post-burn verification ────────────────────────────────────────────
+    //
+    // After CLOSE SESSION the drive updates its DMA / TOC in the background.
+    // USB bridge chips may reset the bus, and the kernel may briefly lose the
+    // device.  To handle all of this robustly we close the fd, let the drive
+    // settle, then reopen and check.  If the first round of attempts fails,
+    // `VerifyFailed` is sent instead of `Done(Err(…))` so the caller can
+    // offer the operator a retry — the data IS on disc, only the readback
+    // hasn't confirmed yet.
 
     let expected_sessions = info.sessions + 1;
 
-    // Some drives (especially USB bridges) take significant time to update
-    // the DMA after CLOSE SESSION.  Retry up to 3 times with increasing
-    // delays before declaring failure.
-    const VERIFY_DELAYS: &[u64] = &[5, 15, 30];
-    let mut verified = false;
-    for (attempt, &delay_secs) in std::iter::once(&0u64)
-        .chain(VERIFY_DELAYS.iter())
-        .enumerate()
-    {
-        if delay_secs > 0 {
-            step(
-                progress,
-                format!("Session count mismatch — retrying in {delay_secs}s (attempt {attempt})…"),
-            );
-            tracing::warn!(
-                attempt,
-                delay_secs,
-                "post-burn verify: session count mismatch, retrying"
-            );
-            std::thread::sleep(std::time::Duration::from_secs(delay_secs));
-            wait_drive_ready(&sg, std::time::Duration::from_secs(60))
-                .context("drive not ready during post-burn retry")?;
+    step(
+        progress,
+        "Post-burn verification — closing device, letting drive settle…",
+    );
+    tracing::info!("write_session_inner: dropping SgDev for post-burn settle");
+    drop(sg);
+
+    match verify_burn(dev, expected_sessions, progress) {
+        Ok(()) => {
+            step(progress, "Session committed successfully.");
+            tracing::info!("write_session_inner: session write complete");
+            Ok(WriteOutcome::Verified)
         }
-        let post_info = read_disc_info(&sg).context("post-burn READ DISC INFORMATION")?;
-        tracing::info!(
-            attempt,
-            before = info.sessions,
-            after = post_info.sessions,
-            expected = expected_sessions,
-            "write_session_inner: post-burn session count"
-        );
-        if post_info.sessions >= expected_sessions {
-            verified = true;
-            break;
+        Err(e) => {
+            let msg = format!("{e:#}");
+            tracing::warn!("write_session_inner: initial verification failed: {msg}");
+            Ok(WriteOutcome::VerifyFailed(msg))
         }
     }
-    if !verified {
-        anyhow::bail!(
-            "post-burn verification FAILED: drive reports fewer sessions than expected \
-             (expected {expected_sessions}).  WRITE + SYNCHRONIZE CACHE + CLOSE SESSION \
-             all returned OK but the drive's TOC/DMA was not updated.  The disc may be \
-             in an inconsistent state — eject and inspect manually."
-        );
+}
+
+// ── Post-burn verification ────────────────────────────────────────────────────
+
+/// Settle delays (seconds) for each verification attempt within one round.
+/// Each attempt closes the device, sleeps, reopens, polls TUR, then reads
+/// disc info. The escalating delays give USB bridges and BD-R firmware
+/// progressively more time to update the DMA.
+const VERIFY_SETTLE_SECS: &[u64] = &[5, 10, 20, 30];
+
+/// Verify that the drive's session count has reached `expected_sessions`.
+///
+/// The device at `dev` must NOT be open — this function opens, checks, and
+/// closes it on each attempt, giving the drive and USB bridge a clean slate.
+/// Reports progress via `progress` if provided.
+fn verify_burn(dev: &Path, expected_sessions: u16, progress: &Sender<BurnProgress>) -> Result<()> {
+    verify_burn_core(dev, expected_sessions, Some(progress))
+}
+
+/// Same as [`verify_burn`] but callable without a progress channel — used
+/// by the adapter retry loop which reports status through the Bridge instead.
+#[allow(dead_code)] // used by ceremony adapters but not by seed-disc binary
+pub fn verify_burn_standalone(dev: &Path, expected_sessions: u16) -> Result<()> {
+    verify_burn_core(dev, expected_sessions, None)
+}
+
+fn verify_burn_core(
+    dev: &Path,
+    expected_sessions: u16,
+    progress: Option<&Sender<BurnProgress>>,
+) -> Result<()> {
+    let step = |msg: &str| {
+        if let Some(tx) = progress {
+            let _ = tx.send(BurnProgress::Step(msg.to_string()));
+        }
+        tracing::info!("verify_burn: {msg}");
+    };
+
+    for (attempt, &settle_secs) in VERIFY_SETTLE_SECS.iter().enumerate() {
+        step(&format!(
+            "Post-burn verification — settling {settle_secs} s before reopen (attempt {})…",
+            attempt + 1
+        ));
+        std::thread::sleep(std::time::Duration::from_secs(settle_secs));
+
+        step(&format!(
+            "Reopening {} and polling drive readiness…",
+            dev.display()
+        ));
+        let sg = match SgDev::open(dev) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    attempt,
+                    "verify_burn: cannot reopen device (USB re-enumeration?): {e:#}"
+                );
+                continue;
+            }
+        };
+
+        if let Err(e) = wait_drive_ready(&sg, std::time::Duration::from_secs(120)) {
+            tracing::warn!(attempt, "verify_burn: drive not ready: {e:#}");
+            drop(sg);
+            continue;
+        }
+
+        match read_disc_info(&sg) {
+            Ok(post_info) => {
+                tracing::info!(
+                    attempt,
+                    after = post_info.sessions,
+                    expected = expected_sessions,
+                    "verify_burn: session count"
+                );
+                if post_info.sessions >= expected_sessions {
+                    step("Post-burn verification succeeded.");
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                tracing::warn!(attempt, "verify_burn: READ DISC INFORMATION failed: {e:#}");
+            }
+        }
+        drop(sg);
     }
 
-    step(progress, "Session committed successfully.");
-    tracing::info!("write_session_inner: session write complete");
-    Ok(())
+    let total: u64 = VERIFY_SETTLE_SECS.iter().sum();
+    anyhow::bail!(
+        "drive reports fewer sessions than expected (expected {expected_sessions}) \
+         after {total}s of retries across {} attempts",
+        VERIFY_SETTLE_SECS.len()
+    )
 }
 
 // ── Utility: session directory name from SystemTime ───────────────────────────

@@ -546,6 +546,7 @@ impl<'a> DiscArchive<'a> {
 
         let (tx, rx) = mpsc::channel();
         media::write_session(&dev, &self.prior_sessions, session.clone(), false, tx);
+        let mut verify_failed_msg: Option<String> = None;
         loop {
             match rx.recv() {
                 Ok(BurnProgress::Step(s)) => {
@@ -557,6 +558,10 @@ impl<'a> DiscArchive<'a> {
                         log: burn_log.clone(),
                     });
                 }
+                Ok(BurnProgress::VerifyFailed(msg)) => {
+                    verify_failed_msg = Some(msg);
+                    break;
+                }
                 Ok(BurnProgress::Done(Ok(()))) => break,
                 Ok(BurnProgress::Done(Err(e))) => {
                     return Err(Abort::new(format!("Disc burn failed: {e:#}")))
@@ -564,6 +569,57 @@ impl<'a> DiscArchive<'a> {
                 Err(_) => return Err(Abort::new("Burn progress channel closed unexpectedly")),
             }
         }
+
+        // If initial verification failed, offer the operator unlimited retries.
+        // The write+sync+close succeeded — the data is physically on the disc.
+        // Only the DMA/TOC readback hasn't confirmed yet, which is recoverable.
+        if let Some(msg) = verify_failed_msg {
+            let expected = (self.prior_sessions.len() + 1) as u16;
+            loop {
+                let resp = self.bridge.ask(Prompt::Confirm {
+                    title: "Post-burn verification failed".into(),
+                    body: vec![
+                        format!("  {msg}"),
+                        String::new(),
+                        "  The write itself succeeded — data is on the disc.".into(),
+                        "  The drive's session count hasn't updated yet.".into(),
+                        String::new(),
+                        "  [1]  Retry verification (close device, settle, reopen)".into(),
+                        "  [Esc]  Abort ceremony".into(),
+                    ],
+                })?;
+                if matches!(resp, super::prompt::Response::Abort) {
+                    return Err(Abort::new(format!(
+                        "Operator aborted after verification failure: {msg}"
+                    )));
+                }
+                self.bridge.tell(Prompt::Burning {
+                    what: dir.clone(),
+                    log: {
+                        burn_log.push("Retrying post-burn verification…".into());
+                        burn_log.clone()
+                    },
+                });
+                self.bridge
+                    .log(format!("[burn {dir}] retrying post-burn verification"));
+                match media::verify_burn_standalone(&dev, expected) {
+                    Ok(()) => {
+                        self.bridge.log(format!(
+                            "[burn {dir}] post-burn verification succeeded on retry"
+                        ));
+                        break;
+                    }
+                    Err(e) => {
+                        let retry_msg = format!("{e:#}");
+                        self.bridge.log(format!(
+                            "[burn {dir}] verification retry failed: {retry_msg}"
+                        ));
+                        // Loop back to the Confirm prompt.
+                    }
+                }
+            }
+        }
+
         self.prior_sessions.push(session);
         Ok(dir)
     }
