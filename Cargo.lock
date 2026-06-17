@@ -108,6 +108,7 @@ dependencies = [
  "anodize-audit",
  "anodize-config",
  "anyhow",
+ "base64",
  "clap",
  "der 0.7.10",
  "hex",

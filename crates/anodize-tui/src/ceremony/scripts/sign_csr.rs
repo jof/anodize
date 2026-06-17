@@ -1,8 +1,9 @@
 //! The SignCsr ceremony, as a script.
 //!
-//! Sign an intermediate-CA CSR (loaded from the shuttle) under a chosen
-//! profile. Reads top to bottom:
+//! Sign an intermediate-CA CSR (selected from shuttle candidates) under a
+//! chosen profile. Reads top to bottom:
 //!
+//! 0. operator selects a CSR file (if multiple candidates on shuttle),
 //! 1. operator selects a certificate profile,
 //! 2. confirms the rendered certificate document,
 //! 3. the intent WAL (recording the CSR bytes) is committed to disc,
@@ -10,10 +11,20 @@
 //! 5. the clock is re-confirmed,
 //! 6. the HSM signs the intermediate certificate,
 //! 7. the operator verifies the public key fingerprint and records the cert fingerprint,
-//! 8. the record session (INTERMEDIATE.CRT + STATE.JSON) is burned,
-//! 9. the certificate is exported to the shuttle.
+//! 8. the record session (cert + STATE.JSON) is burned,
+//! 9. the certificate is exported to the shuttle (dynamic filename, never overwrites).
 
 use crate::ceremony::io::*;
+
+/// Derive the output `.crt` filename from the input CSR filename.
+/// Strips the extension and appends `.crt`.
+fn output_filename(csr_filename: &str) -> String {
+    let stem = csr_filename
+        .rsplit_once('.')
+        .map(|(s, _)| s)
+        .unwrap_or(csr_filename);
+    format!("{stem}.crt")
+}
 
 /// Run the SignCsr ceremony.
 pub fn sign_csr(
@@ -23,12 +34,38 @@ pub fn sign_csr(
     env: &Env<SignCsrPlan>,
 ) -> Result<Outcome, Abort> {
     let plan = &env.plan;
-    if plan.profiles.is_empty() {
+    if plan.candidates.is_empty() {
+        return Err(Abort::new("No CSR candidates found on shuttle."));
+    }
+
+    // 0. Select the CSR file (auto-select if only one).
+    let csr = if plan.candidates.len() == 1 {
+        op.note(&format!("CSR: {}", plan.candidates[0].filename));
+        &plan.candidates[0]
+    } else {
+        let csr_options: Vec<Choice> = plan
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(i, c)| Choice {
+                key: char::from_digit((i + 1) as u32, 10).unwrap_or('?'),
+                label: c.label.clone(),
+            })
+            .collect();
+        let idx = op.choose(
+            "Select CSR file",
+            &["Multiple CSR files found on shuttle.".into()],
+            &csr_options,
+        )?;
+        &plan.candidates[idx]
+    };
+
+    if csr.profiles.is_empty() {
         return Err(Abort::new("No [[cert_profiles]] defined in profile.toml."));
     }
 
     // 1. Select the certificate profile.
-    let options: Vec<Choice> = plan
+    let options: Vec<Choice> = csr
         .profiles
         .iter()
         .enumerate()
@@ -39,10 +76,10 @@ pub fn sign_csr(
         .collect();
     let idx = op.choose(
         "Select certificate profile",
-        &["CSR loaded from shuttle (csr.der).".into()],
+        &[format!("CSR: {}", csr.filename)],
         &options,
     )?;
-    let profile = &plan.profiles[idx];
+    let profile = &csr.profiles[idx];
 
     // 2. Review the rendered certificate document.
     op.confirm("Sign CSR", &profile.preview)?;
@@ -52,7 +89,8 @@ pub fn sign_csr(
         name: "cert.csr.intent".into(),
         data: serde_json::json!({
             "operation": "sign-csr",
-            "csr_der_hex": hex::encode(&plan.csr_der),
+            "csr_filename": csr.filename,
+            "csr_der_hex": hex::encode(&csr.csr_der),
             "profile_name": profile.name,
         }),
     })?;
@@ -64,7 +102,7 @@ pub fn sign_csr(
     // 6. Sign the intermediate certificate.
     op.note("Signing intermediate certificate\u{2026}");
     let req = IntermediateReq {
-        csr_der: plan.csr_der.clone(),
+        csr_der: csr.csr_der.clone(),
         root_cert_der: plan.root_cert_der.clone(),
         path_len: profile.path_len,
         validity_days: profile.validity_days,
@@ -81,7 +119,7 @@ pub fn sign_csr(
     // 7. Operator verifies the public key fingerprint (known from the CSR
     //    requester) and records the certificate fingerprint (new).
     let cert_fingerprint = crate::helpers::sha256_fingerprint(cert.der());
-    let spki_fingerprint = crate::helpers::csr_spki_fingerprint(&plan.csr_der)
+    let spki_fingerprint = crate::helpers::csr_spki_fingerprint(&csr.csr_der)
         .unwrap_or_else(|| "(CSR decode error)".into());
     let (subject, validity_days) = crate::helpers::cert_subject_and_validity_days(cert.der())
         .unwrap_or_else(|| ("(unknown)".into(), 0));
@@ -105,6 +143,7 @@ pub fn sign_csr(
         ],
     )?;
 
+    let out_filename = output_filename(&csr.filename);
     op.note("Fingerprint confirmed. Writing record session to disc\u{2026}");
 
     // 8. Burn the record session.
@@ -116,10 +155,11 @@ pub fn sign_csr(
                 serde_json::json!({
                     "fingerprint": cert_fingerprint,
                     "profile": profile.name,
+                    "output_filename": out_filename,
                 }),
             )],
             artifacts: vec![Artifact {
-                name: "INTERMEDIATE.CRT".into(),
+                name: out_filename.to_ascii_uppercase(),
                 bytes: cert.der().to_vec(),
             }],
             // Intermediate issuance does not change crl_number/revocation_list;
@@ -137,10 +177,10 @@ pub fn sign_csr(
 
     // 9. Export to shuttle.
     op.note("Exporting certificate to shuttle\u{2026}");
-    arc.export_shuttle(&record, &[("intermediate.crt", cert.der())])?;
+    arc.export_shuttle(&record, &[(&out_filename, cert.der())])?;
 
     Ok(Outcome {
-        headline: format!("Intermediate certificate written ({})", profile.name),
+        headline: format!("Certificate written as {out_filename} ({})", profile.name),
         detail: vec![format!("Fingerprint: {cert_fingerprint}")],
     })
 }
@@ -251,42 +291,69 @@ mod tests {
         }
     }
 
-    fn env() -> Env<SignCsrPlan> {
+    fn test_sss() -> SssMetadata {
+        SssMetadata {
+            generation: 1,
+            threshold: 2,
+            total: 2,
+            custodians: vec![
+                Custodian {
+                    name: "Alice".into(),
+                    index: 1,
+                },
+                Custodian {
+                    name: "Bob".into(),
+                    index: 2,
+                },
+            ],
+            pin_verify_hash: "deadbeef".into(),
+            share_commitments: vec![],
+        }
+    }
+
+    fn one_candidate() -> CsrCandidate {
+        CsrCandidate {
+            filename: "test.csr".into(),
+            csr_der: vec![0x30, 0x00],
+            label: "test.csr (CN=example)".into(),
+            profiles: vec![CsrProfileChoice {
+                name: "tls-server".into(),
+                label: "[1] tls-server (validity=365 days)".into(),
+                validity_days: 365,
+                path_len: None,
+                preview: vec!["Subject: CN=example".into()],
+            }],
+        }
+    }
+
+    fn env_single() -> Env<SignCsrPlan> {
         Env {
-            sss: SssMetadata {
-                generation: 1,
-                threshold: 2,
-                total: 2,
-                custodians: vec![
-                    Custodian {
-                        name: "Alice".into(),
-                        index: 1,
-                    },
-                    Custodian {
-                        name: "Bob".into(),
-                        index: 2,
-                    },
-                ],
-                pin_verify_hash: "deadbeef".into(),
-                share_commitments: vec![],
-            },
+            sss: test_sss(),
             plan: SignCsrPlan {
-                csr_der: vec![0x30, 0x00],
+                candidates: vec![one_candidate()],
                 root_cert_der: vec![0x30, 0x00],
                 cdp_url: None,
-                profiles: vec![CsrProfileChoice {
-                    name: "tls-server".into(),
-                    label: "[1] tls-server (validity=365 days)".into(),
-                    validity_days: 365,
-                    path_len: None,
-                    preview: vec!["Subject: CN=example".into()],
-                }],
                 existing_serials: vec![],
             },
         }
     }
 
-    fn run(abort_quorum: bool) -> (Result<Outcome, Abort>, Vec<Effect>) {
+    fn env_multi() -> Env<SignCsrPlan> {
+        let mut c2 = one_candidate();
+        c2.filename = "other.pem".into();
+        c2.label = "other.pem (CN=other)".into();
+        Env {
+            sss: test_sss(),
+            plan: SignCsrPlan {
+                candidates: vec![one_candidate(), c2],
+                root_cert_der: vec![0x30, 0x00],
+                cdp_url: None,
+                existing_serials: vec![],
+            },
+        }
+    }
+
+    fn run(env: &Env<SignCsrPlan>, abort_quorum: bool) -> (Result<Outcome, Abort>, Vec<Effect>) {
         let log: Log = Rc::new(RefCell::new(Vec::new()));
         let mut op = FakeOperator {
             log: log.clone(),
@@ -294,20 +361,52 @@ mod tests {
         };
         let mut vault = FakeVault { log: log.clone() };
         let mut arc = FakeArchive { log: log.clone() };
-        let result = sign_csr(&mut op, &mut vault, &mut arc, &env());
+        let result = sign_csr(&mut op, &mut vault, &mut arc, env);
         let effects = log.borrow().clone();
         (result, effects)
     }
 
     #[test]
-    fn happy_path_runs_effects_in_order() {
-        let (result, effects) = run(false);
+    fn happy_path_single_csr_runs_effects_in_order() {
+        let env = env_single();
+        let (result, effects) = run(&env, false);
         assert!(result.is_ok(), "{:?}", result.err());
+        // Single CSR → auto-selected (no Choose for CSR), one Choose for profile
         assert_eq!(
             effects,
             vec![
-                Effect::Choose,
-                Effect::Confirm, // profile/document review
+                Effect::Choose,  // profile selection
+                Effect::Confirm, // document review
+                Effect::CommitIntent,
+                Effect::CollectQuorum,
+                Effect::ReconfirmClock,
+                Effect::Login,
+                Effect::SignIntermediate,
+                Effect::Confirm, // fingerprint verification
+                Effect::CommitRecord,
+                Effect::ExportShuttle,
+            ]
+        );
+        let outcome = result.unwrap();
+        assert!(
+            outcome.headline.contains("test.crt"),
+            "{}",
+            outcome.headline
+        );
+    }
+
+    #[test]
+    fn multi_csr_shows_picker() {
+        let env = env_multi();
+        let (result, effects) = run(&env, false);
+        assert!(result.is_ok(), "{:?}", result.err());
+        // Multiple CSRs → Choose for CSR + Choose for profile
+        assert_eq!(
+            effects,
+            vec![
+                Effect::Choose,  // CSR file selection
+                Effect::Choose,  // profile selection
+                Effect::Confirm, // document review
                 Effect::CommitIntent,
                 Effect::CollectQuorum,
                 Effect::ReconfirmClock,
@@ -322,7 +421,8 @@ mod tests {
 
     #[test]
     fn abort_at_quorum_never_signs_or_records() {
-        let (result, effects) = run(true);
+        let env = env_single();
+        let (result, effects) = run(&env, true);
         assert!(result.is_err());
         assert_eq!(
             effects,
@@ -332,5 +432,17 @@ mod tests {
         assert!(!effects.contains(&Effect::SignIntermediate));
         assert!(!effects.contains(&Effect::CommitRecord));
         assert!(!effects.contains(&Effect::ExportShuttle));
+    }
+
+    #[test]
+    fn output_filename_strips_extension() {
+        assert_eq!(output_filename("foo.csr"), "foo.crt");
+        assert_eq!(
+            output_filename("my-intermediate.der"),
+            "my-intermediate.crt"
+        );
+        assert_eq!(output_filename("bar.pem"), "bar.crt");
+        assert_eq!(output_filename("no-ext"), "no-ext.crt");
+        assert_eq!(output_filename("multi.dots.csr"), "multi.dots.crt");
     }
 }

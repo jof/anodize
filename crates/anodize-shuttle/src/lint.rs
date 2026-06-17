@@ -22,16 +22,17 @@ pub struct LintArgs {
     list_usb: bool,
 }
 
-/// Files that are part of the shuttle specification.
+/// Files that are part of the shuttle specification (exact names).
 const KNOWN_FILES: &[&str] = &[
     "profile.toml",
-    "csr.der",
     "revoked.toml",
     "root.crt",
     "root.crl",
-    "intermediate.crt",
     "audit.log",
 ];
+
+/// Extensions recognized as shuttle artifacts (CSR inputs and cert outputs).
+const KNOWN_EXTENSIONS: &[&str] = &["der", "pem", "csr", "crt"];
 
 /// Directory prefixes allowed on the shuttle.
 const KNOWN_DIRS: &[&str] = &["softhsm2"];
@@ -56,9 +57,9 @@ const OPERATIONS: &[OperationSpec] = &[
     OperationSpec {
         name: "sign-csr",
         description: "Sign an intermediate CA CSR",
-        required_inputs: &["profile.toml", "csr.der"],
+        required_inputs: &["profile.toml"],
         optional_inputs: &[],
-        outputs: &["intermediate.crt", "audit.log"],
+        outputs: &["audit.log"],
     },
     OperationSpec {
         name: "revoke-cert",
@@ -155,14 +156,33 @@ pub fn run(args: LintArgs) -> Result<()> {
         }
     };
 
-    // ── Check csr.der ────────────────────────────────────────────────────────
+    // ── Check CSR files (*.der, *.pem, *.csr) ──────────────────────────────
 
-    let csr_path = root.join("csr.der");
-    if csr_path.exists() {
-        match validate_csr_der(&csr_path) {
-            Ok(subject) => info.push(format!("csr.der: OK — subject={subject}")),
-            Err(e) => errors.push(format!("csr.der: INVALID — {e}")),
+    let mut csr_count = 0usize;
+    for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
         }
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        if !matches!(ext.as_str(), "der" | "pem" | "csr") {
+            continue;
+        }
+        match validate_csr(&path) {
+            Ok(subject) => {
+                info.push(format!("{name}: OK — CSR subject={subject}"));
+                csr_count += 1;
+            }
+            Err(_) => {
+                // Not a valid CSR — might be a certificate .der or something else;
+                // don't report an error for non-CSR files with these extensions.
+            }
+        }
+    }
+    if csr_count == 0 && profile_ok {
+        // Only note (not error) — CSR might not be needed for every operation.
+        info.push("No CSR files found (sign-csr needs *.der, *.pem, or *.csr)".into());
     }
 
     // ── Check root.crt ───────────────────────────────────────────────────────
@@ -175,13 +195,24 @@ pub fn run(args: LintArgs) -> Result<()> {
         }
     }
 
-    // ── Check intermediate.crt ───────────────────────────────────────────────
+    // ── Check *.crt certificate files ───────────────────────────────────────
 
-    let int_crt_path = root.join("intermediate.crt");
-    if int_crt_path.exists() {
-        match validate_cert_der(&int_crt_path, "intermediate.crt") {
-            Ok(desc) => info.push(format!("intermediate.crt: OK — {desc}")),
-            Err(e) => errors.push(format!("intermediate.crt: INVALID — {e}")),
+    for entry in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+        if !name.ends_with(".crt") || name == "root.crt" {
+            continue;
+        }
+        match validate_cert_der(&path, &name) {
+            Ok(desc) => info.push(format!("{name}: OK — {desc}")),
+            Err(e) => errors.push(format!("{name}: INVALID — {e}")),
         }
     }
 
@@ -237,8 +268,14 @@ pub fn run(args: LintArgs) -> Result<()> {
     // ── Extraneous file check ────────────────────────────────────────────────
 
     for rel in &relative_files {
-        let is_known =
-            KNOWN_FILES.iter().any(|k| rel == *k) || KNOWN_DIRS.iter().any(|d| rel.starts_with(d));
+        let has_known_ext = rel
+            .rsplit('.')
+            .next()
+            .map(|e| KNOWN_EXTENSIONS.iter().any(|ke| e.eq_ignore_ascii_case(ke)))
+            .unwrap_or(false);
+        let is_known = KNOWN_FILES.iter().any(|k| rel == *k)
+            || KNOWN_DIRS.iter().any(|d| rel.starts_with(d))
+            || has_known_ext;
 
         // macOS metadata files
         let is_system = rel.starts_with(".Spotlight-")
@@ -350,7 +387,7 @@ pub fn run(args: LintArgs) -> Result<()> {
         if !present_outputs.is_empty() {
             eprintln!(
                 "    \x1b[33mnote\x1b[0m: output file(s) already present: {} \
-                 (will be overwritten by ceremony)",
+                 (ceremony will auto-suffix to avoid overwrite)",
                 present_outputs.join(", ")
             );
         }
@@ -406,12 +443,44 @@ fn enumerate_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn validate_csr_der(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path)?;
+/// Validate a CSR file (DER or PEM). Returns the subject DN string on success.
+fn validate_csr(path: &Path) -> Result<String> {
+    let raw = std::fs::read(path)?;
+    let der_bytes = if raw.starts_with(b"-----BEGIN") {
+        decode_pem_csr(&raw).context("PEM decode failed")?
+    } else {
+        raw
+    };
     use der::Decode;
-    let csr = x509_cert::request::CertReq::from_der(&bytes)
-        .context("not a valid DER-encoded PKCS#10 CSR")?;
+    let csr =
+        x509_cert::request::CertReq::from_der(&der_bytes).context("not a valid PKCS#10 CSR")?;
     Ok(csr.info.subject.to_string())
+}
+
+/// Decode PEM-armored CSR to DER bytes. Accepts CERTIFICATE REQUEST and
+/// NEW CERTIFICATE REQUEST labels.
+fn decode_pem_csr(raw: &[u8]) -> Result<Vec<u8>> {
+    let text = std::str::from_utf8(raw).context("not valid UTF-8")?;
+    let mut body = String::new();
+    let mut in_block = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("-----BEGIN") && trimmed.contains("CERTIFICATE REQUEST") {
+            in_block = true;
+            continue;
+        }
+        if trimmed.starts_with("-----END") && trimmed.contains("CERTIFICATE REQUEST") {
+            break;
+        }
+        if in_block {
+            body.push_str(trimmed);
+        }
+    }
+    anyhow::ensure!(!body.is_empty(), "no PEM body found");
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(&body)
+        .context("base64 decode failed")
 }
 
 fn validate_cert_der(path: &Path, label: &str) -> Result<String> {

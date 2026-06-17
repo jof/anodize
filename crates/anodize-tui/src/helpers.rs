@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::SystemTime;
 
 use anodize_ca::CaError;
@@ -417,6 +418,98 @@ fn describe_spki_algorithm(oid: &der::oid::ObjectIdentifier) -> &'static str {
     }
 }
 
+// ── CSR discovery (shuttle file picker) ───────────────────────────────────────
+
+/// Scan the shuttle mount root for CSR files (*.der, *.pem, *.csr).
+/// Each file is read, optionally PEM-decoded, and validated as a DER-encoded
+/// PKCS#10 CSR. Returns `(filename, der_bytes)` pairs sorted by filename.
+pub fn discover_csr_files(shuttle_mount: &Path) -> Vec<(String, Vec<u8>)> {
+    let entries = match std::fs::read_dir(shuttle_mount) {
+        Ok(rd) => rd,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut candidates: Vec<(String, Vec<u8>)> = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+        if !matches!(ext.as_str(), "der" | "pem" | "csr") {
+            continue;
+        }
+
+        let raw = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => continue,
+        };
+
+        let der_bytes = if looks_like_pem(&raw) {
+            match decode_pem_csr(&raw) {
+                Some(d) => d,
+                None => continue,
+            }
+        } else {
+            raw
+        };
+
+        if CertReq::from_der(&der_bytes).is_ok() {
+            candidates.push((name, der_bytes));
+        }
+    }
+
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    candidates
+}
+
+/// Extract the subject DN string from a DER-encoded CSR.
+pub fn csr_subject(csr_der: &[u8]) -> Option<String> {
+    CertReq::from_der(csr_der)
+        .ok()
+        .map(|csr| csr.info.subject.to_string())
+}
+
+/// True if the raw bytes start with a PEM header.
+fn looks_like_pem(raw: &[u8]) -> bool {
+    raw.starts_with(b"-----BEGIN")
+}
+
+/// Decode a PEM-encoded CSR to DER bytes. Accepts `CERTIFICATE REQUEST` and
+/// `NEW CERTIFICATE REQUEST` labels.
+fn decode_pem_csr(raw: &[u8]) -> Option<Vec<u8>> {
+    use base64::Engine;
+
+    let text = std::str::from_utf8(raw).ok()?;
+    let mut body = String::new();
+    let mut in_block = false;
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("-----BEGIN") && trimmed.contains("CERTIFICATE REQUEST") {
+            in_block = true;
+            continue;
+        }
+        if trimmed.starts_with("-----END") && trimmed.contains("CERTIFICATE REQUEST") {
+            break;
+        }
+        if in_block {
+            body.push_str(trimmed);
+        }
+    }
+
+    if body.is_empty() {
+        return None;
+    }
+
+    base64::engine::general_purpose::STANDARD.decode(&body).ok()
+}
+
 // ── SoftHSM2 shuttle backend (dev-softhsm-usb feature) ───────────────────────
 
 #[cfg(feature = "dev-softhsm-usb")]
@@ -823,5 +916,115 @@ mod tests {
 
         let unknown_oid = der::oid::ObjectIdentifier::new_unwrap("1.2.3.4.5");
         assert_eq!(describe_spki_algorithm(&unknown_oid), "Unknown");
+    }
+
+    // ── PEM decode tests ────────────────────────────────────────────────
+
+    #[test]
+    fn decode_pem_csr_valid() {
+        use base64::Engine;
+        let csr_der = build_test_csr_der("CN=PEM Test,O=Acme,C=US");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&csr_der);
+        let pem = format!(
+            "-----BEGIN CERTIFICATE REQUEST-----\n{b64}\n-----END CERTIFICATE REQUEST-----\n"
+        );
+        let decoded = decode_pem_csr(pem.as_bytes()).expect("should decode");
+        assert_eq!(decoded, csr_der);
+    }
+
+    #[test]
+    fn decode_pem_csr_new_label() {
+        use base64::Engine;
+        let csr_der = build_test_csr_der("CN=New Label,O=Org,C=US");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&csr_der);
+        let pem = format!(
+            "-----BEGIN NEW CERTIFICATE REQUEST-----\n{b64}\n-----END NEW CERTIFICATE REQUEST-----\n"
+        );
+        let decoded = decode_pem_csr(pem.as_bytes()).expect("should decode");
+        assert_eq!(decoded, csr_der);
+    }
+
+    #[test]
+    fn decode_pem_csr_invalid_base64() {
+        let pem = b"-----BEGIN CERTIFICATE REQUEST-----\n!!!not-base64!!!\n-----END CERTIFICATE REQUEST-----\n";
+        assert!(decode_pem_csr(pem).is_none());
+    }
+
+    #[test]
+    fn decode_pem_csr_wrong_label() {
+        let pem = b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        assert!(decode_pem_csr(pem).is_none());
+    }
+
+    #[test]
+    fn looks_like_pem_detects_header() {
+        assert!(looks_like_pem(b"-----BEGIN CERTIFICATE REQUEST-----\n"));
+        assert!(!looks_like_pem(b"\x30\x82"));
+        assert!(!looks_like_pem(b""));
+    }
+
+    // ── CSR discovery tests ─────────────────────────────────────────────
+
+    fn make_temp_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("anodize-test-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn discover_csr_files_finds_der_and_pem() {
+        use base64::Engine;
+        let dir = make_temp_dir("discover-csrs");
+        let csr_der = build_test_csr_der("CN=Disc Test,O=Org,C=US");
+
+        // Write a DER file
+        std::fs::write(dir.join("my.csr"), &csr_der).unwrap();
+
+        // Write a PEM file
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&csr_der);
+        let pem = format!(
+            "-----BEGIN CERTIFICATE REQUEST-----\n{b64}\n-----END CERTIFICATE REQUEST-----\n"
+        );
+        std::fs::write(dir.join("other.pem"), &pem).unwrap();
+
+        // Write a non-CSR file that should be skipped
+        std::fs::write(dir.join("profile.toml"), b"not a csr").unwrap();
+
+        // Write a .der file that isn't actually a valid CSR
+        std::fs::write(dir.join("bad.der"), b"not valid").unwrap();
+
+        let found = discover_csr_files(&dir);
+        let names: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, &["my.csr", "other.pem"]);
+        // Both should decode to the same DER
+        assert_eq!(found[0].1, csr_der);
+        assert_eq!(found[1].1, csr_der);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_csr_files_empty_dir() {
+        let dir = make_temp_dir("discover-empty");
+        assert!(discover_csr_files(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn discover_csr_files_nonexistent_dir() {
+        assert!(discover_csr_files(Path::new("/nonexistent/path")).is_empty());
+    }
+
+    #[test]
+    fn csr_subject_extracts_dn() {
+        let csr_der = build_test_csr_der("CN=Hello,O=World,C=US");
+        let subject = csr_subject(&csr_der).expect("should parse");
+        assert!(subject.contains("Hello"), "subject={subject}");
+    }
+
+    #[test]
+    fn csr_subject_invalid_der() {
+        assert!(csr_subject(b"garbage").is_none());
     }
 }

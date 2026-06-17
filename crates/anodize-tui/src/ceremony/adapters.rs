@@ -10,7 +10,7 @@
 //!
 //! The operator adapter (`ChannelOperator`) lives in [`super::harness`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::SystemTime;
 
@@ -471,6 +471,31 @@ impl Session for HsmSession {
     }
 }
 
+/// Return a path under `shuttle_mount` for `name` that does not collide with
+/// existing files. If `name` already exists, appends `_1`, `_2`, ... before
+/// the extension until a unique name is found.
+fn unique_shuttle_path(shuttle_mount: &Path, name: &str) -> PathBuf {
+    let candidate = shuttle_mount.join(name);
+    if !candidate.exists() {
+        return candidate;
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) => (s, Some(e)),
+        None => (name, None),
+    };
+    for n in 1u32.. {
+        let suffixed = match ext {
+            Some(e) => format!("{stem}_{n}.{e}"),
+            None => format!("{stem}_{n}"),
+        };
+        let path = shuttle_mount.join(&suffixed);
+        if !path.exists() {
+            return path;
+        }
+    }
+    unreachable!()
+}
+
 // ── DiscArchive ──────────────────────────────────────────────────────────────
 
 /// Real append-only [`Archive`]: write-once optical disc (via `media`) plus the
@@ -824,9 +849,11 @@ impl Archive for DiscArchive<'_> {
         media::verify_shuttle_mount(&self.shuttle_mount)
             .map_err(|e| Abort::new(format!("Shuttle USB not available: {e:#}")))?;
         for (name, bytes) in files {
-            self.bridge.log(format!("  shuttle: {name}"));
-            media::write_and_sync(&self.shuttle_mount.join(name), bytes)
-                .map_err(|e| Abort::new(format!("Shuttle write {name} failed: {e:#}")))?;
+            let path = unique_shuttle_path(&self.shuttle_mount, name);
+            let actual_name = path.file_name().and_then(|n| n.to_str()).unwrap_or(name);
+            self.bridge.log(format!("  shuttle: {actual_name}"));
+            media::write_and_sync(&path, bytes)
+                .map_err(|e| Abort::new(format!("Shuttle write {actual_name} failed: {e:#}")))?;
         }
         let log_bytes = std::fs::read(self.staging.join("audit.log"))
             .map_err(|e| Abort::new(format!("Audit log read failed: {e}")))?;
@@ -841,7 +868,8 @@ impl Archive for DiscArchive<'_> {
         media::verify_shuttle_mount(&self.shuttle_mount)
             .map_err(|e| Abort::new(format!("Shuttle USB not available: {e:#}")))?;
         for (name, bytes) in files {
-            media::write_and_sync(&self.shuttle_mount.join(name), bytes)
+            let path = unique_shuttle_path(&self.shuttle_mount, name);
+            media::write_and_sync(&path, bytes)
                 .map_err(|e| Abort::new(format!("Shuttle write {name} failed: {e:#}")))?;
         }
         Ok(())

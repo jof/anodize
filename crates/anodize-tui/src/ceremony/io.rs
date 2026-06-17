@@ -192,13 +192,25 @@ pub struct ValidateDiscPlan {
     pub last_hsm_log_seq: Option<u64>,
 }
 
-/// Sign an intermediate CSR (loaded from the shuttle) under a chosen profile.
+/// A CSR file discovered on the shuttle, pre-parsed and validated.
+#[derive(Debug, Clone)]
+pub struct CsrCandidate {
+    /// Original filename on the shuttle (e.g. "my-intermediate.csr").
+    pub filename: String,
+    /// DER-encoded CSR bytes (PEM files are decoded to DER during discovery).
+    pub csr_der: Vec<u8>,
+    /// Display label for the choose() prompt.
+    pub label: String,
+    /// Pre-rendered profile choices for this specific CSR.
+    pub profiles: Vec<CsrProfileChoice>,
+}
+
+/// Sign an intermediate CSR (selected from shuttle candidates) under a chosen profile.
 #[derive(Debug, Clone)]
 pub struct SignCsrPlan {
-    pub csr_der: Vec<u8>,
+    pub candidates: Vec<CsrCandidate>,
     pub root_cert_der: Vec<u8>,
     pub cdp_url: Option<String>,
-    pub profiles: Vec<CsrProfileChoice>,
     pub existing_serials: Vec<x509_cert::serial_number::SerialNumber>,
 }
 

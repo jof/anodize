@@ -248,16 +248,15 @@ impl App {
         self.set_status("RevokeCert ceremony started.");
     }
 
-    /// Start the SignCsr ceremony. Reads + validates
-    /// csr.der from the shuttle and pre-renders each profile's preview.
+    /// Start the SignCsr ceremony. Discovers CSR files (DER or PEM) on the
+    /// shuttle, validates each, and pre-renders profile previews per candidate.
     pub fn start_sign_csr(&mut self) {
-        use crate::ceremony::io::{CsrProfileChoice, Env, SignCsrPlan};
+        use crate::ceremony::io::{CsrCandidate, CsrProfileChoice, Env, SignCsrPlan};
         use crate::ceremony::run::{CeremonyRun, VaultConfig};
         use crate::helpers::{
-            build_cert_preview, collect_serial_numbers_from_sessions,
+            build_cert_preview, collect_serial_numbers_from_sessions, discover_csr_files,
             load_root_cert_der_from_sessions,
         };
-        use der::Decode as _;
 
         let Some(profile) = self.profile.as_ref() else {
             self.set_status("No profile loaded.");
@@ -277,53 +276,59 @@ impl App {
             return;
         };
 
-        let csr_path = self.shuttle_mount.join("csr.der");
-        let csr_der = match std::fs::read(&csr_path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.set_status(format!(
-                    "Cannot read csr.der from shuttle: {e} \u{2014} ensure csr.der is on the USB."
-                ));
-                return;
-            }
-        };
-        if let Err(e) = x509_cert::request::CertReq::from_der(&csr_der) {
-            self.set_status(format!("csr.der is not a valid DER-encoded CSR: {e}"));
+        let discovered = discover_csr_files(&self.shuttle_mount);
+        if discovered.is_empty() {
+            self.set_status("No CSR files found on shuttle (looked for *.der, *.pem, *.csr).");
             return;
         }
 
         let cdp_url = profile.ca.cdp_url.clone();
         let existing_serials = collect_serial_numbers_from_sessions(&self.disc.prior_sessions);
-        let profiles: Vec<CsrProfileChoice> = profile
-            .cert_profiles
-            .iter()
-            .enumerate()
-            .map(|(i, prof)| {
-                let path_str = prof
-                    .path_len
-                    .map(|n| format!("  path_len={n}"))
-                    .unwrap_or_default();
-                CsrProfileChoice {
-                    name: prof.name.clone(),
-                    label: format!(
-                        "[{}] {}  (validity={} days{})",
-                        i + 1,
-                        prof.name,
-                        prof.validity_days,
-                        path_str
-                    ),
-                    validity_days: prof.validity_days,
-                    path_len: prof.path_len,
-                    preview: build_cert_preview(
-                        &csr_der,
-                        prof,
-                        &profile.ca.common_name,
-                        &profile.ca.organization,
-                        &profile.ca.country,
-                        profile.ca.state.as_deref(),
-                        cdp_url.as_deref(),
-                        Some(root_cert_der.as_slice()),
-                    ),
+
+        let candidates: Vec<CsrCandidate> = discovered
+            .into_iter()
+            .map(|(filename, csr_der)| {
+                let subject = crate::helpers::csr_subject(&csr_der)
+                    .unwrap_or_else(|| "(unknown subject)".into());
+                let label = format!("{filename} ({subject})");
+                let profiles: Vec<CsrProfileChoice> = profile
+                    .cert_profiles
+                    .iter()
+                    .enumerate()
+                    .map(|(i, prof)| {
+                        let path_str = prof
+                            .path_len
+                            .map(|n| format!("  path_len={n}"))
+                            .unwrap_or_default();
+                        CsrProfileChoice {
+                            name: prof.name.clone(),
+                            label: format!(
+                                "[{}] {}  (validity={} days{})",
+                                i + 1,
+                                prof.name,
+                                prof.validity_days,
+                                path_str
+                            ),
+                            validity_days: prof.validity_days,
+                            path_len: prof.path_len,
+                            preview: build_cert_preview(
+                                &csr_der,
+                                prof,
+                                &profile.ca.common_name,
+                                &profile.ca.organization,
+                                &profile.ca.country,
+                                profile.ca.state.as_deref(),
+                                cdp_url.as_deref(),
+                                Some(root_cert_der.as_slice()),
+                            ),
+                        }
+                    })
+                    .collect();
+                CsrCandidate {
+                    filename,
+                    csr_der,
+                    label,
+                    profiles,
                 }
             })
             .collect();
@@ -331,10 +336,9 @@ impl App {
         let env = Env {
             sss: state.sss.clone(),
             plan: SignCsrPlan {
-                csr_der,
+                candidates,
                 root_cert_der,
                 cdp_url,
-                profiles,
                 existing_serials,
             },
         };
