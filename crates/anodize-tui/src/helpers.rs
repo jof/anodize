@@ -75,6 +75,23 @@ pub fn load_session_state_from_sessions(
     None
 }
 
+/// Load the most recent AUDIT.LOG bytes from disc sessions (latest session first).
+/// Returns `None` on a blank disc or when no session contains an AUDIT.LOG.
+pub fn load_audit_log_from_sessions(sessions: &[SessionEntry]) -> Option<Vec<u8>> {
+    for session in sessions.iter().rev() {
+        #[cfg(feature = "dev-burn")]
+        if session.files.iter().any(|f| f.name == "SEED.TXT") {
+            return None;
+        }
+        if let Some(file) = session.files.iter().find(|f| f.name == "AUDIT.LOG") {
+            if !file.data.is_empty() {
+                return Some(file.data.clone());
+            }
+        }
+    }
+    None
+}
+
 /// True if any session on the disc carries the Track 1 landing-pad marker,
 /// identifying it as a known anodize audit disc. The superset invariant carries
 /// the marker forward into every session, so any session having it suffices.

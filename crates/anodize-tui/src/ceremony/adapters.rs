@@ -636,21 +636,38 @@ fn superset_session(prior_sessions: &[SessionEntry], mut session: SessionEntry) 
     session
 }
 
-/// Assemble the intent session: create the audit-log chain anchored to the
-/// profile genesis, append the intent event, and bundle the partial log as
-/// `AUDIT.LOG`. No disc I/O — unit-testable against a tmpdir.
+/// Assemble the intent session: continue the audit-log chain from the most
+/// recent prior session (or create a fresh chain for the first operation on a
+/// blank disc), append the intent event, and bundle the full log as
+/// `AUDIT.LOG`.  No disc I/O — unit-testable against a tmpdir.
 fn assemble_intent_session(
     staging: &std::path::Path,
     profile_bytes: &[u8],
     timestamp: SystemTime,
     event: &IntentEvent,
+    prior_sessions: &[SessionEntry],
 ) -> Result<SessionEntry, Abort> {
     std::fs::create_dir_all(staging)
         .map_err(|e| Abort::new(format!("Cannot create staging dir: {e}")))?;
     let log_path = staging.join("audit.log");
-    let genesis = genesis_hash(profile_bytes);
-    let mut log = AuditLog::create(&log_path, &genesis)
-        .map_err(|e| Abort::new(format!("Audit log create failed: {e}")))?;
+
+    let mut log = if let Some(prior_bytes) =
+        crate::helpers::load_audit_log_from_sessions(prior_sessions)
+    {
+        // Continue the existing chain: write prior bytes to staging so
+        // AuditLog::open can verify every link before we append.
+        std::fs::write(&log_path, &prior_bytes)
+            .map_err(|e| Abort::new(format!("Cannot seed audit log from prior session: {e}")))?;
+        AuditLog::open(&log_path)
+            .map_err(|e| Abort::new(format!("Prior audit log verification failed: {e}")))?
+    } else {
+        // First operation on this disc (InitRoot) — create fresh chain
+        // anchored to SHA-256(profile.toml).
+        let genesis = genesis_hash(profile_bytes);
+        AuditLog::create(&log_path, &genesis)
+            .map_err(|e| Abort::new(format!("Audit log create failed: {e}")))?
+    };
+
     log.append(&event.name, event.data.clone())
         .map_err(|e| Abort::new(format!("Audit intent append failed: {e}")))?;
     drop(log);
@@ -769,8 +786,13 @@ impl Archive for DiscArchive<'_> {
         }
         self.bridge
             .log(format!("Committing intent: {}", event.name));
-        let session =
-            assemble_intent_session(&self.staging, &self.profile_bytes, self.timestamp, &event)?;
+        let session = assemble_intent_session(
+            &self.staging,
+            &self.profile_bytes,
+            self.timestamp,
+            &event,
+            &self.prior_sessions,
+        )?;
         let dir = self.burn(session)?;
         self.bridge.log(format!("Intent committed: {dir}"));
         Ok(IntentCommitted::new(dir))
@@ -886,6 +908,7 @@ mod tests {
                 name: "crl.intent".into(),
                 data: serde_json::json!({ "operation": "issue-crl" }),
             },
+            &[], // first operation — no prior sessions
         )
         .expect("assemble intent");
 
@@ -979,6 +1002,7 @@ mod tests {
                 name: "crl.intent".into(),
                 data: serde_json::json!({}),
             },
+            &[], // first operation
         )
         .expect("intent");
 
@@ -1048,7 +1072,7 @@ mod tests {
             },
         );
 
-        // This ceremony's intent session carries only a fresh AUDIT.LOG.
+        // This ceremony's intent session carries the growing AUDIT.LOG.
         let second = superset_session(
             std::slice::from_ref(&first),
             SessionEntry {
@@ -1090,5 +1114,141 @@ mod tests {
         // The carried-forward artifacts must keep the prior session's bytes.
         let root = record.files.iter().find(|f| f.name == "ROOT.CRT").unwrap();
         assert_eq!(root.data, b"rootcert");
+    }
+
+    #[test]
+    fn second_operation_continues_audit_chain() {
+        let profile = b"profile-toml-bytes";
+
+        // ── First operation (InitRoot) ──────────────────────────────────────
+        let staging1 = tmpdir("chain-op1");
+        let ts1 = SystemTime::now();
+        let intent1 = assemble_intent_session(
+            &staging1,
+            profile,
+            ts1,
+            &IntentEvent {
+                name: "cert.root.intent".into(),
+                data: serde_json::json!({ "operation": "init-root" }),
+            },
+            &[], // blank disc
+        )
+        .expect("op1 intent");
+
+        let record1 = assemble_record_session(
+            &staging1,
+            ts1,
+            None,
+            &RecordSession {
+                audit_events: vec![(
+                    "cert.root.issue".into(),
+                    serde_json::json!({ "fingerprint": "AA:BB" }),
+                )],
+                artifacts: vec![Artifact {
+                    name: "ROOT.CRT".into(),
+                    bytes: vec![0x30],
+                }],
+                state: None,
+            },
+        )
+        .expect("op1 record");
+
+        // Verify first operation: 2 entries, seq 0 and 1.
+        let log1: Vec<anodize_audit::Record> = record1
+            .files
+            .iter()
+            .find(|f| f.name == "AUDIT.LOG")
+            .map(|f| {
+                f.data
+                    .split(|&b| b == b'\n')
+                    .filter(|l| !l.is_empty())
+                    .filter_map(|l| serde_json::from_slice(l).ok())
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(log1.len(), 2);
+        assert_eq!(log1[0].seq, 0);
+        assert_eq!(log1[1].seq, 1);
+
+        // ── Second operation (SignCsr) ──────────────────────────────────────
+        // Simulate prior sessions as they would appear on disc after op1.
+        let prior_sessions = vec![intent1, record1];
+
+        let staging2 = tmpdir("chain-op2");
+        let ts2 = SystemTime::now();
+        let intent2 = assemble_intent_session(
+            &staging2,
+            profile,
+            ts2,
+            &IntentEvent {
+                name: "cert.csr.intent".into(),
+                data: serde_json::json!({ "operation": "sign-csr" }),
+            },
+            &prior_sessions,
+        )
+        .expect("op2 intent");
+
+        // The intent session's AUDIT.LOG must contain 3 entries (2 prior + 1 new).
+        let log2_intent: Vec<anodize_audit::Record> = intent2
+            .files
+            .iter()
+            .find(|f| f.name == "AUDIT.LOG")
+            .map(|f| {
+                f.data
+                    .split(|&b| b == b'\n')
+                    .filter(|l| !l.is_empty())
+                    .filter_map(|l| serde_json::from_slice(l).ok())
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(log2_intent.len(), 3, "intent should have 2 prior + 1 new");
+        assert_eq!(log2_intent[0].seq, 0);
+        assert_eq!(log2_intent[1].seq, 1);
+        assert_eq!(log2_intent[2].seq, 2);
+
+        // Hash chain must be unbroken: each entry's prev_hash == prior entry's entry_hash.
+        assert_eq!(log2_intent[1].prev_hash, log2_intent[0].entry_hash);
+        assert_eq!(log2_intent[2].prev_hash, log2_intent[1].entry_hash);
+
+        // The record session appends to the same staging log.
+        let record2 = assemble_record_session(
+            &staging2,
+            ts2,
+            None,
+            &RecordSession {
+                audit_events: vec![(
+                    "cert.intermediate.issue".into(),
+                    serde_json::json!({ "fingerprint": "CC:DD" }),
+                )],
+                artifacts: vec![Artifact {
+                    name: "INTERMEDIATE.CRT".into(),
+                    bytes: vec![0x30],
+                }],
+                state: None,
+            },
+        )
+        .expect("op2 record");
+
+        let log2_record: Vec<anodize_audit::Record> = record2
+            .files
+            .iter()
+            .find(|f| f.name == "AUDIT.LOG")
+            .map(|f| {
+                f.data
+                    .split(|&b| b == b'\n')
+                    .filter(|l| !l.is_empty())
+                    .filter_map(|l| serde_json::from_slice(l).ok())
+                    .collect()
+            })
+            .unwrap();
+        assert_eq!(log2_record.len(), 4, "record should have 3 prior + 1 new");
+        assert_eq!(log2_record[3].seq, 3);
+        assert_eq!(log2_record[3].prev_hash, log2_record[2].entry_hash);
+
+        // Full chain must verify via AuditLog::open.
+        AuditLog::open(&staging2.join("audit.log")).expect("full chain verifies");
+
+        std::fs::remove_dir_all(&staging1).ok();
+        std::fs::remove_dir_all(&staging2).ok();
     }
 }

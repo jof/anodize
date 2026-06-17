@@ -304,9 +304,8 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
 // ── Session superset invariant ─────────────────────────────────────────────────
 
 /// Carry forward files from `prior` that are missing in `new`.
-/// AUDIT.LOG is always produced fresh by both intent and record sessions, so
-/// it is never backfilled.  All other files (including STATE.JSON) are carried
-/// forward when absent from the new session, preserving the superset invariant.
+/// All files (including AUDIT.LOG and STATE.JSON) are carried forward when
+/// absent from the new session, preserving the superset invariant.
 ///
 /// This is the single definition of the superset rule.  `write_session` applies
 /// it to the image it burns; callers that retain a burned session as a future
@@ -315,7 +314,7 @@ pub fn scan_disc(dev: &Path) -> Result<DiscScan, String> {
 /// The operation is idempotent, so applying it twice against the same prior is
 /// a harmless no-op.
 pub(crate) fn backfill_session(prior: &SessionEntry, new: &mut SessionEntry) {
-    const ALWAYS_FRESH: &[&str] = &["AUDIT.LOG"];
+    const ALWAYS_FRESH: &[&str] = &[];
     for prev_file in &prior.files {
         let already = new
             .files
@@ -864,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn backfill_skips_audit_log_but_carries_state_json() {
+    fn backfill_carries_audit_log_and_state_json() {
         let prior = make_session(
             "s1",
             vec![
@@ -877,10 +876,16 @@ mod tests {
 
         backfill_session(&prior, &mut new);
 
-        // ROOT.CRT already present, AUDIT.LOG is mutable — not backfilled.
-        // STATE.JSON should be carried forward (superset invariant).
-        assert_eq!(new.files.len(), 2);
+        // ROOT.CRT already present.  Both AUDIT.LOG and STATE.JSON should
+        // be carried forward by the superset invariant.
+        assert_eq!(new.files.len(), 3);
         assert!(new.files.iter().any(|f| f.name == "ROOT.CRT"));
+        assert!(
+            new.files
+                .iter()
+                .any(|f| f.name == "AUDIT.LOG" && f.data == b"log1"),
+            "AUDIT.LOG should be carried forward from prior session"
+        );
         assert!(
             new.files
                 .iter()
