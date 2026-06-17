@@ -420,7 +420,7 @@ fn describe_spki_algorithm(oid: &der::oid::ObjectIdentifier) -> &'static str {
 
 // ── CSR discovery (shuttle file picker) ───────────────────────────────────────
 
-/// Scan the shuttle mount root for CSR files (*.der, *.pem, *.csr).
+/// Scan the shuttle mount root for CSR files (*.der, *.pem, *.csr, *.req).
 /// Each file is read, optionally PEM-decoded, and validated as a DER-encoded
 /// PKCS#10 CSR. Returns `(filename, der_bytes)` pairs sorted by filename.
 pub fn discover_csr_files(shuttle_mount: &Path) -> Vec<(String, Vec<u8>)> {
@@ -441,7 +441,7 @@ pub fn discover_csr_files(shuttle_mount: &Path) -> Vec<(String, Vec<u8>)> {
             None => continue,
         };
         let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-        if !matches!(ext.as_str(), "der" | "pem" | "csr") {
+        if !matches!(ext.as_str(), "der" | "pem" | "csr" | "req") {
             continue;
         }
 
@@ -988,6 +988,9 @@ mod tests {
         );
         std::fs::write(dir.join("other.pem"), &pem).unwrap();
 
+        // Write a .req file (DER-encoded)
+        std::fs::write(dir.join("request.req"), &csr_der).unwrap();
+
         // Write a non-CSR file that should be skipped
         std::fs::write(dir.join("profile.toml"), b"not a csr").unwrap();
 
@@ -996,10 +999,11 @@ mod tests {
 
         let found = discover_csr_files(&dir);
         let names: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
-        assert_eq!(names, &["my.csr", "other.pem"]);
-        // Both should decode to the same DER
+        assert_eq!(names, &["my.csr", "other.pem", "request.req"]);
+        // All should decode to the same DER
         assert_eq!(found[0].1, csr_der);
         assert_eq!(found[1].1, csr_der);
+        assert_eq!(found[2].1, csr_der);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
