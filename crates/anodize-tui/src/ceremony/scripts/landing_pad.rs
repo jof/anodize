@@ -36,7 +36,7 @@ pub fn landing_pad(
             anodize_audit::LANDING_PAD_MARKER
         ),
         "  README.TXT      (human-readable explanation)".into(),
-        "  MOUNT_MAC.SH    (mount the newest session on macOS)".into(),
+        "  MOUNT_MAC.command    (mount the newest session on macOS)".into(),
         format!("  SOURCE.TGZ      ({src})"),
         "  BUILD_INFO.TXT  (build provenance)".into(),
         String::new(),
@@ -85,8 +85,8 @@ pub fn assemble_landing_pad(plan: &LandingPadPlan) -> Vec<MigrationFile> {
         data: README_TXT.as_bytes().to_vec(),
     });
     files.push(MigrationFile {
-        name: "MOUNT_MAC.SH".into(),
-        data: MOUNT_MAC_SH.as_bytes().to_vec(),
+        name: "MOUNT_MAC.command".into(),
+        data: MOUNT_MAC_COMMAND.as_bytes().to_vec(),
     });
 
     if let Some(bytes) = &plan.source_archive {
@@ -133,7 +133,7 @@ NEWEST session. To see everything:
         mount -o session=N /dev/sr0 /mnt   (N = highest session number)
 
   * macOS: run the bundled helper (no admin rights needed):
-        sh MOUNT_MAC.SH
+        sh MOUNT_MAC.command
     It images the disc, relocates the newest session's volume descriptor,
     and mounts a read-only view showing every session's files.
 
@@ -164,8 +164,8 @@ the source that produced the ISO, sufficient to rebuild and audit it.
 
 /// macOS helper to mount the newest session, embedded verbatim from
 /// scripts/mount-last-session-macos.sh. Kept in sync with that host copy.
-const MOUNT_MAC_SH: &str = r##"#!/bin/sh
-# MOUNT_MAC.SH — mount the newest session of this anodize multisession
+const MOUNT_MAC_COMMAND: &str = r##"#!/bin/sh
+# MOUNT_MAC.command — mount the newest session of this anodize multisession
 # optical disc on macOS, read-only, without sudo.
 #
 # macOS's cd9660 driver only reads the volume descriptor at absolute sector
@@ -175,7 +175,7 @@ const MOUNT_MAC_SH: &str = r##"#!/bin/sh
 # disc-absolute LBAs are in bounds, then hdiutil-attaches the patched image
 # read-only. The physical disc is never written.
 #
-# Usage:  sh MOUNT_MAC.SH [diskN | /dev/diskN]
+# Usage:  sh MOUNT_MAC.command [diskN | /dev/diskN]
 # With no argument the optical drive is auto-detected via drutil.
 # Detach later with:  hdiutil detach <mountpoint>
 
@@ -267,7 +267,7 @@ mod tests {
             vec![
                 anodize_audit::LANDING_PAD_MARKER,
                 "README.TXT",
-                "MOUNT_MAC.SH",
+                "MOUNT_MAC.command",
                 "SOURCE.TGZ",
                 "BUILD_INFO.TXT",
             ]
@@ -287,15 +287,15 @@ mod tests {
         assert!(!names.contains(&"SOURCE.TGZ"));
         assert!(names.contains(&anodize_audit::LANDING_PAD_MARKER));
         assert!(names.contains(&"README.TXT"));
-        assert!(names.contains(&"MOUNT_MAC.SH"));
+        assert!(names.contains(&"MOUNT_MAC.command"));
         let marker = std::str::from_utf8(&files[0].data).unwrap();
         assert!(marker.contains("not bundled"));
     }
 
     #[test]
     fn mount_helper_is_a_posix_script() {
-        assert!(MOUNT_MAC_SH.starts_with("#!/bin/sh"));
-        assert!(README_TXT.contains("MOUNT_MAC.SH"));
+        assert!(MOUNT_MAC_COMMAND.starts_with("#!/bin/sh"));
+        assert!(README_TXT.contains("MOUNT_MAC.command"));
     }
 
     // ── Transcript tests (drive the script through the effect traits) ────

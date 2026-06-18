@@ -717,7 +717,7 @@ mod tests {
             &[
                 ("ANODIZE.ID", b"ANODIZE-AUDIT-DISC\n"),
                 ("README.TXT", b"hello"),
-                ("MOUNT_MAC.SH", b"#!/bin/sh\n"),
+                ("MOUNT_MAC.COMMAND", b"#!/bin/sh\n"),
                 ("BUILD_INFO.TXT", b"git-commit: abc\n"),
                 ("SOURCE.TGZ", &big),
             ],
@@ -729,7 +729,7 @@ mod tests {
         for name in [
             "ANODIZE.ID",
             "README.TXT",
-            "MOUNT_MAC.SH",
+            "MOUNT_MAC.COMMAND",
             "BUILD_INFO.TXT",
             "SOURCE.TGZ",
         ] {
