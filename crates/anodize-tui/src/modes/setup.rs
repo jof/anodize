@@ -187,11 +187,13 @@ impl SetupMode {
                         "  Remove this disc and insert a blank or anodize-initialized disc.".into(),
                     );
                     lines.push(String::new());
-                    lines.push("  [q]  Abort".into());
+                    lines.push("  [Ctrl+C]  Quit".into());
                 } else {
-                    lines.push(String::new());
-                    lines.push("  [1]  Confirm disc and select operation".into());
-                    lines.push("  [q]  Abort".into());
+                    if app.disc.optical_dev.is_some() {
+                        lines.push(String::new());
+                        lines.push("  [1]  Confirm disc and select operation".into());
+                    }
+                    lines.push("  [Ctrl+C]  Quit".into());
                 }
                 lines
             }
