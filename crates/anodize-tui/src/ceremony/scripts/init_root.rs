@@ -430,9 +430,9 @@ pub(crate) mod tests {
             self.migrations += 1;
             Ok(())
         }
-        fn write_shuttle_direct(&mut self, _files: &[(&str, &[u8])]) -> Result<(), Abort> {
+        fn write_shuttle_direct(&mut self, files: &[(&str, &[u8])]) -> Result<Vec<String>, Abort> {
             self.shuttle_directs += 1;
-            Ok(())
+            Ok(files.iter().map(|(n, _)| n.to_string()).collect())
         }
     }
 

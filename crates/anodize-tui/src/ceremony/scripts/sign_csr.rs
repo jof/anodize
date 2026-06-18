@@ -16,14 +16,27 @@
 
 use crate::ceremony::io::*;
 
-/// Derive the output `.crt` filename from the input CSR filename.
-/// Strips the extension and appends `.crt`.
-fn output_filename(csr_filename: &str) -> String {
+/// Derive a unique output `.crt` filename from the input CSR filename.
+/// Strips the extension and appends `.crt`.  If that name already exists
+/// in `existing` (compared case-insensitively), appends `_1`, `_2`, …
+/// until a unique name is found.  This prevents collisions both on the
+/// disc ISO (where filenames are uppercased) and on the shuttle USB.
+fn output_filename(csr_filename: &str, existing: &[String]) -> String {
     let stem = csr_filename
         .rsplit_once('.')
         .map(|(s, _)| s)
         .unwrap_or(csr_filename);
-    format!("{stem}.crt")
+    let base = format!("{stem}.crt");
+    if !existing.iter().any(|n| n.eq_ignore_ascii_case(&base)) {
+        return base;
+    }
+    for n in 1u32.. {
+        let candidate = format!("{stem}_{n}.crt");
+        if !existing.iter().any(|n| n.eq_ignore_ascii_case(&candidate)) {
+            return candidate;
+        }
+    }
+    unreachable!()
 }
 
 /// Run the SignCsr ceremony.
@@ -143,7 +156,7 @@ pub fn sign_csr(
         ],
     )?;
 
-    let out_filename = output_filename(&csr.filename);
+    let out_filename = output_filename(&csr.filename, &plan.existing_artifact_names);
     op.note("Fingerprint confirmed. Writing record session to disc\u{2026}");
 
     // 8. Burn the record session.
@@ -334,6 +347,7 @@ mod tests {
                 root_cert_der: vec![0x30, 0x00],
                 cdp_url: None,
                 existing_serials: vec![],
+                existing_artifact_names: vec![],
             },
         }
     }
@@ -349,6 +363,7 @@ mod tests {
                 root_cert_der: vec![0x30, 0x00],
                 cdp_url: None,
                 existing_serials: vec![],
+                existing_artifact_names: vec![],
             },
         }
     }
@@ -436,13 +451,34 @@ mod tests {
 
     #[test]
     fn output_filename_strips_extension() {
-        assert_eq!(output_filename("foo.csr"), "foo.crt");
+        assert_eq!(output_filename("foo.csr", &[]), "foo.crt");
         assert_eq!(
-            output_filename("my-intermediate.der"),
+            output_filename("my-intermediate.der", &[]),
             "my-intermediate.crt"
         );
-        assert_eq!(output_filename("bar.pem"), "bar.crt");
-        assert_eq!(output_filename("no-ext"), "no-ext.crt");
-        assert_eq!(output_filename("multi.dots.csr"), "multi.dots.crt");
+        assert_eq!(output_filename("bar.pem", &[]), "bar.crt");
+        assert_eq!(output_filename("no-ext", &[]), "no-ext.crt");
+        assert_eq!(output_filename("multi.dots.csr", &[]), "multi.dots.crt");
+    }
+
+    #[test]
+    fn output_filename_avoids_collisions() {
+        let existing = vec!["PARTNER-CA.CRT".to_string()];
+        assert_eq!(
+            output_filename("partner-ca.pem", &existing),
+            "partner-ca_1.crt"
+        );
+
+        let existing2 = vec!["PARTNER-CA.CRT".to_string(), "PARTNER-CA_1.CRT".to_string()];
+        assert_eq!(
+            output_filename("partner-ca.der", &existing2),
+            "partner-ca_2.crt"
+        );
+    }
+
+    #[test]
+    fn output_filename_case_insensitive() {
+        let existing = vec!["foo.crt".to_string()];
+        assert_eq!(output_filename("FOO.der", &existing), "FOO_1.crt");
     }
 }

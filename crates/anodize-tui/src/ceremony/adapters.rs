@@ -864,15 +864,22 @@ impl Archive for DiscArchive<'_> {
         Ok(())
     }
 
-    fn write_shuttle_direct(&mut self, files: &[(&str, &[u8])]) -> Result<(), Abort> {
+    fn write_shuttle_direct(&mut self, files: &[(&str, &[u8])]) -> Result<Vec<String>, Abort> {
         media::verify_shuttle_mount(&self.shuttle_mount)
             .map_err(|e| Abort::new(format!("Shuttle USB not available: {e:#}")))?;
+        let mut actual_names = Vec::with_capacity(files.len());
         for (name, bytes) in files {
             let path = unique_shuttle_path(&self.shuttle_mount, name);
+            let actual = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(name)
+                .to_string();
             media::write_and_sync(&path, bytes)
-                .map_err(|e| Abort::new(format!("Shuttle write {name} failed: {e:#}")))?;
+                .map_err(|e| Abort::new(format!("Shuttle write {actual} failed: {e:#}")))?;
+            actual_names.push(actual);
         }
-        Ok(())
+        Ok(actual_names)
     }
 
     fn write_migration(&mut self, files: &[MigrationFile]) -> Result<(), Abort> {

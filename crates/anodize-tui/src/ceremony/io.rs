@@ -212,6 +212,11 @@ pub struct SignCsrPlan {
     pub root_cert_der: Vec<u8>,
     pub cdp_url: Option<String>,
     pub existing_serials: Vec<x509_cert::serial_number::SerialNumber>,
+    /// Uppercased artifact filenames already present on disc (from prior
+    /// sessions).  Used to generate unique output filenames so that signing
+    /// two CSRs with the same stem (e.g. `partner-ca.der` and
+    /// `partner-ca.pem`) does not produce colliding artifact names.
+    pub existing_artifact_names: Vec<String>,
 }
 
 /// Plan for RefreshDisc (dev-burn only): write a seed session to disc.
@@ -620,8 +625,9 @@ pub trait Archive {
 
     /// Write files directly to the shuttle USB without requiring a disc commit.
     /// Used by read-only ceremonies (e.g. ValidateDisc) that produce a report
-    /// but do not mutate disc state.
-    fn write_shuttle_direct(&mut self, _files: &[(&str, &[u8])]) -> Result<(), Abort> {
+    /// but do not mutate disc state.  Returns the actual filenames written
+    /// (which may differ from the requested names due to collision avoidance).
+    fn write_shuttle_direct(&mut self, _files: &[(&str, &[u8])]) -> Result<Vec<String>, Abort> {
         Err(Abort::new("write_shuttle_direct not supported"))
     }
 }

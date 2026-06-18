@@ -66,7 +66,9 @@ fn write_ceremony_log(bridge: &Bridge, arc: &mut DiscArchive<'_>) {
         return;
     }
     let text = lines.join("\n") + "\n";
-    let _ = arc.write_shuttle_direct(&[("CEREMONY.LOG", text.as_bytes())]);
+    let _ = arc
+        .write_shuttle_direct(&[("CEREMONY.LOG", text.as_bytes())])
+        .ok();
 }
 
 /// A live ceremony, driven by the App's event loop.

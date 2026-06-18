@@ -115,8 +115,9 @@ pub fn validate_disc(
     }
 
     // 3. Export VALIDATE.LOG to shuttle.
-    op.note("Writing VALIDATE.LOG to shuttle\u{2026}");
-    arc.write_shuttle_direct(&[("VALIDATE.LOG", final_report.as_bytes())])?;
+    let actual = arc.write_shuttle_direct(&[("VALIDATE.LOG", final_report.as_bytes())])?;
+    let log_name = actual.first().map(|s| s.as_str()).unwrap_or("VALIDATE.LOG");
+    op.note(&format!("Writing {log_name} to shuttle\u{2026}"));
 
     let has_errors = final_report.contains("*** VALIDATION FAILED ***");
     let status = if has_errors {

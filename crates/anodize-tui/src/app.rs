@@ -340,6 +340,14 @@ impl App {
                 root_cert_der,
                 cdp_url,
                 existing_serials,
+                existing_artifact_names: self
+                    .disc
+                    .prior_sessions
+                    .iter()
+                    .flat_map(|s| s.files.iter().map(|f| f.name.to_ascii_uppercase()))
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect(),
             },
         };
         let vault = VaultConfig {
