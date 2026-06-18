@@ -175,13 +175,28 @@ const MOUNT_MAC_COMMAND: &str = r##"#!/bin/sh
 # disc-absolute LBAs are in bounds, then hdiutil-attaches the patched image
 # read-only. The physical disc is never written.
 #
-# Usage:  sh MOUNT_MAC.command [diskN | /dev/diskN]
+# Usage:  double-click in Finder, or:  sh MOUNT_MAC.command [diskN | /dev/diskN]
 # With no argument the optical drive is auto-detected via drutil.
-# Detach later with:  hdiutil detach <mountpoint>
+# Press Control-C to detach and clean up.
 
 set -eu
 
 SECT=2048
+tmp=""
+mnt=""
+
+cleanup() {
+    echo
+    echo "cleaning up..."
+    if [ -n "$mnt" ]; then
+        hdiutil detach "$mnt" 2>/dev/null && echo "  detached $mnt" || true
+    fi
+    if [ -n "$tmp" ] && [ -d "$tmp" ]; then
+        rm -rf "$tmp" && echo "  removed $tmp" || true
+    fi
+    echo "done."
+}
+trap cleanup EXIT
 
 dev=${1:-}
 if [ -z "$dev" ]; then
@@ -241,9 +256,17 @@ out=$(hdiutil attach "$img" -readonly)
 mnt=$(printf '%s\n' "$out" | sed -n 's/.*\t//p' | tail -1)
 
 echo
-echo "mounted last-session view at: $mnt"
+echo "============================================"
+echo "  Mounted last-session view at:"
+echo "    $mnt"
 echo
-echo "when done:  hdiutil detach \"$mnt\" && rm -rf \"$tmp\""
+echo "  Browse in Finder or Terminal."
+echo "  Press Control-C to detach and clean up."
+echo "============================================"
+echo
+
+# Wait for Control-C — the trap handler will clean up.
+while true; do sleep 86400; done
 "##;
 
 #[cfg(test)]
