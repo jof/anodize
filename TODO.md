@@ -1,11 +1,5 @@
 # TODO
 
-## anodize-shuttle: add `list-usb` top-level command
-
-Add a command to enumerate USB devices that could be discs (e.g. USB mass-storage
-devices, optical drives). Useful for operator discovery before ceremony start.
-The `lint --list-usb` help text references this but it doesn't exist yet.
-
 ## Findings from e2e runs
 
 ### cdemu-swap-disc.sh: gdbus not found
@@ -61,17 +55,6 @@ after a system crash or unexpected power loss.
   operator-supplied explanation of the incongruity so the discrepancy is
   permanently recorded.
 
-## Vestigial code removal: no audit log on shuttle
-
-There should be no audit log on the shuttle. It doesn't make any sense that it should only be on the CD drive but I think during development sometimes it did that. There shouldn't be an audit log on the shuttle; this is holdovers from my past usage of this shuttle stick.
-
-
-
-## Retry logic on disc write failures
-Additionally: if the write fails, the TUI should offer a retry option or at minimum
-block the user from returning to the ceremony menu (preventing silent data loss).
-
-
 ## Rekey abort after share reveal still commits to HSM
 
 Aborting the RekeyShares ceremony after all Shamir shares have been revealed
@@ -84,9 +67,6 @@ appears to complete the rekey on the HSM and/or state.json.  The ceremony should
 ## HSM Pairing -- no shares
 When pairing two HSMs together, we shouldn't gather share inputs from the operators and the HSM PIN is not needed for this operation.
 
-
-## Subsequent mounts of the shuttle.
-Subsequent mounts of the shuttle do not appear to be working consistently with the auto mount.
 
 ## Validation: session continuity errors on normal ceremony flow
 
@@ -124,7 +104,3 @@ Needs investigation: test with other BD-R drives to determine if this is
 BUFFALO-specific or if BD-R SRM requires additional commands (e.g. a
 different CLOSE function code, explicit RESERVE TRACK before each new
 session, or a firmware-specific DMA flush sequence).
-
-## Input CSRs: flexibility
-Allow the input CSR to be in either PEM or DSR format.
-Add a simple file browser to select the CSR file from the contents of the shuttle filesystem.
