@@ -68,8 +68,14 @@ fn select_target(
                     "active"
                 };
                 let subject = c.subject.split(", ").next().unwrap_or(&c.subject);
+                // 1-9, then a-z for items 10+  (supports up to 35 certs)
+                let key = if i < 9 {
+                    char::from_digit((i + 1) as u32, 10).unwrap()
+                } else {
+                    (b'a' + (i - 9) as u8) as char
+                };
                 Choice {
-                    key: char::from_digit((i + 1) as u32, 10).unwrap_or('?'),
+                    key,
                     label: format!("{} [{}]  {}", c.serial, status, subject),
                 }
             })

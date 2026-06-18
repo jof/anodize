@@ -215,8 +215,13 @@ pub fn gather_cert_list_from_sessions(
     let revoked_serials: std::collections::HashSet<&str> =
         revocation_list.iter().map(|r| r.serial.as_str()).collect();
 
+    // Use a set to deduplicate by serial — the same cert appears in every
+    // session due to the superset invariant.
+    let mut seen = std::collections::HashSet::new();
     let mut certs = Vec::new();
-    for session in sessions {
+    // Iterate sessions in reverse so the newest (and most complete) session
+    // is scanned first; duplicates from older sessions are then skipped.
+    for session in sessions.iter().rev() {
         for file in &session.files {
             if !file.name.ends_with(".CRT") {
                 continue;
@@ -224,8 +229,11 @@ pub fn gather_cert_list_from_sessions(
             let is_root = file.name == "ROOT.CRT";
             match Certificate::from_der(&file.data) {
                 Ok(cert) => {
-                    let subject = cert.tbs_certificate.subject.to_string();
                     let serial = serial_to_hex(&cert.tbs_certificate.serial_number);
+                    if !seen.insert(serial.clone()) {
+                        continue; // already seen this serial
+                    }
+                    let subject = cert.tbs_certificate.subject.to_string();
                     certs.push(CertSummary {
                         already_revoked: revoked_serials.contains(serial.as_str()),
                         serial,
