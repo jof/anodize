@@ -346,9 +346,9 @@ fn validate_cert_signatures(session_dirs: &[PathBuf]) -> Vec<Finding> {
         }
     }
 
-    // ── ROOT.CRL signature ───────────────────────────────────────────────
-    let crl_path = latest.join("ROOT.CRL");
-    if crl_path.exists() {
+    // ── CRL signature (find latest ROOT-CRL-NNN.CRL or legacy ROOT.CRL) ─
+    let crl_path = find_latest_crl(latest);
+    if let Some((crl_name, crl_path)) = crl_path {
         match std::fs::read(&crl_path) {
             Ok(crl_der) => {
                 if let Some(ref root) = root_cert {
@@ -357,39 +357,38 @@ fn validate_cert_signatures(session_dirs: &[PathBuf]) -> Vec<Finding> {
                             findings.push(Finding {
                                 severity: Severity::Pass,
                                 check: "cert.crl_signature".into(),
-                                message: "ROOT.CRL signature verified against ROOT.CRT".into(),
+                                message: format!("{crl_name} signature verified against ROOT.CRT"),
                             });
                         }
                         Err(e) => {
                             findings.push(Finding {
                                 severity: Severity::Error,
                                 check: "cert.crl_signature".into(),
-                                message: format!("ROOT.CRL signature FAILED: {e}"),
+                                message: format!("{crl_name} signature FAILED: {e}"),
                             });
                         }
                     }
 
-                    // Also check CRL number if extractable.
                     match extract_crl_number(&crl_der) {
                         Ok(Some(n)) => {
                             findings.push(Finding {
                                 severity: Severity::Pass,
                                 check: "cert.crl_number".into(),
-                                message: format!("ROOT.CRL contains CRL number {n}"),
+                                message: format!("{crl_name} contains CRL number {n}"),
                             });
                         }
                         Ok(None) => {
                             findings.push(Finding {
                                 severity: Severity::Warn,
                                 check: "cert.crl_number".into(),
-                                message: "ROOT.CRL has no CRL number extension".into(),
+                                message: format!("{crl_name} has no CRL number extension"),
                             });
                         }
                         Err(e) => {
                             findings.push(Finding {
                                 severity: Severity::Warn,
                                 check: "cert.crl_number".into(),
-                                message: format!("Could not parse CRL number from ROOT.CRL: {e}"),
+                                message: format!("Could not parse CRL number from {crl_name}: {e}"),
                             });
                         }
                     }
@@ -397,7 +396,7 @@ fn validate_cert_signatures(session_dirs: &[PathBuf]) -> Vec<Finding> {
                     findings.push(Finding {
                         severity: Severity::Warn,
                         check: "cert.crl_signature".into(),
-                        message: "Cannot verify ROOT.CRL — ROOT.CRT unavailable".into(),
+                        message: format!("Cannot verify {crl_name} — ROOT.CRT unavailable"),
                     });
                 }
             }
@@ -405,11 +404,42 @@ fn validate_cert_signatures(session_dirs: &[PathBuf]) -> Vec<Finding> {
                 findings.push(Finding {
                     severity: Severity::Error,
                     check: "cert.crl_signature".into(),
-                    message: format!("Cannot read ROOT.CRL: {e}"),
+                    message: format!("Cannot read {crl_name}: {e}"),
                 });
             }
         }
     }
 
     findings
+}
+
+/// Find the latest CRL file in a session directory.  Prefers the numbered
+/// `ROOT-CRL-NNN.CRL` naming (sorted descending so the highest number wins),
+/// falling back to the legacy `ROOT.CRL` name for pre-migration discs.
+fn find_latest_crl(session_dir: &PathBuf) -> Option<(String, PathBuf)> {
+    // Collect all ROOT-CRL-*.CRL files, pick the one with the highest number.
+    if let Ok(entries) = std::fs::read_dir(session_dir) {
+        let mut crls: Vec<String> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().to_uppercase();
+                if name.starts_with("ROOT-CRL-") && name.ends_with(".CRL") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        crls.sort();
+        if let Some(latest) = crls.last() {
+            return Some((latest.clone(), session_dir.join(latest)));
+        }
+    }
+    // Fall back to legacy name.
+    let legacy = session_dir.join("ROOT.CRL");
+    if legacy.exists() {
+        Some(("ROOT.CRL".to_string(), legacy))
+    } else {
+        None
+    }
 }

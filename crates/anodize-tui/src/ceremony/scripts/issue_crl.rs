@@ -87,7 +87,7 @@ pub fn issue_crl(
                 }),
             )],
             artifacts: vec![Artifact {
-                name: "ROOT.CRL".into(),
+                name: super::crl_disc_filename(plan.crl_number),
                 bytes: crl.der().to_vec(),
             }],
             state: Some(StateDelta {
@@ -102,7 +102,10 @@ pub fn issue_crl(
     )?;
 
     op.note("Exporting CRL to shuttle\u{2026}");
-    arc.export_shuttle(&record, &[("root.crl", crl.der())])?;
+    arc.export_shuttle(
+        &record,
+        &[(&super::crl_shuttle_filename(plan.crl_number), crl.der())],
+    )?;
 
     Ok(Outcome {
         headline: format!("CRL #{} written to disc", plan.crl_number),

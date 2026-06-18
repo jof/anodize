@@ -219,7 +219,7 @@ pub fn init_root(
                     bytes: cert.der().to_vec(),
                 },
                 Artifact {
-                    name: "ROOT.CRL".into(),
+                    name: super::crl_disc_filename(1),
                     bytes: crl.der().to_vec(),
                 },
             ],
@@ -238,7 +238,10 @@ pub fn init_root(
     op.note("Exporting root cert and CRL to shuttle\u{2026}");
     arc.export_shuttle(
         &record,
-        &[("root.crt", cert.der()), ("root.crl", crl.der())],
+        &[
+            ("root.crt", cert.der()),
+            (&super::crl_shuttle_filename(1), crl.der()),
+        ],
     )?;
 
     Ok(Outcome {

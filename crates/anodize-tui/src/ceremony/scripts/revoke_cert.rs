@@ -202,7 +202,7 @@ pub fn revoke_cert(
                     bytes: revoked_toml.clone(),
                 },
                 Artifact {
-                    name: "ROOT.CRL".into(),
+                    name: super::crl_disc_filename(plan.crl_number),
                     bytes: crl.der().to_vec(),
                 },
             ],
@@ -220,7 +220,10 @@ pub fn revoke_cert(
     op.note("Exporting to shuttle\u{2026}");
     arc.export_shuttle(
         &record,
-        &[("revoked.toml", &revoked_toml), ("root.crl", crl.der())],
+        &[
+            ("revoked.toml", &revoked_toml),
+            (&super::crl_shuttle_filename(plan.crl_number), crl.der()),
+        ],
     )?;
 
     Ok(Outcome {
