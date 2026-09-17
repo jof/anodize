@@ -1099,7 +1099,7 @@ fn build_ed25519_csr_der(subject_str: &str) -> Vec<u8> {
     use x509_cert::request::CertReqInfo;
 
     let mut secret = [0u8; 32];
-    getrandom::getrandom(&mut secret).expect("rng");
+    getrandom::fill(&mut secret).expect("rng");
     let sk = SigningKey::from_bytes(&secret);
 
     let vk = sk.verifying_key();

@@ -760,7 +760,7 @@ impl HsmBackup for YubiHsmBackupImpl {
 
         // Generate a fresh AES-256-CCM wrap key.
         let mut key_bytes = [0u8; 32];
-        getrandom::getrandom(&mut key_bytes)
+        getrandom::fill(&mut key_bytes)
             .map_err(|e| HsmError::BackendError(format!("getrandom: {e}")))?;
 
         let label_a = yubihsm::object::Label::from_bytes(b"anodize-wrap")

@@ -331,7 +331,7 @@ fn wrap_roundtrip(
 
 fn generate_wrap_key_bytes() -> [u8; 32] {
     let mut key = [0u8; 32];
-    getrandom::getrandom(&mut key).expect("getrandom failed");
+    getrandom::fill(&mut key).expect("getrandom failed");
     key
 }
 

@@ -564,7 +564,7 @@ fn generate_serial(existing: &[SerialNumber]) -> Result<SerialNumber, CaError> {
     const MAX_ATTEMPTS: u8 = 8;
     for _ in 0..MAX_ATTEMPTS {
         let mut bytes = [0u8; 16];
-        getrandom::getrandom(&mut bytes).map_err(|e| CaError::Der(e.to_string()))?;
+        getrandom::fill(&mut bytes).map_err(|e| CaError::Der(e.to_string()))?;
         // RFC 5280 serial numbers are positive ASN.1 integers; clear the high bit to
         // keep the encoding non-negative without a leading 0x00 padding byte.
         bytes[0] &= 0x7f;

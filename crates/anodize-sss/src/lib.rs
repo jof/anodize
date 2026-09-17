@@ -166,7 +166,7 @@ pub fn split(secret: &[u8], threshold: u8, total: u8) -> Result<Vec<Share>, SssE
 
     // Generate all random coefficients at once
     let mut rand_bytes = vec![0u8; secret_len * coeff_count];
-    getrandom::getrandom(&mut rand_bytes).map_err(SssError::Rng)?;
+    getrandom::fill(&mut rand_bytes).map_err(SssError::Rng)?;
 
     let mut shares: Vec<Share> = (1..=total)
         .map(|idx| Share {
@@ -486,7 +486,7 @@ mod tests {
     fn large_secret() {
         // 64-byte secret (max practical PIN size)
         let mut secret = [0u8; 64];
-        getrandom::getrandom(&mut secret).unwrap();
+        getrandom::fill(&mut secret).unwrap();
         let shares = split(&secret, 2, 3).unwrap();
         let r = reconstruct(&[shares[0].clone(), shares[1].clone()], 2).unwrap();
         assert_eq!(r, secret);
@@ -503,7 +503,7 @@ mod tests {
 
         // Generate random 32-byte PIN (same as ceremony_ops).
         let mut pin_bytes = [0u8; 32];
-        getrandom::getrandom(&mut pin_bytes).unwrap();
+        getrandom::fill(&mut pin_bytes).unwrap();
 
         // Split into shares.
         let shares = split(&pin_bytes, threshold, total).unwrap();
@@ -551,7 +551,7 @@ mod tests {
 
         // ── Step 1: establish old PIN (simulates prior InitRoot) ──
         let mut old_pin = [0u8; 32];
-        getrandom::getrandom(&mut old_pin).unwrap();
+        getrandom::fill(&mut old_pin).unwrap();
         let old_shares = split(&old_pin, old_threshold, old_names.len() as u8).unwrap();
         let old_hash = pin_verify_hash(&old_pin);
 
@@ -563,7 +563,7 @@ mod tests {
 
         // ── Step 3: generate new random PIN ──
         let mut new_pin = [0u8; 32];
-        getrandom::getrandom(&mut new_pin).unwrap();
+        getrandom::fill(&mut new_pin).unwrap();
         // New and old PINs must differ (probabilistic, but 2^256 collision is impossible)
         assert_ne!(old_pin, new_pin);
 

@@ -45,7 +45,7 @@ pub fn init_root(
 
     // 2. Generate random 32-byte PIN and split into SSS shares.
     let mut pin_bytes = vec![0u8; 32];
-    getrandom::getrandom(&mut pin_bytes).map_err(|e| Abort::new(format!("CSPRNG failure: {e}")))?;
+    getrandom::fill(&mut pin_bytes).map_err(|e| Abort::new(format!("CSPRNG failure: {e}")))?;
 
     let shares = anodize_sss::split(&pin_bytes, threshold, total)
         .map_err(|e| Abort::new(format!("SSS split failed: {e}")))?;

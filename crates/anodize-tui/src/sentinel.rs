@@ -112,10 +112,12 @@ fn main() -> Result<()> {
         // ── Acquire exclusive flock ────────────────────────────────────────────
         match Flock::lock(lock_file, FlockArg::LockExclusiveNonblock) {
             Ok(locked) => {
+                // Raw fd kept for the close() on the exec-failure path below,
+                // after `locked` has been forgotten.
                 let raw_fd = locked.as_fd().as_raw_fd();
 
                 // Clear FD_CLOEXEC before leaking so the fd survives exec.
-                if let Err(e) = fcntl(raw_fd, FcntlArg::F_SETFD(FdFlag::empty())) {
+                if let Err(e) = fcntl(locked.as_fd(), FcntlArg::F_SETFD(FdFlag::empty())) {
                     // locked drops here → flock released
                     if show_and_wait(&format!("  F_SETFD: {e}")) {
                         break;

@@ -78,8 +78,7 @@ pub fn rekey_shares(
 
     // 7. Generate new random PIN, split into shares
     let mut new_pin_bytes = vec![0u8; 32];
-    getrandom::getrandom(&mut new_pin_bytes)
-        .map_err(|e| Abort::new(format!("CSPRNG failure: {e}")))?;
+    getrandom::fill(&mut new_pin_bytes).map_err(|e| Abort::new(format!("CSPRNG failure: {e}")))?;
 
     let total = custodian_names.len() as u8;
     let shares = anodize_sss::split(&new_pin_bytes, threshold, total)

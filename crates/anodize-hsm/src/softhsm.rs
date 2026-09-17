@@ -767,7 +767,7 @@ impl HsmBackup for Pkcs11BackupImpl {
 
         // Generate AES-256 wrap key material.
         let mut key_bytes = [0u8; 32];
-        getrandom::getrandom(&mut key_bytes)
+        getrandom::fill(&mut key_bytes)
             .map_err(|e| HsmError::BackendError(format!("getrandom: {e}")))?;
 
         // Delete any existing wrap keys.
