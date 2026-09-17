@@ -6,13 +6,12 @@
 use std::path::{Path, PathBuf};
 
 use cryptoki::{
-    context::{CInitializeArgs, Pkcs11},
+    context::{CInitializeArgs, CInitializeFlags, Pkcs11},
     mechanism::Mechanism,
     object::{Attribute, AttributeType, ObjectClass, ObjectHandle},
     session::{Session, UserType},
-    types::AuthPin,
 };
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 
 use crate::{
     BackupResult, BackupTarget, Hsm, HsmBackend, HsmBackup, HsmDeviceInfo, HsmError, HsmInventory,
@@ -83,7 +82,9 @@ fn find_softhsm_module() -> Result<PathBuf> {
 
 fn init_ctx(module_path: &Path) -> Result<Pkcs11> {
     let ctx = Pkcs11::new(module_path)?;
-    match ctx.initialize(CInitializeArgs::OsThreads) {
+    // CKF_OS_LOCKING_OK: the library may use native OS locking. Same flag the
+    // old `CInitializeArgs::OsThreads` variant set before cryptoki 0.8.
+    match ctx.initialize(CInitializeArgs::new(CInitializeFlags::OS_LOCKING_OK)) {
         Ok(()) => {}
         // A second open in the same process reuses the already-initialized
         // library. PKCS#11 §11.4: the library stays initialized until the
@@ -165,8 +166,7 @@ impl HsmBackend for SoftHsmBackend {
             .ok_or_else(|| HsmError::TokenNotFound(label.to_string()))?;
 
         let session = ctx.open_rw_session(slot)?;
-        let auth = AuthPin::new(pin.expose_secret().to_string());
-        session.login(UserType::User, Some(&auth))?;
+        session.login(UserType::User, Some(pin))?;
 
         Ok(Box::new(Pkcs11Hsm {
             ctx,
@@ -262,18 +262,15 @@ impl Pkcs11Module {
         let slot = Slot::try_from(slot_id)
             .map_err(|_| HsmError::TokenNotFound(format!("invalid slot_id={slot_id}")))?;
 
-        let so_auth = AuthPin::new(so_pin.expose_secret().to_string());
-        let user_auth = AuthPin::new(user_pin.expose_secret().to_string());
-
         // Strategy 1: C_InitToken (full initialisation).
-        match self.ctx.init_token(slot, &so_auth, label) {
+        match self.ctx.init_token(slot, so_pin, label) {
             Ok(()) => {
                 tracing::info!("bootstrap_token: C_InitToken succeeded");
                 let session = self.ctx.open_rw_session(slot)?;
-                session.login(UserType::So, Some(&so_auth))?;
-                session.init_pin(&user_auth)?;
+                session.login(UserType::So, Some(so_pin))?;
+                session.init_pin(user_pin)?;
                 session.logout()?;
-                session.login(UserType::User, Some(&user_auth))?;
+                session.login(UserType::User, Some(user_pin))?;
                 return Ok(Pkcs11Hsm {
                     ctx: self.ctx,
                     session: Some(session),
@@ -296,17 +293,16 @@ impl Pkcs11Module {
                 "C_InitToken not supported and no factory_pin configured".to_string(),
             )
         })?;
-        let old_auth = AuthPin::new(old_pin.expose_secret().to_string());
 
         let session = self.ctx.open_rw_session(slot)?;
-        session.login(UserType::User, Some(&old_auth))?;
+        session.login(UserType::User, Some(old_pin))?;
 
         // Strategy 2: try C_SetPIN to rotate to the new user PIN.
-        match session.set_pin(&old_auth, &user_auth) {
+        match session.set_pin(old_pin, user_pin) {
             Ok(()) => {
                 tracing::info!("bootstrap_token: C_SetPIN succeeded, re-logging in");
                 session.logout()?;
-                session.login(UserType::User, Some(&user_auth))?;
+                session.login(UserType::User, Some(user_pin))?;
             }
             Err(cryptoki::error::Error::Pkcs11(
                 cryptoki::error::RvError::FunctionNotSupported,
@@ -403,9 +399,8 @@ const EC_PARAMS_P256: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 
 
 impl Hsm for Pkcs11Hsm {
     fn login(&mut self, pin: &SecretString) -> Result<()> {
-        let auth = AuthPin::new(pin.expose_secret().to_string());
         self.session()
-            .login(cryptoki::session::UserType::User, Some(&auth))?;
+            .login(cryptoki::session::UserType::User, Some(pin))?;
         Ok(())
     }
 
@@ -598,9 +593,7 @@ impl Hsm for Pkcs11Hsm {
     }
 
     fn change_pin(&mut self, old_pin: &SecretString, new_pin: &SecretString) -> Result<()> {
-        let old_auth = AuthPin::new(old_pin.expose_secret().to_string());
-        let new_auth = AuthPin::new(new_pin.expose_secret().to_string());
-        self.session().set_pin(&old_auth, &new_auth)?;
+        self.session().set_pin(old_pin, new_pin)?;
         Ok(())
     }
 }
@@ -701,8 +694,7 @@ impl Pkcs11BackupImpl {
             .ok_or_else(|| HsmError::TokenNotFound(token_label.to_string()))?;
 
         let session = ctx.open_rw_session(slot)?;
-        let auth = AuthPin::new(pin.expose_secret().to_string());
-        session.login(UserType::User, Some(&auth))?;
+        session.login(UserType::User, Some(pin))?;
         Ok(session)
     }
 
@@ -942,10 +934,8 @@ impl HsmBackup for Pkcs11BackupImpl {
         new_pin: &SecretString,
     ) -> Result<()> {
         let session = self.open_session(device_id, old_pin)?;
-        let old_auth = AuthPin::new(old_pin.expose_secret().to_string());
-        let new_auth = AuthPin::new(new_pin.expose_secret().to_string());
         session
-            .set_pin(&old_auth, &new_auth)
+            .set_pin(old_pin, new_pin)
             .map_err(|e| HsmError::BackendError(format!("set_pin on {device_id}: {e}")))?;
         tracing::info!(device_id, "change_pin_on_device: PIN changed");
         Ok(())

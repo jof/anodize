@@ -62,7 +62,7 @@ fn build_root_cert_roundtrip() {
 
     init_test_token("ca-root-test");
     let mut hsm = Pkcs11Hsm::new(&module, "ca-root-test").expect("open session");
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     hsm.login(&pin).expect("login");
 
     let key = hsm
@@ -106,7 +106,7 @@ fn sign_csr_happy_path() {
     init_test_token("ca-sign-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-sign-test").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
 
     let root_key = actor
@@ -175,7 +175,7 @@ fn csr_with_extra_extension_rejected() {
     init_test_token("ca-reject-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-reject-test").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
 
     let root_key = actor
@@ -233,7 +233,7 @@ fn issue_crl_encodes_revoked_serials() {
 
     init_test_token("ca-crl-test");
     let mut hsm = Pkcs11Hsm::new(&module, "ca-crl-test").expect("open session");
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     hsm.login(&pin).expect("login");
 
     let root_key = hsm
@@ -304,7 +304,7 @@ fn issue_crl_extensions_present() {
 
     init_test_token("ca-crl-ext-test");
     let mut hsm = Pkcs11Hsm::new(&module, "ca-crl-ext-test").expect("open session");
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     hsm.login(&pin).expect("login");
 
     let root_key = hsm
@@ -363,7 +363,7 @@ fn sign_csr_p256_sha256_accepted() {
     init_test_token("ca-p256-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-p256-test").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
 
     let root_key = actor
@@ -453,7 +453,7 @@ fn sign_csr_p384_sha256_accepted() {
     init_test_token("ca-p384sha256-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-p384sha256-test").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
 
     let root_key = actor
@@ -542,7 +542,7 @@ fn sign_csr_p256_sha384_accepted() {
     init_test_token("ca-p256sha384-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-p256sha384-test").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
 
     let root_key = actor
@@ -589,7 +589,7 @@ fn sign_csr_p384_sha512_accepted() {
     init_test_token("ca-p384sha512-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-p384sha512-test").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
 
     let root_key = actor
@@ -636,7 +636,7 @@ fn sign_csr_unsupported_algorithm_rejected() {
     init_test_token("ca-unsup-alg-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-unsup-alg-test").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
 
     let root_key = actor
@@ -800,7 +800,7 @@ fn sign_csr_rsa_sha256_accepted() {
     init_test_token("ca-rsa256-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-rsa256-test").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
 
     let root_key = actor
@@ -844,7 +844,7 @@ fn sign_csr_rsa_sha384_accepted() {
     init_test_token("ca-rsa384-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-rsa384-test").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
 
     let root_key = actor
@@ -888,7 +888,7 @@ fn sign_csr_rsa_sha512_accepted() {
     init_test_token("ca-rsa512-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-rsa512-test").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
 
     let root_key = actor
@@ -932,7 +932,7 @@ fn sign_csr_ed25519_accepted() {
     init_test_token("ca-ed25519-test");
     let hsm = Pkcs11Hsm::new(&module, "ca-ed25519-test").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
 
     let root_key = actor
@@ -1158,7 +1158,7 @@ fn verify_root_self_signed_pass() {
     init_test_token("ca-verify-root");
     let hsm = Pkcs11Hsm::new(&module, "ca-verify-root").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
     let key = actor
         .generate_keypair("root-key", KeySpec::EcdsaP384)
@@ -1182,7 +1182,7 @@ fn verify_intermediate_chains_to_root() {
     init_test_token("ca-verify-chain");
     let hsm = Pkcs11Hsm::new(&module, "ca-verify-chain").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
 
     let root_key = actor
@@ -1233,7 +1233,7 @@ fn verify_crl_signature_and_number() {
     init_test_token("ca-verify-crl");
     let hsm = Pkcs11Hsm::new(&module, "ca-verify-crl").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("login");
     let key = actor
         .generate_keypair("root-key", KeySpec::EcdsaP384)

@@ -99,7 +99,7 @@ fn p384_keygen_sign_verify() {
 
     let mut hsm = Pkcs11Hsm::new(&module, "anodize-p384").expect("open session");
 
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     hsm.login(&pin).expect("login");
 
     let key = hsm
@@ -164,7 +164,7 @@ fn p384_via_actor() {
     let hsm = Pkcs11Hsm::new(&module, "anodize-actor").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
 
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     actor.login(&pin).expect("actor login");
 
     let key = actor
@@ -207,8 +207,8 @@ fn change_pin_softhsm() {
 
     let mut hsm = Pkcs11Hsm::new(&module, "anodize-chpin").expect("open session");
 
-    let old_pin = secrecy::SecretString::new("1234".to_string());
-    let new_pin = secrecy::SecretString::new("5678".to_string());
+    let old_pin = secrecy::SecretString::from("1234");
+    let new_pin = secrecy::SecretString::from("5678");
 
     hsm.login(&old_pin).expect("login with old pin");
     hsm.change_pin(&old_pin, &new_pin)
@@ -238,8 +238,8 @@ fn change_pin_via_actor() {
     let hsm = Pkcs11Hsm::new(&module, "anodize-chpin-actor").expect("open session");
     let mut actor = HsmActor::spawn(Box::new(hsm));
 
-    let old_pin = secrecy::SecretString::new("1234".to_string());
-    let new_pin = secrecy::SecretString::new("5678".to_string());
+    let old_pin = secrecy::SecretString::from("1234");
+    let new_pin = secrecy::SecretString::from("5678");
 
     actor.login(&old_pin).expect("actor login");
     actor
@@ -323,8 +323,8 @@ fn change_pin_on_device_via_backup() {
 
     let backup = anodize_hsm::Pkcs11BackupImpl::new().expect("Pkcs11BackupImpl::new");
 
-    let old_pin = secrecy::SecretString::new("1234".to_string());
-    let new_pin = secrecy::SecretString::new("9999".to_string());
+    let old_pin = secrecy::SecretString::from("1234");
+    let new_pin = secrecy::SecretString::from("9999");
 
     use anodize_hsm::HsmBackup;
     backup
@@ -363,8 +363,8 @@ fn change_pin_on_device_rollback() {
     let backup = anodize_hsm::Pkcs11BackupImpl::new().expect("Pkcs11BackupImpl::new");
     use anodize_hsm::HsmBackup;
 
-    let original_pin = secrecy::SecretString::new("1234".to_string());
-    let new_pin = secrecy::SecretString::new("changed".to_string());
+    let original_pin = secrecy::SecretString::from("1234");
+    let new_pin = secrecy::SecretString::from("changed");
 
     // Forward: change to new PIN
     backup
@@ -408,8 +408,8 @@ fn change_pin_on_device_wrong_pin_fails() {
     let backup = anodize_hsm::Pkcs11BackupImpl::new().expect("Pkcs11BackupImpl::new");
     use anodize_hsm::HsmBackup;
 
-    let wrong_pin = secrecy::SecretString::new("wrong".to_string());
-    let new_pin = secrecy::SecretString::new("whatever".to_string());
+    let wrong_pin = secrecy::SecretString::from("wrong");
+    let new_pin = secrecy::SecretString::from("whatever");
 
     let result = backup.change_pin_on_device("anodize-chpin-wrongpin", &wrong_pin, &new_pin);
     assert!(
@@ -437,7 +437,7 @@ fn open_session_by_id_softhsm() {
     let backend =
         anodize_hsm::SoftHsmBackend::with_module(module).expect("SoftHsmBackend::with_module");
 
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     use anodize_hsm::HsmBackend;
     let _hsm = backend
         .open_session_by_id("anodize-byid", &pin)
@@ -476,7 +476,7 @@ fn open_session_any_recognized_softhsm() {
     assert!(!devices.is_empty());
     let serial = &devices[0].serial;
 
-    let pin = secrecy::SecretString::new("1234".to_string());
+    let pin = secrecy::SecretString::from("1234");
     let fleet_ids = vec![serial.as_str()];
     let (found_id, _hsm) =
         anodize_hsm::open_session_any_recognized(&backend, &backend, &fleet_ids, &pin)
@@ -510,8 +510,8 @@ fn change_pin_on_device_dyn_dispatch() {
     let backup: Box<dyn anodize_hsm::HsmBackup> =
         anodize_hsm::create_backup(anodize_config::HsmBackendKind::Softhsm).expect("create_backup");
 
-    let old_pin = secrecy::SecretString::new("1234".to_string());
-    let new_pin = secrecy::SecretString::new("abcd".to_string());
+    let old_pin = secrecy::SecretString::from("1234");
+    let new_pin = secrecy::SecretString::from("abcd");
 
     backup
         .change_pin_on_device("anodize-chpin-dyn", &old_pin, &new_pin)

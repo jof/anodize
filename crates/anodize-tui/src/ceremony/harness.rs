@@ -167,7 +167,7 @@ pub fn reconstruct_pin(sss: &SssMetadata, shares: &[anodize_sss::Share]) -> Resu
             "PIN verify hash mismatch — shares may be corrupted.",
         ));
     }
-    Ok(SecretString::new(hex::encode(&bytes)))
+    Ok(SecretString::from(hex::encode(&bytes)))
 }
 
 /// Channel-backed [`Operator`]: turns trait calls into [`Prompt`]s and maps the

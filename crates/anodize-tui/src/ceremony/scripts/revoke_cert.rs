@@ -280,7 +280,7 @@ mod tests {
                 return Err(Abort::new("quorum aborted"));
             }
             self.log.borrow_mut().push(Effect::CollectQuorum);
-            Ok(SecretString::new("00ff".into()))
+            Ok(SecretString::from("00ff"))
         }
         fn reconfirm_clock(&mut self) -> Result<Timestamp, Abort> {
             self.log.borrow_mut().push(Effect::ReconfirmClock);

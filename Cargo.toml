@@ -12,7 +12,7 @@ resolver = "2"
 
 [workspace.dependencies]
 # HSM / crypto
-cryptoki       = "0.7"
+cryptoki       = "0.12"
 yubihsm        = { git = "https://github.com/iqlusioninc/yubihsm.rs.git", rev = "88ddcb307ac786d893746d0e1b0d6107fa45e9f3", features = ["usb"] }
 # X.509
 x509-cert      = { version = "0.2", features = ["builder"] }
@@ -26,7 +26,7 @@ crossterm      = "0.28"
 serde          = { version = "1", features = ["derive"] }
 toml           = "0.8"
 # Secrets / crypto primitives
-secrecy        = "0.8"
+secrecy        = "0.10"
 sha2           = "0.10"
 hex            = "0.4"
 getrandom      = "0.2"

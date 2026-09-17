@@ -109,7 +109,7 @@ pub fn init_root(
 
     // 7. Bootstrap HSM with the generated PIN.
     op.note("Bootstrapping HSM…");
-    let pin = secrecy::SecretString::new(pin_hex);
+    let pin = secrecy::SecretString::from(pin_hex);
     let mut sess = vault.bootstrap(pin)?;
 
     // 8. Generate root keypair.
@@ -303,7 +303,7 @@ pub(crate) mod tests {
         fn collect_quorum(&mut self, _: &SssMetadata) -> Result<Pin, Abort> {
             self.should_abort("collect_quorum")?;
             self.transcript.push("collect_quorum".into());
-            Ok(SecretString::new("00ff".into()))
+            Ok(SecretString::from("00ff"))
         }
         fn reconfirm_clock(&mut self) -> Result<Timestamp, Abort> {
             self.should_abort("reconfirm_clock")?;

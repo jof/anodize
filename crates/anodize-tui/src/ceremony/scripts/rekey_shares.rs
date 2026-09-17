@@ -19,7 +19,7 @@
 //! 14. export the audit log to the shuttle.
 
 use anodize_config::state::{Custodian, SssMetadata};
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 
 use crate::ceremony::io::*;
 
@@ -112,7 +112,7 @@ pub fn rekey_shares(
         pin_verify_hash: new_pin_verify_hash,
     };
 
-    let new_pin_hex = SecretString::new(hex::encode(&new_pin_bytes));
+    let new_pin_hex = SecretString::from(hex::encode(&new_pin_bytes));
 
     // 8. Reveal shares
     op.reveal_shares(&shares, &custodian_names, new_generation)?;
@@ -148,12 +148,9 @@ pub fn rekey_shares(
         }
         Err(e) => {
             // Re-login with the new PIN to roll back the primary to old.
-            let new_pin_for_rollback = SecretString::new(new_pin_hex.expose_secret().clone());
+            let new_pin_for_rollback = new_pin_hex.clone();
             if let Ok(mut rollback_sess) = vault.login(new_pin_for_rollback) {
-                let _ = rollback_sess.change_pin(
-                    &SecretString::new(new_pin_hex.expose_secret().clone()),
-                    &old_pin_hex,
-                );
+                let _ = rollback_sess.change_pin(&new_pin_hex.clone(), &old_pin_hex);
             }
             return Err(Abort::new(format!(
                 "Fleet PIN propagation failed (all HSMs rolled back): {e}"
