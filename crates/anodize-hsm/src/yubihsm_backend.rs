@@ -886,7 +886,7 @@ impl HsmBackup for YubiHsmBackupImpl {
             ANODIZE_AUTH_KEY_ID,
             old_pin.expose_secret().as_bytes(),
         );
-        let client = yubihsm::Client::open(connector, creds, true).map_err(|e| {
+        let mut client = yubihsm::Client::open(connector, creds, true).map_err(|e| {
             HsmError::BackendError(format!("connect to {device_id} with old PIN: {e}"))
         })?;
 
