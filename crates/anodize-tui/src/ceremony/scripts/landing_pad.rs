@@ -109,7 +109,7 @@ pub fn assemble_landing_pad(plan: &LandingPadPlan) -> Vec<MigrationFile> {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 /// Human-readable explanation burned into every disc. Written for a reader who

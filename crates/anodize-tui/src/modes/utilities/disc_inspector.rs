@@ -444,9 +444,9 @@ pub fn gather_session_detail_pub(
         for (i, f) in crt_files.iter().enumerate() {
             let summary = match Certificate::from_der(&f.data) {
                 Ok(cert) => {
-                    let subject = cert.tbs_certificate.subject.to_string();
-                    let serial = format_serial(&cert.tbs_certificate.serial_number);
-                    let not_after = format_time(&cert.tbs_certificate.validity.not_after);
+                    let subject = cert.tbs_certificate().subject().to_string();
+                    let serial = format_serial(cert.tbs_certificate().serial_number());
+                    let not_after = format_time(&cert.tbs_certificate().validity().not_after);
                     format!(
                         "[{}] {}: {}  serial={}  expires={}",
                         i + 1,
@@ -547,38 +547,38 @@ pub fn gather_cert_detail_pub(
         }
     };
 
-    let tbs = &cert.tbs_certificate;
+    let tbs = cert.tbs_certificate();
 
-    lines.push(format!("  Subject:   {}", tbs.subject));
-    lines.push(format!("  Issuer:    {}", tbs.issuer));
+    lines.push(format!("  Subject:   {}", tbs.subject()));
+    lines.push(format!("  Issuer:    {}", tbs.issuer()));
     lines.push(format!(
         "  Serial:    {}",
-        format_serial(&tbs.serial_number)
+        format_serial(tbs.serial_number())
     ));
-    lines.push(format!("  Version:   {:?}", tbs.version));
+    lines.push(format!("  Version:   {:?}", tbs.version()));
     lines.push(String::new());
 
     // Validity
     lines.push(format!(
         "  Not Before: {}",
-        format_time(&tbs.validity.not_before)
+        format_time(&tbs.validity().not_before)
     ));
     lines.push(format!(
         "  Not After:  {}",
-        format_time(&tbs.validity.not_after)
+        format_time(&tbs.validity().not_after)
     ));
     lines.push(String::new());
 
     // Key algorithm
     lines.push(format!(
         "  Signature Algorithm: {}",
-        cert.signature_algorithm.oid
+        cert.signature_algorithm().oid
     ));
     lines.push(format!(
         "  Public Key Algorithm: {}",
-        tbs.subject_public_key_info.algorithm.oid
+        tbs.subject_public_key_info().algorithm.oid
     ));
-    if let Some(ref params) = tbs.subject_public_key_info.algorithm.parameters {
+    if let Some(params) = &tbs.subject_public_key_info().algorithm.parameters {
         if let Ok(oid) = der::asn1::ObjectIdentifier::from_der(&params.to_der().unwrap_or_default())
         {
             lines.push(format!("  Key Curve: {}", oid_name(oid)));
@@ -593,7 +593,7 @@ pub fn gather_cert_detail_pub(
     lines.push(String::new());
 
     // Extensions
-    if let Some(ref exts) = tbs.extensions {
+    if let Some(exts) = tbs.extensions() {
         lines.push("  Extensions:".into());
         for ext in exts.iter() {
             let critical = if ext.critical { " [critical]" } else { "" };
@@ -635,7 +635,7 @@ pub fn gather_cert_detail_pub(
     }
 
     // Revocation status
-    let serial_hex = crate::helpers::serial_to_hex(&tbs.serial_number);
+    let serial_hex = crate::helpers::serial_to_hex(tbs.serial_number());
     if let Some(rev) = revocations.iter().find(|r| r.serial == serial_hex) {
         let reason = rev.reason.as_deref().unwrap_or("unspecified");
         lines.push(format!(

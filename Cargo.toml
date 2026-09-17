@@ -15,9 +15,9 @@ resolver = "2"
 cryptoki       = "0.12"
 yubihsm        = { git = "https://github.com/iqlusioninc/yubihsm.rs.git", rev = "88ddcb307ac786d893746d0e1b0d6107fa45e9f3", features = ["usb"] }
 # X.509
-x509-cert      = { version = "0.2", features = ["builder"] }
-der            = "0.7"
-spki           = "0.7"
+x509-cert      = { version = "0.3", features = ["builder"] }
+der            = "0.8"
+spki           = "0.8"
 clap           = { version = "4", features = ["derive"] }
 # TUI (ceremony binary)
 ratatui        = "0.30"
@@ -27,19 +27,22 @@ serde          = { version = "1", features = ["derive"] }
 toml           = "1"
 # Secrets / crypto primitives
 secrecy        = "0.10"
-sha2           = "0.10"
+sha2           = "0.11"
 hex            = "0.4"
 getrandom      = "0.4"
 serde_json     = "1"
 base64         = "0.23"
 zeroize        = { version = "1", features = ["derive"] }
 # ECDSA verification (tests + anodize-ca)
-p256           = { version = "0.13", features = ["ecdsa", "pkcs8", "digest"] }
-p384           = { version = "0.13", features = ["ecdsa", "pkcs8", "digest"] }
+p256           = { version = "0.14", features = ["ecdsa", "pkcs8", "digest"] }
+p384           = { version = "0.14", features = ["ecdsa", "pkcs8", "digest"] }
 # RSA verification
-rsa            = { version = "0.9", features = ["sha2"] }
+# rsa 0.9 is built on the spki 0.7 / digest 0.10 generation and cannot share
+# types with x509-cert 0.3. The 0.10 line (still a release candidate, and
+# already pulled in by yubihsm) is the only one on the current stack.
+rsa            = "0.10.0-rc.18"
 # Ed25519 verification
-ed25519-dalek  = { version = "2", features = ["pkcs8"] }
+ed25519-dalek  = { version = "3", features = ["pkcs8"] }
 # Time (date arithmetic for validity periods)
 time           = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 # Error handling

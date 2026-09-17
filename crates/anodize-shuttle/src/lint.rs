@@ -488,8 +488,8 @@ fn validate_cert_der(path: &Path, label: &str) -> Result<String> {
     use der::Decode;
     let cert = x509_cert::certificate::Certificate::from_der(&bytes)
         .with_context(|| format!("{label}: not a valid DER-encoded X.509 certificate"))?;
-    let subject = cert.tbs_certificate.subject.to_string();
-    let issuer = cert.tbs_certificate.issuer.to_string();
+    let subject = cert.tbs_certificate().subject().to_string();
+    let issuer = cert.tbs_certificate().issuer().to_string();
     let fp = sha256_fingerprint(&bytes);
     Ok(format!("subject={subject}, issuer={issuer}, sha256={fp}"))
 }

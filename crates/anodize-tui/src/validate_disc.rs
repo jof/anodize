@@ -78,7 +78,7 @@ fn main() -> Result<()> {
                 if let Some(name) = e.file_name().to_str() {
                     let upper = name.to_uppercase();
                     if let Ok(content) = std::fs::read(e.path()) {
-                        let hash = format!("{:x}", Sha256::digest(&content));
+                        let hash = hex::encode(Sha256::digest(&content));
                         file_hashes.insert(upper, hash);
                     } else {
                         file_hashes.insert(upper, String::new());

@@ -198,7 +198,7 @@ pub fn collect_serial_numbers_from_sessions(
                 continue;
             }
             if let Ok(cert) = Certificate::from_der(&file.data) {
-                serials.push(cert.tbs_certificate.serial_number);
+                serials.push(cert.tbs_certificate().serial_number().clone());
             }
         }
     }
@@ -229,11 +229,11 @@ pub fn gather_cert_list_from_sessions(
             let is_root = file.name == "ROOT.CRT";
             match Certificate::from_der(&file.data) {
                 Ok(cert) => {
-                    let serial = serial_to_hex(&cert.tbs_certificate.serial_number);
+                    let serial = serial_to_hex(cert.tbs_certificate().serial_number());
                     if !seen.insert(serial.clone()) {
                         continue; // already seen this serial
                     }
-                    let subject = cert.tbs_certificate.subject.to_string();
+                    let subject = cert.tbs_certificate().subject().to_string();
                     certs.push(CertSummary {
                         already_revoked: revoked_serials.contains(serial.as_str()),
                         serial,
@@ -278,9 +278,9 @@ pub fn hex_serial_to_bytes(hex: &str) -> Option<Vec<u8>> {
 /// a DER-encoded X.509 certificate. Returns `None` if the DER cannot be parsed.
 pub fn cert_subject_and_validity_days(der: &[u8]) -> Option<(String, u32)> {
     let cert = Certificate::from_der(der).ok()?;
-    let subject = cert.tbs_certificate.subject.to_string();
-    let not_before = cert.tbs_certificate.validity.not_before;
-    let not_after = cert.tbs_certificate.validity.not_after;
+    let subject = cert.tbs_certificate().subject().to_string();
+    let not_before = cert.tbs_certificate().validity().not_before;
+    let not_after = cert.tbs_certificate().validity().not_after;
     // Convert x509_cert::time::Time → SystemTime for duration arithmetic.
     let before: SystemTime = not_before.to_system_time();
     let after: SystemTime = not_after.to_system_time();
@@ -323,7 +323,7 @@ pub fn build_cert_preview(
     // Issuer from actual root cert on disc (authoritative) or config fallback
     let issuer_display = if let Some(der) = root_cert_der {
         match Certificate::from_der(der) {
-            Ok(cert) => cert.tbs_certificate.subject.to_string(),
+            Ok(cert) => cert.tbs_certificate().subject().to_string(),
             Err(_) => issuer_dn,
         }
     } else {
@@ -663,7 +663,7 @@ mod tests {
         use spki::AlgorithmIdentifierOwned;
         use x509_cert::request::{CertReq, CertReqInfo, Version};
 
-        let sk = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let sk = SigningKey::from_slice(&[0x42u8; 32]).expect("test key");
         let vk = sk.verifying_key();
         let spki_der = vk.to_public_key_der().expect("encode SPKI");
         let spki =
@@ -756,50 +756,38 @@ mod tests {
         assert!(lines[0].contains("CSR decode error"));
     }
 
-    /// Build a minimal self-signed root certificate DER for testing.
-    /// The signature is not valid — the preview only reads the subject DN.
-    fn build_test_root_cert_der(subject_str: &str) -> Vec<u8> {
+    /// Build a self-signed P-256 root certificate DER for testing, valid for
+    /// `validity_secs` from now. Uses anodize's own root profile so the
+    /// extension set matches what the ceremony issues.
+    fn build_test_root_cert_der_with_validity(subject_str: &str, validity_secs: u64) -> Vec<u8> {
         use der::Encode;
-        use p256::ecdsa::SigningKey;
+        use p256::ecdsa::{DerSignature, SigningKey};
         use p256::pkcs8::EncodePublicKey;
-        use x509_cert::certificate::{Certificate, TbsCertificate, Version};
+        use x509_cert::builder::{Builder, CertificateBuilder};
         use x509_cert::serial_number::SerialNumber;
         use x509_cert::time::Validity;
 
-        let sk = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
-        let vk = sk.verifying_key();
-        let spki_der = vk.to_public_key_der().expect("spki");
+        let sk = SigningKey::from_slice(&[0x42u8; 32]).expect("test key");
+        let spki_der = sk.verifying_key().to_public_key_der().expect("spki");
         let spki =
             spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse spki");
 
         let name = x509_cert::name::Name::from_str(subject_str).unwrap();
-        let validity = Validity::from_now(std::time::Duration::from_secs(86400)).expect("validity");
+        let validity =
+            Validity::from_now(std::time::Duration::from_secs(validity_secs)).expect("validity");
         let serial = SerialNumber::new(&[0x01]).unwrap();
 
-        let alg = spki::AlgorithmIdentifierOwned {
-            oid: der::oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"),
-            parameters: None,
-        };
-
-        let tbs = TbsCertificate {
-            version: Version::V3,
-            serial_number: serial,
-            signature: alg.clone(),
-            issuer: name.clone(),
-            validity,
-            subject: name,
-            subject_public_key_info: spki,
-            issuer_unique_id: None,
-            subject_unique_id: None,
-            extensions: None,
-        };
-
-        let cert = Certificate {
-            tbs_certificate: tbs,
-            signature_algorithm: alg,
-            signature: der::asn1::BitString::from_bytes(&[0u8; 64]).expect("bitstring"),
-        };
+        let cert =
+            CertificateBuilder::new(anodize_ca::RootCaProfile::new(name), serial, validity, spki)
+                .expect("builder")
+                .build::<_, DerSignature>(&sk)
+                .expect("build cert");
         cert.to_der().expect("encode cert")
+    }
+
+    /// One-day self-signed root certificate DER for testing.
+    fn build_test_root_cert_der(subject_str: &str) -> Vec<u8> {
+        build_test_root_cert_der_with_validity(subject_str, 86400)
     }
 
     #[test]
@@ -864,44 +852,7 @@ mod tests {
     #[test]
     fn cert_subject_and_validity_multi_year() {
         // Build a cert with ~5 years validity (1825 days).
-        use der::Encode;
-        use p256::ecdsa::SigningKey;
-        use p256::pkcs8::EncodePublicKey;
-        use x509_cert::certificate::{Certificate, TbsCertificate, Version};
-        use x509_cert::serial_number::SerialNumber;
-        use x509_cert::time::Validity;
-
-        let sk = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
-        let vk = sk.verifying_key();
-        let spki_der = vk.to_public_key_der().expect("spki");
-        let spki =
-            spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse spki");
-        let name = x509_cert::name::Name::from_str("CN=Sub CA,O=Org,C=DE").unwrap();
-        let validity =
-            Validity::from_now(std::time::Duration::from_secs(1825 * 86400)).expect("validity");
-        let serial = SerialNumber::new(&[0x02]).unwrap();
-        let alg = spki::AlgorithmIdentifierOwned {
-            oid: der::oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2"),
-            parameters: None,
-        };
-        let tbs = TbsCertificate {
-            version: Version::V3,
-            serial_number: serial,
-            signature: alg.clone(),
-            issuer: name.clone(),
-            validity,
-            subject: name,
-            subject_public_key_info: spki,
-            issuer_unique_id: None,
-            subject_unique_id: None,
-            extensions: None,
-        };
-        let cert = Certificate {
-            tbs_certificate: tbs,
-            signature_algorithm: alg,
-            signature: der::asn1::BitString::from_bytes(&[0u8; 64]).expect("bitstring"),
-        };
-        let der = cert.to_der().expect("encode cert");
+        let der = build_test_root_cert_der_with_validity("CN=Sub CA,O=Org,C=DE", 1825 * 86400);
 
         let (subject, days) = cert_subject_and_validity_days(&der).expect("should parse");
         assert!(subject.contains("Sub CA"), "subject={subject}");

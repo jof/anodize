@@ -914,7 +914,7 @@ mod tests {
         let file_hashes = files
             .iter()
             .map(|(name, content)| {
-                let hash = format!("{:x}", Sha256::digest(content.as_bytes()));
+                let hash = hex::encode(Sha256::digest(content.as_bytes()));
                 (name.to_string(), hash)
             })
             .collect();
@@ -1381,7 +1381,7 @@ mod tests {
     fn state_root_cert_hash_match() {
         use sha2::{Digest, Sha256};
         let cert_content = b"fake-root-cert-der";
-        let hash = format!("{:x}", Sha256::digest(cert_content));
+        let hash = hex::encode(Sha256::digest(cert_content));
         let s = SessionSnapshot {
             index: 0,
             file_hashes: [("ROOT.CRT".to_string(), hash.clone())]

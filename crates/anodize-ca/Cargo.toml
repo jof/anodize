@@ -25,7 +25,8 @@ p256.workspace = true
 p384.workspace = true
 rsa.workspace = true
 ed25519-dalek.workspace = true
-getrandom.workspace = true
+# sys_rng: rand_core-compatible OS RNG for test key generation
+getrandom = { workspace = true, features = ["sys_rng"] }
 secrecy.workspace = true
 sha2.workspace = true
 anyhow.workspace = true

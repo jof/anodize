@@ -633,7 +633,7 @@ impl App {
                 .files
                 .iter()
                 .map(|f| {
-                    let hash = format!("{:x}", Sha256::digest(&f.data));
+                    let hash = hex::encode(Sha256::digest(&f.data));
                     (f.name.clone(), hash)
                 })
                 .collect();

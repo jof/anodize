@@ -5,6 +5,11 @@ use anodize_hsm::{Hsm, HsmActor, KeySpec, Pkcs11Hsm};
 use der::{Decode, Encode};
 use x509_cert::serial_number::SerialNumber;
 
+/// OS-backed CSPRNG for test key generation (rand_core 0.10 has no `OsRng`).
+fn test_rng() -> getrandom::rand_core::UnwrapErr<getrandom::SysRng> {
+    getrandom::rand_core::UnwrapErr(getrandom::SysRng)
+}
+
 fn softhsm_env() -> Option<PathBuf> {
     let module = env::var("SOFTHSM2_MODULE").ok()?;
     Some(PathBuf::from(module))
@@ -80,7 +85,11 @@ fn build_root_cert_roundtrip() {
 
     // BasicConstraints CA:TRUE must be present
     let bc_oid = der::asn1::ObjectIdentifier::new_unwrap("2.5.29.19");
-    let exts = decoded.tbs_certificate.extensions.as_deref().unwrap_or(&[]);
+    let exts = decoded
+        .tbs_certificate()
+        .extensions()
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
     let bc_ext = exts
         .iter()
         .find(|e| e.extn_id == bc_oid)
@@ -130,9 +139,9 @@ fn sign_csr_happy_path() {
     use x509_cert::builder::{Builder, RequestBuilder};
     let subject =
         x509_cert::name::Name::from_str("CN=Test Intermediate CA,O=Test Org,C=US").unwrap();
-    let req_builder = RequestBuilder::new(subject, &int_signer).expect("request builder");
+    let req_builder = RequestBuilder::new(subject).expect("request builder");
     let csr = req_builder
-        .build::<p384::ecdsa::DerSignature>()
+        .build::<_, p384::ecdsa::DerSignature>(&int_signer)
         .expect("build CSR");
     let csr_der = csr.to_der().expect("encode CSR DER");
 
@@ -152,8 +161,8 @@ fn sign_csr_happy_path() {
         x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
 
     assert_eq!(
-        decoded.tbs_certificate.issuer,
-        root_cert.tbs_certificate.subject
+        decoded.tbs_certificate().issuer(),
+        root_cert.tbs_certificate().subject()
     );
 
     println!(
@@ -200,13 +209,13 @@ fn csr_with_extra_extension_rejected() {
     use x509_cert::ext::pkix::SubjectAltName;
 
     let subject = x509_cert::name::Name::from_str("CN=Rogue CA,O=Test Org,C=US").unwrap();
-    let mut req_builder = RequestBuilder::new(subject, &int_signer).expect("request builder");
+    let mut req_builder = RequestBuilder::new(subject).expect("request builder");
     let san = SubjectAltName(vec![GeneralName::DnsName(
         der::asn1::Ia5String::new("evil.example.com").unwrap(),
     )]);
     req_builder.add_extension(&san).expect("add SAN");
     let csr = req_builder
-        .build::<p384::ecdsa::DerSignature>()
+        .build::<_, p384::ecdsa::DerSignature>(&int_signer)
         .expect("build CSR");
     let csr_der = csr.to_der().expect("encode CSR DER");
 
@@ -259,7 +268,8 @@ fn issue_crl_encodes_revoked_serials() {
 
     let crl_der = issue_crl(&root_signer, &root_cert, &revoked, next_update, 1).expect("issue CRL");
 
-    let cert_list = x509_cert::crl::CertificateList::from_der(&crl_der).expect("decode CRL");
+    let cert_list: x509_cert::crl::CertificateList =
+        x509_cert::crl::CertificateList::from_der(&crl_der).expect("decode CRL");
     let revoked_certs = cert_list
         .tbs_cert_list
         .revoked_certificates
@@ -320,7 +330,8 @@ fn issue_crl_extensions_present() {
     let next_update = SystemTime::now() + std::time::Duration::from_secs(30 * 24 * 3600);
     let crl_der = issue_crl(&root_signer, &root_cert, &[], next_update, 1).expect("issue CRL");
 
-    let cert_list = x509_cert::crl::CertificateList::from_der(&crl_der).expect("decode CRL");
+    let cert_list: x509_cert::crl::CertificateList =
+        x509_cert::crl::CertificateList::from_der(&crl_der).expect("decode CRL");
     let exts = cert_list
         .tbs_cert_list
         .crl_extensions
@@ -389,8 +400,8 @@ fn sign_csr_p256_sha256_accepted() {
     let decoded =
         x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
     assert_eq!(
-        decoded.tbs_certificate.issuer,
-        root_cert.tbs_certificate.subject
+        decoded.tbs_certificate().issuer(),
+        root_cert.tbs_certificate().subject()
     );
 
     println!(
@@ -404,11 +415,12 @@ fn build_p256_csr_der(subject_str: &str) -> Vec<u8> {
     use der::{Decode, Encode};
     use p256::ecdsa::signature::Signer;
     use p256::ecdsa::{DerSignature, SigningKey};
+    use p256::elliptic_curve::Generate;
     use p256::pkcs8::EncodePublicKey;
     use spki::AlgorithmIdentifierOwned;
     use x509_cert::request::CertReqInfo;
 
-    let sk = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let sk = SigningKey::generate_from_rng(&mut test_rng());
     let vk = sk.verifying_key();
     let spki_der = vk.to_public_key_der().expect("encode SPKI");
     let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse SPKI");
@@ -476,8 +488,8 @@ fn sign_csr_p384_sha256_accepted() {
     let decoded =
         x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
     assert_eq!(
-        decoded.tbs_certificate.issuer,
-        root_cert.tbs_certificate.subject
+        decoded.tbs_certificate().issuer(),
+        root_cert.tbs_certificate().subject()
     );
 
     println!(
@@ -491,12 +503,13 @@ fn build_p384_sha256_csr_der(subject_str: &str) -> Vec<u8> {
     use der::{Decode, Encode};
     use p384::ecdsa::signature::hazmat::PrehashSigner;
     use p384::ecdsa::SigningKey;
+    use p384::elliptic_curve::Generate;
     use p384::pkcs8::EncodePublicKey;
     use sha2::Digest;
     use spki::AlgorithmIdentifierOwned;
     use x509_cert::request::CertReqInfo;
 
-    let sk = SigningKey::random(&mut p384::elliptic_curve::rand_core::OsRng);
+    let sk = SigningKey::generate_from_rng(&mut test_rng());
     let vk = sk.verifying_key();
     let spki_der = vk.to_public_key_der().expect("encode SPKI");
     let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse SPKI");
@@ -565,8 +578,8 @@ fn sign_csr_p256_sha384_accepted() {
     let decoded =
         x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
     assert_eq!(
-        decoded.tbs_certificate.issuer,
-        root_cert.tbs_certificate.subject
+        decoded.tbs_certificate().issuer(),
+        root_cert.tbs_certificate().subject()
     );
 
     println!(
@@ -612,8 +625,8 @@ fn sign_csr_p384_sha512_accepted() {
     let decoded =
         x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
     assert_eq!(
-        decoded.tbs_certificate.issuer,
-        root_cert.tbs_certificate.subject
+        decoded.tbs_certificate().issuer(),
+        root_cert.tbs_certificate().subject()
     );
 
     println!(
@@ -667,12 +680,13 @@ fn build_p256_sha384_csr_der(subject_str: &str) -> Vec<u8> {
     use der::{Decode, Encode};
     use p256::ecdsa::signature::hazmat::PrehashSigner;
     use p256::ecdsa::SigningKey;
+    use p256::elliptic_curve::Generate;
     use p256::pkcs8::EncodePublicKey;
     use sha2::Digest;
     use spki::AlgorithmIdentifierOwned;
     use x509_cert::request::CertReqInfo;
 
-    let sk = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let sk = SigningKey::generate_from_rng(&mut test_rng());
     let vk = sk.verifying_key();
     let spki_der = vk.to_public_key_der().expect("encode SPKI");
     let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse SPKI");
@@ -709,12 +723,13 @@ fn build_p384_sha512_csr_der(subject_str: &str) -> Vec<u8> {
     use der::{Decode, Encode};
     use p384::ecdsa::signature::hazmat::PrehashSigner;
     use p384::ecdsa::SigningKey;
+    use p384::elliptic_curve::Generate;
     use p384::pkcs8::EncodePublicKey;
     use sha2::Digest;
     use spki::AlgorithmIdentifierOwned;
     use x509_cert::request::CertReqInfo;
 
-    let sk = SigningKey::random(&mut p384::elliptic_curve::rand_core::OsRng);
+    let sk = SigningKey::generate_from_rng(&mut test_rng());
     let vk = sk.verifying_key();
     let spki_der = vk.to_public_key_der().expect("encode SPKI");
     let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse SPKI");
@@ -751,11 +766,12 @@ fn build_csr_with_bogus_alg(subject_str: &str) -> Vec<u8> {
     use der::{Decode, Encode};
     use p256::ecdsa::signature::Signer;
     use p256::ecdsa::{DerSignature, SigningKey};
+    use p256::elliptic_curve::Generate;
     use p256::pkcs8::EncodePublicKey;
     use spki::AlgorithmIdentifierOwned;
     use x509_cert::request::CertReqInfo;
 
-    let sk = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let sk = SigningKey::generate_from_rng(&mut test_rng());
     let vk = sk.verifying_key();
     let spki_der = vk.to_public_key_der().expect("encode SPKI");
     let spki = spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_bytes()).expect("parse SPKI");
@@ -823,8 +839,8 @@ fn sign_csr_rsa_sha256_accepted() {
     let decoded =
         x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
     assert_eq!(
-        decoded.tbs_certificate.issuer,
-        root_cert.tbs_certificate.subject
+        decoded.tbs_certificate().issuer(),
+        root_cert.tbs_certificate().subject()
     );
 
     println!("sign_csr_rsa_sha256_accepted: OK ({} bytes)", int_der.len());
@@ -867,8 +883,8 @@ fn sign_csr_rsa_sha384_accepted() {
     let decoded =
         x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
     assert_eq!(
-        decoded.tbs_certificate.issuer,
-        root_cert.tbs_certificate.subject
+        decoded.tbs_certificate().issuer(),
+        root_cert.tbs_certificate().subject()
     );
 
     println!("sign_csr_rsa_sha384_accepted: OK ({} bytes)", int_der.len());
@@ -911,8 +927,8 @@ fn sign_csr_rsa_sha512_accepted() {
     let decoded =
         x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
     assert_eq!(
-        decoded.tbs_certificate.issuer,
-        root_cert.tbs_certificate.subject
+        decoded.tbs_certificate().issuer(),
+        root_cert.tbs_certificate().subject()
     );
 
     println!("sign_csr_rsa_sha512_accepted: OK ({} bytes)", int_der.len());
@@ -955,8 +971,8 @@ fn sign_csr_ed25519_accepted() {
     let decoded =
         x509_cert::certificate::Certificate::from_der(&int_der).expect("decode intermediate DER");
     assert_eq!(
-        decoded.tbs_certificate.issuer,
-        root_cert.tbs_certificate.subject
+        decoded.tbs_certificate().issuer(),
+        root_cert.tbs_certificate().subject()
     );
 
     println!("sign_csr_ed25519_accepted: OK ({} bytes)", int_der.len());
@@ -971,7 +987,7 @@ fn build_rsa_sha256_csr_der(subject_str: &str) -> Vec<u8> {
     use spki::AlgorithmIdentifierOwned;
     use x509_cert::request::CertReqInfo;
 
-    let mut rng = rsa::rand_core::OsRng;
+    let mut rng = test_rng();
     let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("generate RSA key");
     let pub_key = private_key.to_public_key();
     let spki_der = pub_key.to_public_key_der().expect("encode SPKI");
@@ -1014,7 +1030,7 @@ fn build_rsa_sha384_csr_der(subject_str: &str) -> Vec<u8> {
     use spki::AlgorithmIdentifierOwned;
     use x509_cert::request::CertReqInfo;
 
-    let mut rng = rsa::rand_core::OsRng;
+    let mut rng = test_rng();
     let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("generate RSA key");
     let pub_key = private_key.to_public_key();
     let spki_der = pub_key.to_public_key_der().expect("encode SPKI");
@@ -1057,7 +1073,7 @@ fn build_rsa_sha512_csr_der(subject_str: &str) -> Vec<u8> {
     use spki::AlgorithmIdentifierOwned;
     use x509_cert::request::CertReqInfo;
 
-    let mut rng = rsa::rand_core::OsRng;
+    let mut rng = test_rng();
     let private_key = rsa::RsaPrivateKey::new(&mut rng, 2048).expect("generate RSA key");
     let pub_key = private_key.to_public_key();
     let spki_der = pub_key.to_public_key_der().expect("encode SPKI");
@@ -1200,9 +1216,9 @@ fn verify_intermediate_chains_to_root() {
 
     use x509_cert::builder::{Builder, RequestBuilder};
     let subject = x509_cert::name::Name::from_str("CN=Int CA,O=Test Org,C=US").unwrap();
-    let csr = RequestBuilder::new(subject, &int_signer)
+    let csr = RequestBuilder::new(subject)
         .expect("req builder")
-        .build::<p384::ecdsa::DerSignature>()
+        .build::<_, p384::ecdsa::DerSignature>(&int_signer)
         .expect("build CSR");
     let csr_der = csr.to_der().expect("encode CSR");
 

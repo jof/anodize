@@ -11,20 +11,21 @@ use p384::{
     },
     pkcs8::DecodePublicKey,
 };
-use spki::{AlgorithmIdentifierOwned, DynSignatureAlgorithmIdentifier};
+use spki::{AlgorithmIdentifierOwned, DynSignatureAlgorithmIdentifier, SubjectPublicKeyInfoRef};
 use thiserror::Error;
 use x509_cert::{
-    builder::{Builder, CertificateBuilder, Profile},
-    certificate::Certificate,
+    builder::{profile::BuilderProfile, Builder, CertificateBuilder},
+    certificate::{Certificate, TbsCertificate},
     crl::{CertificateList, RevokedCert, TbsCertList},
     ext::{
         pkix::{
             crl::{dp::DistributionPoint, CrlDistributionPoints, CrlNumber},
             name::{DistributionPointName, GeneralName},
-            AuthorityKeyIdentifier, SubjectKeyIdentifier,
+            AuthorityKeyIdentifier, BasicConstraints, KeyUsage, KeyUsages, SubjectKeyIdentifier,
         },
-        Extension,
+        Extension, ToExtension,
     },
+    name::Name,
     request::{CertReq, ExtensionReq},
     serial_number::SerialNumber,
     time::{Time, Validity},
@@ -154,6 +155,125 @@ impl From<x509_cert::builder::Error> for CaError {
     }
 }
 
+// ── Certificate profiles ────────────────────────────────────────────────────
+//
+// x509-cert 0.3 replaced the built-in `Profile::Root` / `Profile::SubCA` enum
+// with the `BuilderProfile` trait and only ships CA/Browser-Forum and IEEE
+// 802.1AR profiles. The two profiles below reproduce exactly what x509-cert
+// 0.2 emitted for anodize's root and intermediate certificates, so issued
+// certificates keep the same extension set, order and criticality:
+//
+//   root:   SubjectKeyIdentifier, BasicConstraints{cA} (critical),
+//           KeyUsage{keyCertSign, cRLSign} (critical)
+//   sub-CA: SubjectKeyIdentifier, AuthorityKeyIdentifier,
+//           BasicConstraints{cA, pathLen} (critical),
+//           KeyUsage{keyCertSign, cRLSign} (critical)
+
+/// Self-signed root CA profile.
+pub struct RootCaProfile {
+    subject: Name,
+}
+
+impl RootCaProfile {
+    pub fn new(subject: Name) -> Self {
+        Self { subject }
+    }
+}
+
+impl BuilderProfile for RootCaProfile {
+    fn get_issuer(&self, subject: &Name) -> Name {
+        subject.clone()
+    }
+
+    fn get_subject(&self) -> Name {
+        self.subject.clone()
+    }
+
+    fn build_extensions(
+        &self,
+        spk: SubjectPublicKeyInfoRef<'_>,
+        _issuer_spk: SubjectPublicKeyInfoRef<'_>,
+        tbs: &TbsCertificate,
+    ) -> x509_cert::builder::Result<Vec<Extension>> {
+        let subject = tbs.subject();
+        let mut extensions: Vec<Extension> = Vec::new();
+
+        let skid = SubjectKeyIdentifier::try_from(spk)?;
+        extensions.push((false, &skid).to_extension(subject, &extensions)?);
+
+        let bc = BasicConstraints {
+            ca: true,
+            path_len_constraint: None,
+        };
+        extensions.push((true, &bc).to_extension(subject, &extensions)?);
+
+        let ku = KeyUsage(KeyUsages::KeyCertSign | KeyUsages::CRLSign);
+        extensions.push((true, &ku).to_extension(subject, &extensions)?);
+
+        Ok(extensions)
+    }
+}
+
+/// Intermediate (subordinate) CA profile, issued by `issuer`.
+pub struct SubCaProfile {
+    issuer: Name,
+    subject: Name,
+    path_len_constraint: Option<u8>,
+}
+
+impl SubCaProfile {
+    pub fn new(issuer: Name, subject: Name, path_len_constraint: Option<u8>) -> Self {
+        Self {
+            issuer,
+            subject,
+            path_len_constraint,
+        }
+    }
+}
+
+impl BuilderProfile for SubCaProfile {
+    fn get_issuer(&self, _subject: &Name) -> Name {
+        self.issuer.clone()
+    }
+
+    fn get_subject(&self) -> Name {
+        self.subject.clone()
+    }
+
+    fn build_extensions(
+        &self,
+        spk: SubjectPublicKeyInfoRef<'_>,
+        issuer_spk: SubjectPublicKeyInfoRef<'_>,
+        tbs: &TbsCertificate,
+    ) -> x509_cert::builder::Result<Vec<Extension>> {
+        let subject = tbs.subject();
+        let mut extensions: Vec<Extension> = Vec::new();
+
+        let skid = SubjectKeyIdentifier::try_from(spk)?;
+        extensions.push((false, &skid).to_extension(subject, &extensions)?);
+
+        // keyIdentifier = key identifier of the issuer's public key
+        // (RFC 5280 §4.2.1.1 method 1), as x509-cert 0.2 derived it.
+        let akid = AuthorityKeyIdentifier {
+            key_identifier: Some(SubjectKeyIdentifier::try_from(issuer_spk)?.0),
+            authority_cert_issuer: None,
+            authority_cert_serial_number: None,
+        };
+        extensions.push((false, &akid).to_extension(subject, &extensions)?);
+
+        let bc = BasicConstraints {
+            ca: true,
+            path_len_constraint: self.path_len_constraint,
+        };
+        extensions.push((true, &bc).to_extension(subject, &extensions)?);
+
+        let ku = KeyUsage(KeyUsages::KeyCertSign | KeyUsages::CRLSign);
+        extensions.push((true, &ku).to_extension(subject, &extensions)?);
+
+        Ok(extensions)
+    }
+}
+
 /// Bridges the `Hsm` trait to the x509-cert builder signer API.
 ///
 /// Signing uses `CKM_ECDSA_SHA384`: the full message is passed to the HSM
@@ -234,16 +354,16 @@ pub fn build_root_cert<H: Hsm>(
     use std::time::Duration;
 
     let subject = parse_dn(common_name, organization, country, state)?;
-    let spki = spki::SubjectPublicKeyInfoOwned::from_key(signer.verifying_key())
+    let spki = spki::SubjectPublicKeyInfoOwned::from_key(&signer.verifying_key())
         .map_err(|e| CaError::X509Build(e.to_string()))?;
 
     let validity = Validity::from_now(Duration::from_secs(u64::from(validity_days) * 86400))
         .map_err(|e| CaError::Der(e.to_string()))?;
 
     let serial = generate_serial(&[])?;
-    let builder = CertificateBuilder::new(Profile::Root, serial, validity, subject, spki, signer)?;
+    let builder = CertificateBuilder::new(RootCaProfile::new(subject), serial, validity, spki)?;
 
-    Ok(builder.build::<DerSignature>()?)
+    Ok(builder.build::<_, DerSignature>(signer)?)
 }
 
 /// Verify a CSR's self-signature, dispatching on key type and hash independently.
@@ -375,8 +495,9 @@ pub fn sign_intermediate_csr<H: Hsm>(
     for attr in csr.info.attributes.iter() {
         if attr.oid == ID_EXTENSION_REQ {
             for value in attr.values.iter() {
-                let ext_req: ExtensionReq =
-                    value.decode_as().map_err(|e| CaError::Der(e.to_string()))?;
+                let ext_req = value
+                    .decode_as::<ExtensionReq>()
+                    .map_err(|e| CaError::Der(e.to_string()))?;
                 for ext in &ext_req.0 {
                     if !ALLOWED_EXTENSION_OIDS.contains(&ext.extn_id) {
                         return Err(CaError::CsrExtensionRejected(ext.extn_id.to_string()));
@@ -386,29 +507,25 @@ pub fn sign_intermediate_csr<H: Hsm>(
         }
     }
 
-    let issuer = root_cert.tbs_certificate.subject.clone();
+    let issuer = root_cert.tbs_certificate().subject().clone();
     let serial = generate_serial(existing_serials)?;
     let validity = Validity::from_now(Duration::from_secs(u64::from(validity_days) * 86400))
         .map_err(|e| CaError::Der(e.to_string()))?;
 
     let mut builder = CertificateBuilder::new(
-        Profile::SubCA {
-            issuer,
-            path_len_constraint: path_len,
-        },
+        SubCaProfile::new(issuer, csr.info.subject.clone(), path_len),
         serial,
         validity,
-        csr.info.subject.clone(),
         csr.info.public_key.clone(),
-        signer,
     )?;
 
     if let Some(url) = cdp_url {
         let cdp = build_cdp(url)?;
-        builder.add_extension(&cdp)?;
+        // CRL Distribution Points is non-critical (RFC 5280 §4.2.1.13).
+        builder.add_extension((false, &cdp))?;
     }
 
-    Ok(builder.build::<DerSignature>()?)
+    Ok(builder.build::<_, DerSignature>(signer)?)
 }
 
 /// Map a free-text reason string to an RFC 5280 `CrlReason` code.
@@ -492,7 +609,7 @@ pub fn issue_crl<H: Hsm>(
     let tbs_cert_list = TbsCertList {
         version: Version::V2,
         signature: algorithm.clone(),
-        issuer: root_cert.tbs_certificate.subject.clone(),
+        issuer: root_cert.tbs_certificate().subject().clone(),
         this_update,
         next_update: Some(next_update_time),
         revoked_certificates,
@@ -531,9 +648,8 @@ fn build_crl_extensions(
 
     // Derive key_identifier from the root cert's SubjectKeyIdentifier extension.
     let key_id = root_cert
-        .tbs_certificate
-        .extensions
-        .as_deref()
+        .tbs_certificate()
+        .extensions()
         .and_then(|exts| {
             exts.iter()
                 .find(|ext| ext.extn_id == SubjectKeyIdentifier::OID)
@@ -697,45 +813,52 @@ fn verify_signature_over_tbs(
 
 /// Verify that a root certificate is validly self-signed.
 pub fn verify_root_cert_self_signed(cert: &Certificate) -> Result<(), CaError> {
-    let tbs_bytes = cert.tbs_certificate.to_der()?;
+    let tbs_bytes = cert.tbs_certificate().to_der()?;
     let sig_bytes = cert
-        .signature
+        .signature()
         .as_bytes()
         .ok_or(CaError::CsrSignatureInvalid)?;
-    let spki_der = cert.tbs_certificate.subject_public_key_info.to_der()?;
+    let spki_der = cert.tbs_certificate().subject_public_key_info().to_der()?;
     verify_signature_over_tbs(
         &tbs_bytes,
         sig_bytes,
         &spki_der,
-        cert.signature_algorithm.oid,
+        cert.signature_algorithm().oid,
     )
 }
 
 /// Verify that `cert` was signed by `issuer`.
 pub fn verify_cert_issued_by(cert: &Certificate, issuer: &Certificate) -> Result<(), CaError> {
-    let tbs_bytes = cert.tbs_certificate.to_der()?;
+    let tbs_bytes = cert.tbs_certificate().to_der()?;
     let sig_bytes = cert
-        .signature
+        .signature()
         .as_bytes()
         .ok_or(CaError::CsrSignatureInvalid)?;
-    let spki_der = issuer.tbs_certificate.subject_public_key_info.to_der()?;
+    let spki_der = issuer
+        .tbs_certificate()
+        .subject_public_key_info()
+        .to_der()?;
     verify_signature_over_tbs(
         &tbs_bytes,
         sig_bytes,
         &spki_der,
-        cert.signature_algorithm.oid,
+        cert.signature_algorithm().oid,
     )
 }
 
 /// Verify that a DER-encoded CRL was signed by `issuer`.
 pub fn verify_crl_issued_by(crl_der: &[u8], issuer: &Certificate) -> Result<(), CaError> {
-    let crl = CertificateList::from_der(crl_der).map_err(|e| CaError::Der(e.to_string()))?;
+    let crl: CertificateList =
+        CertificateList::from_der(crl_der).map_err(|e| CaError::Der(e.to_string()))?;
     let tbs_bytes = crl.tbs_cert_list.to_der()?;
     let sig_bytes = crl
         .signature
         .as_bytes()
         .ok_or(CaError::CsrSignatureInvalid)?;
-    let spki_der = issuer.tbs_certificate.subject_public_key_info.to_der()?;
+    let spki_der = issuer
+        .tbs_certificate()
+        .subject_public_key_info()
+        .to_der()?;
     verify_signature_over_tbs(
         &tbs_bytes,
         sig_bytes,
@@ -746,7 +869,8 @@ pub fn verify_crl_issued_by(crl_der: &[u8], issuer: &Certificate) -> Result<(), 
 
 /// Extract the CRL number from a DER-encoded CRL, if present.
 pub fn extract_crl_number(crl_der: &[u8]) -> Result<Option<u64>, CaError> {
-    let crl = CertificateList::from_der(crl_der).map_err(|e| CaError::Der(e.to_string()))?;
+    let crl: CertificateList =
+        CertificateList::from_der(crl_der).map_err(|e| CaError::Der(e.to_string()))?;
     if let Some(exts) = &crl.tbs_cert_list.crl_extensions {
         for ext in exts {
             if ext.extn_id == CrlNumber::OID {
