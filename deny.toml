@@ -23,9 +23,6 @@ wildcards = "allow"  # intra-workspace path deps have no version by design
 
 [advisories]
 ignore = [
-    # paste is a transitive dep of cryptoki; RUSTSEC-2024-0436 flags it as
-    # unmaintained but it has no known vulnerability — acceptable for now.
-    "RUSTSEC-2024-0436",
     # Marvin Attack: RSA timing side-channel in the `rsa` crate (transitive
     # through yubihsm). No patch available. Risk is acceptable: the ceremony
     # runs air-gapped; the rsa crate is used only for RSA key-format handling
